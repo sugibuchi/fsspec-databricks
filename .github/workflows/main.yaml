@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   test:
-    name: Test with the latest Python version
+    name: Test Python package
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
@@ -29,7 +29,7 @@ jobs:
     secrets: inherit
 
   cross_version_test:
-    name: Test with the older Python versions
+    name: Test Python package (Cross version)
     if: ${{ github.ref_name == 'main' || inputs.run-cross-version-tests || github.event_name == 'release' }}
     strategy:
       matrix:
@@ -44,36 +44,16 @@ jobs:
       coverage: false
     secrets: inherit
 
-  build:
-    name: Build distribution packages
-    if: ${{ github.event_name == 'release' }}
+  publish:
+    name: Publish Python package
+    if: ${{ github.event_name == 'release' && !cancelled() }}
     needs:
       - test
       - cross_version_test
-    uses: ./.github/workflows/build.yaml
+    uses: ./.github/workflows/publish.yaml
     with:
+      environment: "pypi"
       python-version: "3.14"
-
-  publish:
-    name: Publish package distributions to PyPI
-    if: ${{ github.event_name == 'release' }}
-    needs:
-      - build
-    runs-on: ubuntu-latest
-    environment:
-      name: "pypi"
-      url: "https://pypi.org/project/fsspec-databricks"
     permissions:
       id-token: write
-
-    steps:
-      - name: Download the distribution package
-        uses: actions/download-artifact@v6
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish package distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: ${{ vars.REPOSITORY_URL }}
+      contents: read

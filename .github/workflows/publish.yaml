@@ -1,0 +1,43 @@
+name: Publish Python package
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "The environment to publish to. Should be either 'pypi' or 'testpypi'."
+        type: string
+        required: true
+      python-version:
+        description: "The Python version to use for building and publishing the package."
+        type: string
+        required: true
+
+concurrency:
+  group: "publish-${{ github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish Python package to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build Python package
+        run: uv build
+
+      - name: Publish Python package
+        run: uv publish --publish-url ${{ vars.PUBLISH_URL }}
