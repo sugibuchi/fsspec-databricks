@@ -61,8 +61,6 @@ jobs:
       python-version: "3.14"
       environment: "pypi"
       project-url: "https://pypi.org/project/fsspec-databricks"
-    permissions:
-      id-token: write
 
   test-publish:
     name: Publish package distributions to PyPI
@@ -72,5 +70,3 @@ jobs:
       python-version: "3.14"
       environment: "test-pypi"
       project-url: "https://test.pypi.org/project/fsspec-databricks"
-    permissions:
-      id-token: write
