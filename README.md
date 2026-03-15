@@ -1,6 +1,6 @@
 # File system interface for Databricks file system"s"
 
-[![codecov](https://codecov.io/github/sugibuchi/fsspec-databricks/graph/badge.svg?token=a6hCBLQbox)](https://codecov.io/github/sugibuchi/fsspec-databricks)
+[![codecov](https://codecov.io/github/sugibuchi/fsspec-databricks/graph/badge.svg?token=RKC8T20CEE)](https://codecov.io/github/sugibuchi/fsspec-databricks)
 
 `fsspec-databricks` provides a [`fsspec`](https://github.com/fsspec/filesystem_spec) compliant, unified file system
 interface for accessing the following file
