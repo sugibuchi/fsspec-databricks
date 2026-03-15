@@ -1,5 +1,8 @@
 name: Test and publish Python package
 
+env:
+  TARGET_PYTHON_VERSION: "3.14"
+
 on:
   workflow_dispatch:
     inputs:
@@ -24,7 +27,7 @@ jobs:
     name: Test with the latest Python version
     uses: ./.github/workflows/test.yaml
     with:
-      python-version: "3.14"
+      python-version: ${{ env.TARGET_PYTHON_VERSION }}
       coverage: ${{ github.ref_name == 'main' }}
     secrets: inherit
 
@@ -43,3 +46,11 @@ jobs:
       python-version: ${{ matrix.python-version }}
       coverage: false
     secrets: inherit
+
+  build:
+    name: Build package distributions
+    needs:
+      - test
+    uses: ./.github/workflows/build.yaml
+    with:
+      python-version: ${{ env.TARGET_PYTHON_VERSION }}
