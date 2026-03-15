@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run-cross-version-tests:
-        description: "Whether to run cross-version tests (only on main branch)"
+        description: "Whether to run cross-version tests"
         type: boolean
         required: false
         default: false
@@ -43,3 +43,37 @@ jobs:
       python-version: ${{ matrix.python-version }}
       coverage: false
     secrets: inherit
+
+  build:
+    name: Build distribution packages
+    if: ${{ github.event_name == 'release' }}
+    needs:
+      - test
+      - cross_version_test
+    uses: ./.github/workflows/build.yaml
+    with:
+      python-version: "3.14"
+
+  publish:
+    name: Publish package distributions to PyPI
+    if: ${{ github.event_name == 'release' }}
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    environment:
+      name: "pypi"
+      url: "https://pypi.org/project/fsspec-databricks"
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download the distribution package
+        uses: actions/download-artifact@v6
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish package distributions to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ vars.REPOSITORY_URL }}
