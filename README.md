@@ -132,7 +132,7 @@ with fs.open("dbfs:/Volumes/...") as f:
     ...
 ```
 
-### "=Via constructor parameters
+### Via constructor parameters
 
 You can programmatically configure authentication by passing parameters to `DatabricksFileSystem` constructor.
 
