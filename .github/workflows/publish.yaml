@@ -40,4 +40,4 @@ jobs:
         run: uv build
 
       - name: Publish Python package
-        run: uv publish --publish-url ${{ vars.PUBLISH_URL }}
+        run: uv publish
