@@ -1,0 +1,41 @@
+name: Actions for push events
+
+on:
+  push:
+    paths-ignore:
+      - "README.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/*"
+    tags-ignore:
+      - "v*"
+      - "releases/*"
+
+concurrency:
+  group: "on-push-${{ github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test Python package
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: "3.14"
+      coverage: ${{ github.ref_name == 'main' }}
+    secrets: inherit
+
+  cross_version_test:
+    name: Test Python package (Cross version)
+    if: ${{ github.ref_name == 'main' }}
+    strategy:
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: ${{ matrix.python-version }}
+      coverage: false
+    secrets: inherit
