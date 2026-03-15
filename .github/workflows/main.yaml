@@ -1,16 +1,10 @@
 name: Test and publish Python package
 
-
 on:
   workflow_dispatch:
     inputs:
       run-cross-version-tests:
         description: "Whether to run cross-version tests"
-        type: boolean
-        required: false
-        default: false
-      test-publish:
-        description: "Whether to run publish tests"
         type: boolean
         required: false
         default: false
@@ -28,7 +22,6 @@ concurrency:
 jobs:
   test:
     name: Test with the latest Python version
-    if: ${{ !inputs.test-publish }}
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
@@ -53,6 +46,7 @@ jobs:
 
   build:
     name: Build distribution packages
+    if: ${{ github.event_name == 'release' }}
     needs:
       - test
       - cross_version_test
@@ -82,35 +76,4 @@ jobs:
       - name: Publish package distributions to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          repository-url: ${{ vars.REPOSITORY_URL }}
-
-  test-build:
-    name: Build distribution packages
-    if: ${{ inputs.test-publish }}
-    uses: ./.github/workflows/build.yaml
-    with:
-      python-version: "3.14"
-
-  test-publish:
-    name: Publish package distributions to PyPI
-    needs:
-      - test-build
-    runs-on: ubuntu-latest
-    environment:
-      name: "test-pypi"
-      url: "https://test.pypi.org/project/fsspec-databricks"
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download the distribution package
-        uses: actions/download-artifact@v6
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Publish package distributions to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          verbose: true
           repository-url: ${{ vars.REPOSITORY_URL }}
