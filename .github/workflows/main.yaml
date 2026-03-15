@@ -9,11 +9,11 @@ on:
         required: false
         default: false
 
-#  push: { }
-#
-#  release:
-#    types:
-#      - published
+  push: { }
+
+  release:
+    types:
+      - published
 
 concurrency:
   group: "main-${{ github.ref_name }}"
