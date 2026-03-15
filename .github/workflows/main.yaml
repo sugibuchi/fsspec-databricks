@@ -50,46 +50,50 @@ jobs:
       coverage: false
     secrets: inherit
 
+  build:
+    name: Build distribution packages
+    needs:
+      - test
+      - cross_version_test
+    uses: ./.github/workflows/build.yaml
+    with:
+      python-version: "3.14"
+
   publish:
     name: Publish package distributions to PyPI
     if: ${{ github.event_name == 'release' }}
+    needs:
+      - build
     runs-on: ubuntu-latest
     environment:
       name: "pypi"
       url: "https://pypi.org/project/fsspec-databricks"
-    needs:
-      - test
-      - cross_version_test
     permissions:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Download the distribution package
+        uses: actions/download-artifact@v6
         with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install the project
-        run: uv sync
-
-      - name: Build package distributions
-        run: uv build
+          name: python-package-distributions
+          path: dist/
 
       - name: Publish package distributions to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: ${{ vars.REPOSITORY_URL }}
 
+  test-build:
+    name: Build distribution packages
+    if: ${{ inputs.test-publish }}
+    uses: ./.github/workflows/build.yaml
+    with:
+      python-version: "3.14"
+
   test-publish:
     name: Publish package distributions to PyPI
-    if: ${{ inputs.test-publish }}
+    needs:
+      - test-build
     runs-on: ubuntu-latest
     environment:
       name: "test-pypi"
@@ -98,23 +102,11 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - name: Download the distribution package
+        uses: actions/download-artifact@v6
         with:
-          python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install the project
-        run: uv sync
-
-      - name: Build package distributions
-        run: uv build
+          name: python-package-distributions
+          path: dist/
 
       - name: Publish package distributions to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
