@@ -1,0 +1,45 @@
+name: Test and publish Python package
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-cross-version-tests:
+        description: "Whether to run cross-version tests (only on main branch)"
+        type: boolean
+        required: false
+        default: false
+
+  push: { }
+
+  release:
+    types:
+      - published
+
+concurrency:
+  group: "main-${{ github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test with the latest Python version
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: "3.14"
+      coverage: ${{ github.ref_name == 'main' }}
+    secrets: inherit
+
+  cross_version_test:
+    name: Test with the older Python versions
+    if: ${{ github.ref_name == 'main' || inputs.run-cross-version-tests || github.event_name == 'release' }}
+    strategy:
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: ${{ matrix.python-version }}
+      coverage: false
+    secrets: inherit

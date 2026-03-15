@@ -1,0 +1,108 @@
+name: Test Python package
+run-name: Test Python package with Python ${{ inputs.python-version }}
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        type: string
+        required: true
+      coverage:
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      DATABRICKS_HOST:
+        required: true
+      DATABRICKS_CLIENT_ID:
+        required: true
+      DATABRICKS_CLIENT_SECRET:
+        required: true
+
+concurrency:
+  group: "test-${{ github.ref_name }}-${{ inputs.python-version }}"
+  cancel-in-progress: false
+
+jobs:
+
+  test:
+    name: Test Python package
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install the project
+        run: uv sync
+
+      - name: Set up env variables for working directories
+        shell: bash
+        run: |
+          test_path="${{ github.ref_name }}/${{ inputs.python-version }}"
+
+          has_error=no          
+          if [[ "${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}" == "" ]]; then
+            echo "GitHub Actions variable FSSPEC_DATABRICKS_VOLUME_TEST_ROOT must be set."
+            has_error=yes
+          else
+            echo "FSSPEC_DATABRICKS_VOLUME_TEST_ROOT=${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}/${test_path}" >> $GITHUB_ENV
+          fi
+
+          if [[ "${{ vars.FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT }}" == "" ]]; then
+            echo "GitHub Actions variable FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT must be set."
+            has_error=yes
+          else
+            echo "FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT=${{ vars.FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT }}/${test_path}" >> $GITHUB_ENV
+          fi
+
+          if [[ "$has_error" = "yes" ]]; then
+            exit 1
+          fi
+
+      - name: Run test
+        if: ${{ !inputs.coverage }}
+        shell: bash
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+        run: |
+          uv run pytest
+
+      - name: Run test with coverage
+        if: ${{ inputs.coverage }}
+        shell: bash
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+        run: |
+          uv run pytest --cov \
+              --cov-report=term \
+              --cov-report=xml:coverage.xml \
+              --junitxml=junit.xml \
+              -o junit_family=legacy
+
+      - name: Upload coverage to Codecov
+        if: ${{ inputs.coverage && !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: coverage
+
+      - name: Upload test results to Codecov
+        if: ${{ inputs.coverage && !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results

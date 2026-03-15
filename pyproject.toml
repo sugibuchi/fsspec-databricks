@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling>=1.27.0", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fsspec-databricks"
+dynamic = ["version"]
+description = "`fsspec`-based file system interface for Databricks file system\"s\""
+authors = [
+    { name = "Tsuyoshi SUGIBUCHI", email = "sugibuchi@gmail.com" }
+]
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+
+requires-python = ">=3.10"
+
+keywords = [
+    "fsspec",
+    "databricks",
+    "filesystem",
+]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+
+dependencies = [
+    "fsspec",
+    "databricks-sdk",
+    "aiohttp",
+]
+
+[project.urls]
+Homepage = "https://github.com/sugibuchi/fsspec-databricks"
+
+[dependency-groups]
+dev = [
+    "pre-commit",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "fastapi",
+    "hypercorn",
+    "ipykernel",
+    "python-dotenv",
+]
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(name)28s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+[tool.coverage.run]
+source = [
+    "src/",
+]
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { 'version_scheme' = 'post-release' }
+
+[tool.ruff]
+exclude = [
+    ".tox",
+    "build",
+    "docs/source/conf.py",
+    "fsspec_databricks/_version",
+]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "ASYNC",
+    "B",
+    "C",
+    "G",
+    "E",
+    "F",
+    "FURB",
+    "I",
+    "LOG",
+    "PERF",
+    "PLC",
+    "PLE",
+    "PLR",
+    "PLW",
+    "PIE",
+    "PYI",
+    "RUF",
+    "SIM",
+    "SLOT",
+    "TC",
+    "UP",
+]
+ignore = [
+    "E501",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "SIM117",
+]
