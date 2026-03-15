@@ -1,0 +1,21 @@
+name: Actions for release events
+
+on:
+  release:
+    types:
+      - published
+
+concurrency:
+  group: "on-release-${{ github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish Python package
+    uses: ./.github/workflows/publish.yaml
+    with:
+      environment: "pypi"
+      python-version: "3.14"
+    permissions:
+      id-token: write
+      contents: read
