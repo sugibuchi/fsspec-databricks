@@ -1,4 +1,4 @@
-name: Main workflow triggered on every push
+name: Test and publish Python package
 
 on:
   workflow_dispatch:
@@ -9,7 +9,11 @@ on:
         required: false
         default: false
 
-  push: { }
+#  push: { }
+#
+#  release:
+#    types:
+#      - published
 
 concurrency:
   group: "main-${{ github.ref_name }}"
@@ -17,7 +21,7 @@ concurrency:
 
 jobs:
   test:
-    name: Test with the latest Python version
+    name: Test Python package
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
@@ -25,8 +29,8 @@ jobs:
     secrets: inherit
 
   cross_version_test:
-    name: Test with the older Python versions
-    if: ${{ github.ref_name == 'main' || inputs.run-cross-version-tests }}
+    name: Test Python package (Cross version)
+    if: ${{ github.ref_name == 'main' || inputs.run-cross-version-tests || github.event_name == 'release' }}
     strategy:
       matrix:
         python-version:
@@ -39,3 +43,17 @@ jobs:
       python-version: ${{ matrix.python-version }}
       coverage: false
     secrets: inherit
+
+  publish:
+    name: Publish Python package
+    if: ${{ github.event_name == 'release' && !cancelled() }}
+    needs:
+      - test
+      - cross_version_test
+    uses: ./.github/workflows/publish.yaml
+    with:
+      environment: "pypi"
+      python-version: "3.14"
+    permissions:
+      id-token: write
+      contents: read

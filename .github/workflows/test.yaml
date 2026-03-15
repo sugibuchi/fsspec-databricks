@@ -1,13 +1,15 @@
 name: Test Python package
-run-name: Test Python package with Python ${{ inputs.python-version }}
+run-name: Test the Python package
 
 on:
   workflow_call:
     inputs:
       python-version:
+        description: "The Python version to use for testing the package."
         type: string
         required: true
       coverage:
+        description: "Whether to run tests with coverage reporting."
         type: boolean
         required: false
         default: false

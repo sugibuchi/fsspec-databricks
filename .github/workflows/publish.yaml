@@ -1,23 +1,27 @@
-name: Publish released Python package
+name: Publish Python package
 
 on:
-  release:
-    types:
-      - published
+  workflow_call:
+    inputs:
+      environment:
+        description: "The environment to publish to. Should be either 'pypi' or 'testpypi'."
+        type: string
+        required: true
+      python-version:
+        description: "The Python version to use for building and publishing the package."
+        type: string
+        required: true
 
 concurrency:
-  group: "main-${{ github.ref_name }}"
+  group: "publish-${{ github.ref_name }}"
   cancel-in-progress: true
 
 jobs:
   publish:
-    name: Publish package distributions to PyPI
+    name: Publish Python package to PyPI
     runs-on: ubuntu-latest
     environment:
-      name: "testpypi"
-    permissions:
-      id-token: write
-      contents: read
+      name: ${{ inputs.environment }}
 
     steps:
       - uses: actions/checkout@v6
@@ -25,15 +29,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: ${{ inputs.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
-      - name: Build distribution packages
+      - name: Build Python package
         run: uv build
 
-      - name: Publish distribution packages
+      - name: Publish Python package
         run: uv publish --publish-url ${{ vars.PUBLISH_URL }}
