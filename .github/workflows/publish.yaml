@@ -1,0 +1,39 @@
+name: Publish released Python package
+
+on:
+  release:
+    types:
+      - published
+
+concurrency:
+  group: "main-${{ github.ref_name }}"
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish package distributions to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: "testpypi"
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Build distribution packages
+        run: uv build
+
+      - name: Publish distribution packages
+        run: uv publish --publish-url ${{ vars.PUBLISH_URL }}
