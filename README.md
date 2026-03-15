@@ -1,6 +1,6 @@
 # fsspec-databricks
 
-![PyPI - Version](https://img.shields.io/pypi/v/fsspec-databricks)
+![PyPI - Version](https://img.shields.io/pypi/v/fsspec-databricks?color=blue)
 [![codecov](https://codecov.io/github/sugibuchi/fsspec-databricks/graph/badge.svg?token=RKC8T20CEE)](https://codecov.io/github/sugibuchi/fsspec-databricks)
 
 File system interface for Databricks file system"s".
@@ -36,11 +36,18 @@ and supports copying and streaming between them.
 
 ## Getting started
 
-You can install `fsspec-databricks` from PyPI.
+### Installation
+
+You can install [`fsspec-databricks`](https://pypi.org/project/fsspec-databricks/) from PyPI.
 
 ```bash
+# with pip
 pip install fsspec-databricks
+# with UV
+uv add fsspec-databricks
 ```
+
+### Usage
 
 Then you can directly instantiate `DatabricksFileSystem` in `fsspec_databricks` module.
 
@@ -61,6 +68,8 @@ fsspec_databricks.use()
 
 fs = fsspec.filesystem("dbfs")  # DatabricksFileSystem
 ```
+
+For more details on how to use the fsspec file system objects, see [fsspec's documentation](https://filesystem-spec.readthedocs.io/en/latest/usage.html).
 
 ### Supported file paths
 
