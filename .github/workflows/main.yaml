@@ -5,7 +5,12 @@ on:
   workflow_dispatch:
     inputs:
       run-cross-version-tests:
-        description: "Whether to run cross-version tests (only on main branch)"
+        description: "Whether to run cross-version tests"
+        type: boolean
+        required: false
+        default: false
+      test-publish:
+        description: "Whether to run publish tests"
         type: boolean
         required: false
         default: false
@@ -45,10 +50,27 @@ jobs:
       coverage: false
     secrets: inherit
 
-  build:
-    name: Build package distributions
+  publish:
+    name: Publish package distributions to PyPI
+    if: ${{ github.event_name == 'release' }}
     needs:
       - test
-    uses: ./.github/workflows/build.yaml
+      - cross_version_test
+    uses: ./.github/workflows/publish.yaml
     with:
       python-version: "3.14"
+      environment: "pypi"
+      project-url: "https://pypi.org/project/fsspec-databricks"
+    permissions:
+      id-token: write
+
+  test-publish:
+    name: Publish package distributions to PyPI
+    if: ${{ inputs.test-publish }}
+    uses: ./.github/workflows/publish.yaml
+    with:
+      python-version: "3.14"
+      environment: "test-pypi"
+      project-url: "https://test.pypi.org/project/fsspec-databricks"
+    permissions:
+      id-token: write
