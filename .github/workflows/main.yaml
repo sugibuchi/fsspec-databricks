@@ -28,6 +28,7 @@ concurrency:
 jobs:
   test:
     name: Test with the latest Python version
+    if: ${{ !inputs.test-publish }}
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
