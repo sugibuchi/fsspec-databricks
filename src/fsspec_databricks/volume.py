@@ -36,7 +36,7 @@ from .file import (
 )
 from .http import AioHttpClientMixin
 from .path import dbfs_root, parse_volume_path, volumes_root
-from .utils import to_datetime
+from .utils import to_datetime, to_rfc3339
 
 volumes_root_info = {
     "name": volumes_root,
@@ -484,6 +484,16 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
     If `None` or `0` is given, no timeout will be applied.
     See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
+    min_presigned_url_size: int = 1024 * 1024
+    """The minimum file size to use presigned URLs for reading the file content. If the file size is smaller
+    than this threshold, the file content will be read from the Files API without using presigned URLs."""
+
+    presigned_url_expiration_duration: int = 60  # min
+    """The duration in minutes for which the presigned URLs are valid."""
+
+    presigned_url_refresh_after: int = 30  # min
+    """The duration in minutes after which the presigned URL should be refreshed."""
+
     def __init__(
         self,
         path: str,
@@ -494,6 +504,7 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
         min_block_size: int | None = None,
         max_block_size: int | None = None,
         block_size: int | None = None,
+        prefer_presigned_url: bool = True,
         verbose_debug_log: bool | None = None,
     ):
         super().__init__(
@@ -520,10 +531,81 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
 
         _, _, _, _, self._posix_path = parse_volume_path(path)
 
+        self._auth = _workspace_authenticator(workspace_config)
+
+        self.use_presigned_url = (
+            prefer_presigned_url and size >= self.min_presigned_url_size
+        )
+
+        self._presigned_url: str | None = None
+        self._presigned_url_headers: dict[str, str] | None = None
+        self._presigned_url_refresh_time: datetime | None = None
+
+        self._presigned_url_expiration_duration = timedelta(
+            minutes=self.presigned_url_expiration_duration
+        )
+        self._presigned_url_refresh_after = timedelta(
+            minutes=self.presigned_url_refresh_after
+        )
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    async def _get_presigned_url(self) -> tuple[str, dict[str, str]]:
+        """Get the presigned URL for reading the file content.
+
+        If the current presigned URL is expired or not exists, a new presigned URL will be created."""
+
+        async with self._lock:
+            if (
+                self._presigned_url is None
+                or datetime.now(tz=timezone.utc) > self._presigned_url_refresh_time
+            ):
+                now = datetime.now(tz=timezone.utc)
+                expire_time = now + self._presigned_url_expiration_duration
+                refresh_time = now + self._presigned_url_refresh_after
+
+                async with self._session.post(
+                    "/api/2.0/fs/create-download-url",
+                    params={
+                        "path": self._posix_path,
+                        "expire_time": to_rfc3339(expire_time),
+                    },
+                    middlewares=(self._auth,),
+                ) as response:
+                    result = await response.json()
+                    try:
+                        response.raise_for_status()
+                    except:
+                        self.log.error(
+                            "Failed to create presigned URL: path=%s, response=%s",
+                            self.path,
+                            result,
+                        )
+                        raise
+
+                    self._presigned_url = result["url"]
+                    self._presigned_url_headers = {
+                        h["name"]: h["value"] for h in result.get("headers", {}).items()
+                    }
+                    self._presigned_url_refresh_time = refresh_time
+                    self.log.debug("Created presigned URL: path=%s", self.path)
+
+        return self._presigned_url, self._presigned_url_headers
+
     async def _fetch_range(self, start: int, end: int) -> bytes:
+        if self.use_presigned_url:
+            path, headers = await self._get_presigned_url()
+            middlewares = ()
+        else:
+            path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            headers = {}
+            middlewares = (self._auth,)
+
+        headers["Range"] = f"bytes={start}-{end - 1}"
+
         async with self._session.get(
-            f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
-            headers={"Range": f"bytes={start}-{end - 1}"},
+            path,
+            headers=headers,
+            middlewares=middlewares,
         ) as response:
             response.raise_for_status()
             return await response.read()
@@ -605,8 +687,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         self._session_token: str | None = None
 
     def _url_expire_time(self) -> str:
-        expiration_time = datetime.now(tz=timezone.utc) + self.url_expiration_duration
-        return expiration_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return to_rfc3339(datetime.now(tz=timezone.utc) + self.url_expiration_duration)
 
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(

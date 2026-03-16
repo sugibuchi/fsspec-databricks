@@ -13,7 +13,7 @@ from databricks.sdk.service.files import GetMetadataResponse
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.path import parse_volume_path
-from fsspec_databricks.volume import VolumeFileSystem
+from fsspec_databricks.volume import VolumeFileSystem, VolumeReadableFile
 
 from .utils import bytes_sig
 
@@ -685,12 +685,21 @@ def test_volume_fs_open_r(
     )
     fs = fs_class(client=client, verbose_debug_log=True)
 
-    read_data = bytearray()
-    with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="rb") as f:
-        while chunk := f.read(1234 * 1000):
-            read_data.extend(chunk)
+    backup = VolumeReadableFile.min_presigned_url_size
+    try:
+        # Try both reading from presigned URL and reading directly from Files API
+        for min_size, use_presigned_url in [(len(data), True), (len(data) + 1, False)]:
+            VolumeReadableFile.min_presigned_url_size = min_size
 
-    assert bytes_sig(data) == bytes_sig(read_data)
+            read_data = bytearray()
+            with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="rb") as f:
+                while chunk := f.read(1234 * 1000):
+                    read_data.extend(chunk)
+
+            assert f.use_presigned_url == use_presigned_url
+            assert bytes_sig(data) == bytes_sig(read_data)
+    finally:
+        VolumeReadableFile.min_presigned_url_size = backup
 
     with pytest.raises(IsADirectoryError):
         fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="rb")

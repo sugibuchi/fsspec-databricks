@@ -21,6 +21,11 @@ def to_datetime(timestamp: float | str | None, is_ms: bool = True) -> datetime |
         raise ValueError(f"Cannot convert timestamp {timestamp} to datetime")
 
 
+def to_rfc3339(dt: datetime) -> str:
+    """Convert a datetime object to an RFC 3339 formatted string."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 ENUM = TypeVar("ENUM", bound=Enum)
 
 
@@ -44,5 +49,6 @@ def value_of(value: Any, enum_class: type[ENUM]) -> ENUM | None:
 
 __all__ = [
     "to_datetime",
+    "to_rfc3339",
     "value_of",
 ]
