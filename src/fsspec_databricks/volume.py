@@ -656,6 +656,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         max_block_size: int | None = None,
         min_multipart_upload_size: int | None = None,
         block_size: int | None = None,
+        use_presigned_url: bool = True,
         verbose_debug_log: bool | None = None,
     ):
         super().__init__(
@@ -668,7 +669,6 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             block_size=block_size,
             verbose_debug_log=verbose_debug_log,
         )
-        self._auth = _workspace_authenticator(workspace_config)
         self._upload_part_timeout = ClientTimeout(
             total=self.timeout_total,
             connect=self.timeout_connect,
@@ -680,11 +680,14 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
         _, _, _, _, self._posix_path = parse_volume_path(path)
 
+        self._auth = _workspace_authenticator(workspace_config)
+
+        self._session_token: str | None = None
+
+        self.use_presigned_url = use_presigned_url
         self.url_expiration_duration = timedelta(
             minutes=self.url_expiration_duration_min
         )
-
-        self._session_token: str | None = None
 
     def _url_expire_time(self) -> str:
         return to_rfc3339(datetime.now(tz=timezone.utc) + self.url_expiration_duration)
@@ -717,45 +720,62 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     async def _upload_part(
         self, data: bytes, start: int, end: int, part_index: int
     ) -> tuple[int, str]:
-        async with self._session.post(
-            "/api/2.0/fs/create-upload-part-urls",
-            json={
-                "path": self._posix_path,
-                "session_token": self._session_token,
-                "start_part_number": part_index + 1,
-                "count": 1,
-                "expire_time": self._url_expire_time(),
-            },
-            middlewares=(self._auth,),
-        ) as response:
-            result = await response.json()
-            try:
-                response.raise_for_status()
-            except:
-                self.log.error(
-                    "Failed to get URL for part upload: path=%s, response=%s",
-                    self.path,
-                    result,
-                )
-                raise
+        # Add 1 as part_number used by the multipart upload API is 1-based index
+        # while the part_index used in the code is 0-based.
+        part_number = part_index + 1
 
-        upload_url = result["upload_part_urls"][0]["url"]
-        headers = {"Content-Type": "application/octet-stream"}
-        headers.update(
-            {
+        if self.use_presigned_url:
+            async with self._session.post(
+                "/api/2.0/fs/create-upload-part-urls",
+                json={
+                    "path": self._posix_path,
+                    "session_token": self._session_token,
+                    "start_part_number": part_number,
+                    "count": 1,
+                    "expire_time": self._url_expire_time(),
+                },
+                middlewares=(self._auth,),
+            ) as response:
+                result = await response.json()
+                try:
+                    response.raise_for_status()
+                except:
+                    self.log.error(
+                        "Failed to get URL for part upload: path=%s, response=%s",
+                        self.path,
+                        result,
+                    )
+                    raise
+
+            path = result["upload_part_urls"][0]["url"]
+            headers = {
                 h["name"]: h["value"]
                 for h in result["upload_part_urls"][0].get("headers", [])
             }
-        )
+            params = None
+            middlewares = ()
+        else:
+            path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            headers = {}
+            params = {
+                "session_token": self._session_token,
+                "upload_type": "multipart",
+                "part_number": part_number,
+            }
+            middlewares = (self._auth,)
+
+        headers["Content-Type"] = "application/octet-stream"
 
         async with self._session.put(
-            upload_url,
+            path,
             headers=headers,
+            params=params,
             data=data,
+            middlewares=middlewares,
             timeout=self._upload_part_timeout,
         ) as response:
             response.raise_for_status()
-            return part_index + 1, response.headers.get("etag", "")
+            return part_number, response.headers.get("etag", "")
 
     async def _complete_multipart_upload(self) -> None:
         parts = [await t for t in self._tasks]
@@ -783,38 +803,50 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 raise
 
     async def _abort_multipart_upload(self) -> None:
-        async with self._session.post(
-            "/api/2.0/fs/create-abort-upload-url",
-            json={
-                "path": self._posix_path,
-                "session_token": self._session_token,
-                "expire_time": self._url_expire_time(),
-            },
-            middlewares=(self._auth,),
-        ) as response:
-            result = await response.json()
-            try:
-                response.raise_for_status()
-            except BadRequest:
-                self.log.warning(
-                    "Failed to get URL for upload abort: path=%s, response=%s",
-                    self.path,
-                    result,
-                )
-                return
+        if self.use_presigned_url:
+            async with self._session.post(
+                "/api/2.0/fs/create-abort-upload-url",
+                json={
+                    "path": self._posix_path,
+                    "session_token": self._session_token,
+                    "expire_time": self._url_expire_time(),
+                },
+                middlewares=(self._auth,),
+            ) as response:
+                result = await response.json()
+                try:
+                    response.raise_for_status()
+                except BadRequest:
+                    self.log.warning(
+                        "Failed to get URL for upload abort: path=%s, response=%s",
+                        self.path,
+                        result,
+                    )
+                    return
 
-        abort_url = result["abort_upload_url"]["url"]
-
-        headers = {"Content-Type": "application/octet-stream"}
-        headers.update(
-            {
+            path = result["abort_upload_url"]["url"]
+            headers = {
                 h["name"]: h["value"]
                 for h in result["abort_upload_url"].get("headers", [])
             }
-        )
+            headers["Content-Type"] = "application/octet-stream"
+            params = None
+            middlewares = ()
+        else:
+            path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            headers = {"Content-Type": "application/json"}
+            params = {
+                "action": "abort-upload",
+                "session_token": self._session_token,
+            }
+            middlewares = (self._auth,)
 
         async with self._session.delete(
-            abort_url, headers=headers, data=b""
+            path,
+            headers=headers,
+            params=params,
+            middlewares=middlewares,
+            data=b"",
         ) as response:
             response.raise_for_status()
 
