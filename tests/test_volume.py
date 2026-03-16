@@ -13,7 +13,11 @@ from databricks.sdk.service.files import GetMetadataResponse
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.path import parse_volume_path
-from fsspec_databricks.volume import VolumeFileSystem
+from fsspec_databricks.volume import (
+    VolumeFileSystem,
+    VolumeReadableFile,
+    VolumeWritableFile,
+)
 
 from .utils import bytes_sig
 
@@ -685,12 +689,21 @@ def test_volume_fs_open_r(
     )
     fs = fs_class(client=client, verbose_debug_log=True)
 
-    read_data = bytearray()
-    with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="rb") as f:
-        while chunk := f.read(1234 * 1000):
-            read_data.extend(chunk)
+    backup = VolumeReadableFile.min_presigned_url_size
+    try:
+        # Try both reading from presigned URL and reading directly from Files API
+        for min_size, use_presigned_url in [(len(data), True), (len(data) + 1, False)]:
+            VolumeReadableFile.min_presigned_url_size = min_size
 
-    assert bytes_sig(data) == bytes_sig(read_data)
+            read_data = bytearray()
+            with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="rb") as f:
+                while chunk := f.read(1234 * 1000):
+                    read_data.extend(chunk)
+
+            assert f.use_presigned_url == use_presigned_url
+            assert bytes_sig(data) == bytes_sig(read_data)
+    finally:
+        VolumeReadableFile.min_presigned_url_size = backup
 
     with pytest.raises(IsADirectoryError):
         fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="rb")
@@ -725,22 +738,34 @@ def test_volume_fs_open_w(
         },
     )
 
-    written_data = randbytes(10 * 1000 * 1000)
-    stream = BytesIO(written_data)
-    with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
-        while chunk := stream.read(1234 * 1000):
-            f.write(chunk)
+    small_data = randbytes(512 * 1023)
+    large_data = randbytes(10 * 1000 * 1000)
 
-    read_data = download(client, f"{test_dir}/1_data.bin")
-    assert bytes_sig(written_data) == bytes_sig(read_data)
+    backup = VolumeWritableFile.min_multipart_upload_size
+    try:
+        for data, min_size, has_session_token in [
+            (small_data, len(small_data) - 1, False),
+            (large_data, len(large_data), True),
+        ]:
+            VolumeWritableFile.min_multipart_upload_size = min_size
+            stream = BytesIO(data)
+            with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+                while chunk := stream.read(1234 * 1000):
+                    f.write(chunk)
+
+            written = download(client, f"{test_dir}/1_data.bin")
+            assert has_session_token == (f._session_token is not None)
+            assert bytes_sig(data) == bytes_sig(written)
+    finally:
+        VolumeWritableFile.min_multipart_upload_size = backup
 
     # Overwrite existing file
     with fs.open(dbfs_url(f"{test_dir}/2_data.bin"), mode="wb") as f:
-        f.write(written_data)
+        f.write(small_data)
 
-    read_data = download(client, f"{test_dir}/2_data.bin")
-    assert bytes_sig(written_data) == bytes_sig(read_data)
+    written = download(client, f"{test_dir}/2_data.bin")
+    assert bytes_sig(small_data) == bytes_sig(written)
 
     with pytest.raises(IsADirectoryError):
         with fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="wb") as f:
-            f.write(written_data)
+            f.write(small_data)

@@ -69,7 +69,8 @@ fsspec_databricks.use()
 fs = fsspec.filesystem("dbfs")  # DatabricksFileSystem
 ```
 
-For more details on how to use the fsspec file system objects, see [fsspec's documentation](https://filesystem-spec.readthedocs.io/en/latest/usage.html).
+For more details on how to use the fsspec file system objects,
+see [fsspec's documentation](https://filesystem-spec.readthedocs.io/en/latest/usage.html).
 
 ### Supported file paths
 
@@ -225,12 +226,9 @@ and enable seamless access to them using the same `dbfs:/` URL scheme supported 
 
 ## Project status
 
-The current status of this library is **early beta**. Its API and behavior are subject to change as the following
-underlying components are not yet released version.
-
-* Databricks Python SDK (beta)
-* Unity Catalog Files REST API  (beta)
-* Multipart upload API for Unity Catalog Volume file write (undocumented)
+The current status of this library is **early beta**. Its API and behavior are subject to change during further
+development and testing. In addition, the current version relies on the undocumented multipart upload API for Unity
+Catalog Volume file write, which Databricks does not officially support and may change without notice.
 
 ## Limitations
 
