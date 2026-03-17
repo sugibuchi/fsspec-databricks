@@ -4,6 +4,7 @@ from io import BytesIO, UnsupportedOperation
 from random import randbytes
 from time import perf_counter
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -478,15 +479,7 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
         self._session_token: str | None = None
 
-        self.fail_on_start = False
-        self.fail_on_upload = []
-        self.fail_on_complete = False
-        self.fail_on_abort = False
-
     async def _upload_all(self, data: bytes) -> None:
-        if self.fail_on_start:
-            raise RuntimeError("Dummy error during upload initiation")
-
         async with self._session.put(
             f"/api/2.0/fs/files{self.path}",
             data=data,
@@ -494,9 +487,6 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             response.raise_for_status()
 
     async def _start_multipart_upload(self) -> None:
-        if self.fail_on_start:
-            raise RuntimeError("Dummy error during upload initiation")
-
         async with self._session.post(
             f"/api/2.0/fs/files{self.path}",
             params={"action": "initiate-upload"},
@@ -509,9 +499,6 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     async def _upload_part(
         self, data: bytes, start: int, end: int, part_index: int
     ) -> Any:
-        if part_index in self.fail_on_upload:
-            raise RuntimeError("Dummy error during upload")
-
         async with self._session.post(
             "/api/2.0/fs/create-upload-part-urls",
             json={
@@ -535,9 +522,6 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         parts = [await t for t in self._tasks]
         parts.sort()
 
-        if self.fail_on_complete:
-            raise RuntimeError("Dummy error during upload completion")
-
         async with self._session.post(
             f"/api/2.0/fs/files{self.path}",
             params={
@@ -553,9 +537,6 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             response.raise_for_status()
 
     async def _abort_multipart_upload(self) -> None:
-        if self.fail_on_abort:
-            raise RuntimeError("Dummy error during upload abortion")
-
         async with self._session.post(
             "/api/2.0/fs/create-abort-upload-url",
             json={
@@ -660,91 +641,107 @@ async def test_abstract_async_writable_file_write_with_errors(
     data = randbytes(10 * 1024 * 1024)
     step = 123 * 100
 
-    with pytest.raises(OSError, match=r"Failed to start upload.") as exc_info:
-        with DummyWritableFile(
-            base_url=dummy_api,
-            path="/path/to/file",
-            loop=client_event_loop,
-            block_size=1000 * 1000,
-            max_concurrency=5,
-        ) as file:
-            file.fail_on_start = True
-
-            for i in range(0, len(data), step):
-                file.write(data[i : min(i + step, len(data))])
-
-    org_exc = exc_info.value.__cause__
-    assert isinstance(org_exc, RuntimeError)
-    assert org_exc.args == ("Dummy error during upload initiation",)
-
-    assert not file._multipart_uploading
-    assert not dummy_api_context.files
-    assert not dummy_api_context.upload_sessions
-
-    with pytest.raises(OSError, match="Failed to upload the file"):
-        with DummyWritableFile(
-            base_url=dummy_api,
-            path="/path/to/file",
-            loop=client_event_loop,
-            block_size=1000 * 1000,
-            max_concurrency=5,
-        ) as file:
-            file.fail_on_upload = [1, 3]
-
-            with pytest.raises(OSError) as exc_info:
+    with patch.object(
+        DummyWritableFile,
+        "_start_multipart_upload",
+        side_effect=RuntimeError("Dummy"),
+    ):
+        with pytest.raises(OSError, match=r"Failed to start upload.") as exc_info:
+            with DummyWritableFile(
+                base_url=dummy_api,
+                path="/path/to/file",
+                loop=client_event_loop,
+                block_size=1000 * 1000,
+                max_concurrency=5,
+            ) as file:
                 for i in range(0, len(data), step):
                     file.write(data[i : min(i + step, len(data))])
 
     org_exc = exc_info.value.__cause__
     assert isinstance(org_exc, RuntimeError)
-    assert org_exc.args == ("Dummy error during upload",)
+    assert org_exc.args == ("Dummy",)
 
     assert not file._multipart_uploading
     assert not dummy_api_context.files
     assert not dummy_api_context.upload_sessions
 
-    with pytest.raises(OSError, match=r"Failed to complete upload.") as exc_info:
-        with DummyWritableFile(
-            base_url=dummy_api,
-            path="/path/to/file",
-            loop=client_event_loop,
-            block_size=1000 * 1000,
-            max_concurrency=5,
-        ) as file:
-            file.fail_on_complete = True
-
-            for i in range(0, len(data), step):
-                file.write(data[i : min(i + step, len(data))])
+    with patch.object(
+        DummyWritableFile,
+        "_upload_part",
+        side_effect=RuntimeError("Dummy"),
+    ):
+        with pytest.raises(OSError, match="Failed to upload the file"):
+            with DummyWritableFile(
+                base_url=dummy_api,
+                path="/path/to/file",
+                loop=client_event_loop,
+                block_size=1000 * 1000,
+                max_concurrency=5,
+            ) as file:
+                with pytest.raises(OSError) as exc_info:
+                    for i in range(0, len(data), step):
+                        file.write(data[i : min(i + step, len(data))])
 
     org_exc = exc_info.value.__cause__
     assert isinstance(org_exc, RuntimeError)
-    assert org_exc.args == ("Dummy error during upload completion",)
+    assert org_exc.args == ("Dummy",)
 
     assert not file._multipart_uploading
     assert not dummy_api_context.files
     assert not dummy_api_context.upload_sessions
 
-    with pytest.raises(OSError, match=r"Failed to abort upload") as exc_info:
-        with DummyWritableFile(
-            base_url=dummy_api,
-            path="/path/to/file",
-            loop=client_event_loop,
-            block_size=1000 * 1000,
-            max_concurrency=5,
-        ) as file:
-            file.fail_on_upload = [5]
-            file.fail_on_abort = True
-
-            with pytest.raises(
-                OSError,
-                match=r"blocked due to a previous error during file access.",
-            ):
+    with patch.object(
+        DummyWritableFile,
+        "_complete_multipart_upload",
+        side_effect=RuntimeError("Dummy"),
+    ):
+        with pytest.raises(OSError, match=r"Failed to complete upload.") as exc_info:
+            with DummyWritableFile(
+                base_url=dummy_api,
+                path="/path/to/file",
+                loop=client_event_loop,
+                block_size=1000 * 1000,
+                max_concurrency=5,
+            ) as file:
                 for i in range(0, len(data), step):
                     file.write(data[i : min(i + step, len(data))])
 
     org_exc = exc_info.value.__cause__
     assert isinstance(org_exc, RuntimeError)
-    assert org_exc.args == ("Dummy error during upload abortion",)
+    assert org_exc.args == ("Dummy",)
+
+    assert not file._multipart_uploading
+    assert not dummy_api_context.files
+    assert not dummy_api_context.upload_sessions
+
+    with patch.object(
+        DummyWritableFile,
+        "_upload_part",
+        side_effect=RuntimeError("Dummy1"),
+    ):
+        with patch.object(
+            DummyWritableFile,
+            "_abort_multipart_upload",
+            side_effect=RuntimeError("Dummy2"),
+        ):
+            with pytest.raises(OSError, match=r"Failed to abort upload") as exc_info:
+                with DummyWritableFile(
+                    base_url=dummy_api,
+                    path="/path/to/file",
+                    loop=client_event_loop,
+                    block_size=1000 * 1000,
+                    max_concurrency=5,
+                ) as file:
+                    with pytest.raises(
+                        OSError,
+                        match=r"blocked due to a previous error during file access.",
+                    ):
+                        for i in range(0, len(data), step):
+                            file.write(data[i : min(i + step, len(data))])
+
+    org_exc = exc_info.value.__cause__
+    assert isinstance(org_exc, RuntimeError)
+    assert org_exc.args == ("Dummy2",)
 
     assert not file._multipart_uploading
     assert not dummy_api_context.files
