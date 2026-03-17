@@ -670,7 +670,7 @@ async def test_abstract_async_writable_file_write_with_errors(
         "_upload_part",
         side_effect=RuntimeError("Dummy"),
     ):
-        with pytest.raises(OSError, match="Failed to upload the file"):
+        with pytest.raises(OSError, match="Multipart upload failed and was aborted"):
             with DummyWritableFile(
                 base_url=dummy_api,
                 path="/path/to/file",
