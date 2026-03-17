@@ -2,14 +2,11 @@ name: Actions for push events
 
 on:
   push:
-    paths-ignore:
-      - "README.md"
-      - "LICENSE"
-      - ".gitignore"
-      - ".github/*"
-    tags-ignore:
-      - "v*"
-      - "releases/*"
+    paths:
+      - ".github/**"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
 
 concurrency:
   group: "on-push-${{ github.ref_name }}"

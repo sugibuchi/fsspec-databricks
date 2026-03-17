@@ -5,6 +5,7 @@ import pickle
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from random import randbytes
+from unittest.mock import patch
 
 import pytest
 from databricks.sdk import WorkspaceClient
@@ -689,12 +690,8 @@ def test_volume_fs_open_r(
     )
     fs = fs_class(client=client, verbose_debug_log=True)
 
-    backup = VolumeReadableFile.min_presigned_url_size
-    try:
-        # Try both reading from presigned URL and reading directly from Files API
-        for min_size, use_presigned_url in [(len(data), True), (len(data) + 1, False)]:
-            VolumeReadableFile.min_presigned_url_size = min_size
-
+    for min_size, use_presigned_url in [(len(data), True), (len(data) + 1, False)]:
+        with patch.object(VolumeReadableFile, "min_presigned_url_size", min_size):
             read_data = bytearray()
             with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="rb") as f:
                 while chunk := f.read(1234 * 1000):
@@ -702,8 +699,6 @@ def test_volume_fs_open_r(
 
             assert f.use_presigned_url == use_presigned_url
             assert bytes_sig(data) == bytes_sig(read_data)
-    finally:
-        VolumeReadableFile.min_presigned_url_size = backup
 
     with pytest.raises(IsADirectoryError):
         fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="rb")
@@ -739,15 +734,15 @@ def test_volume_fs_open_w(
     )
 
     small_data = randbytes(512 * 1023)
-    large_data = randbytes(10 * 1000 * 1000)
+    large_data = randbytes(10 * 1024 * 1023)
 
-    backup = VolumeWritableFile.min_multipart_upload_size
-    try:
-        for data, min_size, has_session_token in [
-            (small_data, len(small_data) - 1, False),
-            (large_data, len(large_data), True),
-        ]:
-            VolumeWritableFile.min_multipart_upload_size = min_size
+    for data, min_size, has_session_token in [
+        (small_data, len(small_data) - 1, False),
+        (large_data, len(large_data), True),
+    ]:
+        with patch.object(
+            VolumeWritableFile, "min_multipart_upload_size", min_size
+        ) as _upload_part:
             stream = BytesIO(data)
             with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
                 while chunk := stream.read(1234 * 1000):
@@ -756,8 +751,6 @@ def test_volume_fs_open_w(
             written = download(client, f"{test_dir}/1_data.bin")
             assert has_session_token == (f._session_token is not None)
             assert bytes_sig(data) == bytes_sig(written)
-    finally:
-        VolumeWritableFile.min_multipart_upload_size = backup
 
     # Overwrite existing file
     with fs.open(dbfs_url(f"{test_dir}/2_data.bin"), mode="wb") as f:
@@ -769,3 +762,31 @@ def test_volume_fs_open_w(
     with pytest.raises(IsADirectoryError):
         with fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="wb") as f:
             f.write(small_data)
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_fs_open_w_aboart(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client, verbose_debug_log=True)
+
+    test_dir = init_test_dir(client, volume_test_root, fs_class)
+
+    with patch.object(
+        VolumeWritableFile, "_upload_part", side_effect=RuntimeError("Dummy")
+    ):
+        with patch.object(
+            VolumeWritableFile, "_abort_multipart_upload"
+        ) as _abort_multipart_upload:
+            with pytest.raises(OSError):
+                with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+                    f.write(randbytes(10 * 1024 * 1024))
+        assert _abort_multipart_upload.called
