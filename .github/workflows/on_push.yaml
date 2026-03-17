@@ -3,11 +3,10 @@ name: Actions for push events
 on:
   push:
     paths:
+      - ".github/**"
       - "src/**"
       - "tests/**"
       - "pyproject.toml"
-    tags-ignore:
-      - "v*"
 
 concurrency:
   group: "on-push-${{ github.ref_name }}"
