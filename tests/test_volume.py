@@ -5,6 +5,7 @@ import pickle
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from random import randbytes
+from unittest.mock import patch
 
 import pytest
 from databricks.sdk import WorkspaceClient
@@ -769,3 +770,31 @@ def test_volume_fs_open_w(
     with pytest.raises(IsADirectoryError):
         with fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="wb") as f:
             f.write(small_data)
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_fs_open_w_aboart(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client, verbose_debug_log=True)
+
+    test_dir = init_test_dir(client, volume_test_root, fs_class)
+
+    with patch.object(
+        VolumeWritableFile, "_upload_part", side_effect=RuntimeError("Dummy")
+    ):
+        with patch.object(
+            VolumeWritableFile, "_abort_multipart_upload"
+        ) as _abort_multipart_upload:
+            with pytest.raises(OSError):
+                with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+                    f.write(randbytes(10 * 1024 * 1024))
+        assert _abort_multipart_upload.called

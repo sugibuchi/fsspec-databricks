@@ -301,7 +301,7 @@ class FileRangeTaskSupport(AbstractAsyncFile):
         if num_canceled and self.verbose_debug_log:
             self.log.debug("Cancelled %s tasks: path=%s", num_canceled, self.path)
         if num_exceptions:
-            self.log.warning(
+            self.log.error(
                 "%s tasks raised exceptions during task cancellation: path=%s",
                 num_exceptions,
                 self.path,
@@ -831,6 +831,10 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                     await self._upload_buffered_data(flush=True)
                     if self._multipart_uploading:
                         await self._do_complete_multipart_upload()
+                if self._task_error:
+                    raise io_error(
+                        self.path, f"Failed to upload the file: path={self.path}"
+                    ) from self._task_error
             finally:
                 self._buf = None
                 await super().aclose()

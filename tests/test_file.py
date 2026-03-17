@@ -681,18 +681,19 @@ async def test_abstract_async_writable_file_write_with_errors(
     assert not dummy_api_context.files
     assert not dummy_api_context.upload_sessions
 
-    with DummyWritableFile(
-        base_url=dummy_api,
-        path="/path/to/file",
-        loop=client_event_loop,
-        block_size=1000 * 1000,
-        max_concurrency=5,
-    ) as file:
-        file.fail_on_upload = [1, 3]
+    with pytest.raises(OSError, match="Failed to upload the file"):
+        with DummyWritableFile(
+            base_url=dummy_api,
+            path="/path/to/file",
+            loop=client_event_loop,
+            block_size=1000 * 1000,
+            max_concurrency=5,
+        ) as file:
+            file.fail_on_upload = [1, 3]
 
-        with pytest.raises(OSError) as exc_info:
-            for i in range(0, len(data), step):
-                file.write(data[i : min(i + step, len(data))])
+            with pytest.raises(OSError) as exc_info:
+                for i in range(0, len(data), step):
+                    file.write(data[i : min(i + step, len(data))])
 
     org_exc = exc_info.value.__cause__
     assert isinstance(org_exc, RuntimeError)
@@ -723,7 +724,7 @@ async def test_abstract_async_writable_file_write_with_errors(
     assert not dummy_api_context.files
     assert not dummy_api_context.upload_sessions
 
-    with pytest.raises(OSError, match=r"Failed to abort upload.") as exc_info:
+    with pytest.raises(OSError, match=r"Failed to abort upload") as exc_info:
         with DummyWritableFile(
             base_url=dummy_api,
             path="/path/to/file",
@@ -736,7 +737,7 @@ async def test_abstract_async_writable_file_write_with_errors(
 
             with pytest.raises(
                 OSError,
-                match=r"Operation blocked due to a previous error during file access.",
+                match=r"blocked due to a previous error during file access.",
             ):
                 for i in range(0, len(data), step):
                     file.write(data[i : min(i + step, len(data))])
