@@ -717,6 +717,41 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
             self._session_token = result["multipart_upload"]["session_token"]
 
+    async def _get_presigned_upload_url(
+        self, part_number: int
+    ) -> tuple[str, dict[str, str], dict[str, str] | None]:
+        async with self._session.post(
+            "/api/2.0/fs/create-upload-part-urls",
+            json={
+                "path": self._posix_path,
+                "session_token": self._session_token,
+                "start_part_number": part_number,
+                "count": 1,
+                "expire_time": self._url_expire_time(),
+            },
+            middlewares=(self._auth,),
+        ) as response:
+            result = await response.json()
+            try:
+                response.raise_for_status()
+            except:
+                self.log.error(
+                    "Failed to get URL for part upload: path=%s, response=%s",
+                    self.path,
+                    result,
+                )
+                raise
+
+        path = result["upload_part_urls"][0]["url"]
+        headers = {
+            h["name"]: h["value"]
+            for h in result["upload_part_urls"][0].get("headers", [])
+        }
+        headers["Content-Type"] = "application/octet-stream"
+        params = None
+
+        return path, headers, params
+
     async def _upload_part(
         self, data: bytes, start: int, end: int, part_index: int
     ) -> tuple[int, str]:
@@ -725,46 +760,17 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         part_number = part_index + 1
 
         if self.use_presigned_url:
-            async with self._session.post(
-                "/api/2.0/fs/create-upload-part-urls",
-                json={
-                    "path": self._posix_path,
-                    "session_token": self._session_token,
-                    "start_part_number": part_number,
-                    "count": 1,
-                    "expire_time": self._url_expire_time(),
-                },
-                middlewares=(self._auth,),
-            ) as response:
-                result = await response.json()
-                try:
-                    response.raise_for_status()
-                except:
-                    self.log.error(
-                        "Failed to get URL for part upload: path=%s, response=%s",
-                        self.path,
-                        result,
-                    )
-                    raise
-
-            path = result["upload_part_urls"][0]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["upload_part_urls"][0].get("headers", [])
-            }
-            params = None
+            path, headers, params = await self._get_presigned_upload_url(part_number)
             middlewares = ()
         else:
             path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
-            headers = {}
+            headers = {"Content-Type": "Content-Type"}
             params = {
                 "session_token": self._session_token,
                 "upload_type": "multipart",
                 "part_number": part_number,
             }
             middlewares = (self._auth,)
-
-        headers["Content-Type"] = "application/octet-stream"
 
         async with self._session.put(
             path,
@@ -802,35 +808,45 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 )
                 raise
 
+    async def _get_presigned_abort_url(
+        self,
+    ) -> tuple[str, dict[str, str], dict[str, str] | None]:
+        async with self._session.post(
+            "/api/2.0/fs/create-abort-upload-url",
+            json={
+                "path": self._posix_path,
+                "session_token": self._session_token,
+                "expire_time": self._url_expire_time(),
+            },
+            middlewares=(self._auth,),
+        ) as response:
+            result = await response.json()
+            try:
+                response.raise_for_status()
+            except:
+                self.log.error(
+                    "Failed to get URL for upload abort: path=%s, response=%s",
+                    self.path,
+                    result,
+                )
+                raise
+
+        path = result["abort_upload_url"]["url"]
+        headers = {
+            h["name"]: h["value"] for h in result["abort_upload_url"].get("headers", [])
+        }
+        headers["Content-Type"] = "application/octet-stream"
+        params = None
+
+        return path, headers, params
+
     async def _abort_multipart_upload(self) -> None:
         if self.use_presigned_url:
-            async with self._session.post(
-                "/api/2.0/fs/create-abort-upload-url",
-                json={
-                    "path": self._posix_path,
-                    "session_token": self._session_token,
-                    "expire_time": self._url_expire_time(),
-                },
-                middlewares=(self._auth,),
-            ) as response:
-                result = await response.json()
-                try:
-                    response.raise_for_status()
-                except BadRequest:
-                    self.log.warning(
-                        "Failed to get URL for upload abort: path=%s, response=%s",
-                        self.path,
-                        result,
-                    )
-                    return
-
-            path = result["abort_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["abort_upload_url"].get("headers", [])
-            }
-            headers["Content-Type"] = "application/octet-stream"
-            params = None
+            try:
+                path, headers, params = await self._get_presigned_abort_url()
+            except BadRequest:
+                # For Azure Databricks, which does not support presigned URLs for aborting multipart uploads
+                return
             middlewares = ()
         else:
             path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
