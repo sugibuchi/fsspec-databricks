@@ -827,14 +827,13 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                 if self._task_error:
                     if self._multipart_uploading:
                         await self._do_abort_multipart_upload()
+                        raise io_error(
+                            self.path, "Multipart upload failed and was aborted"
+                        ) from self._task_error
                 else:
                     await self._upload_buffered_data(flush=True)
                     if self._multipart_uploading:
                         await self._do_complete_multipart_upload()
-                if self._task_error:
-                    raise io_error(
-                        self.path, f"Failed to upload the file: path={self.path}"
-                    ) from self._task_error
             finally:
                 self._buf = None
                 await super().aclose()

@@ -22,7 +22,7 @@ and supports copying and streaming between them.
     * Automatically routes file operations to appropriate file systems based on file path patterns.
     * Implements file operations across different file systems, for example, copying a file from Workspace to Unity
       Catalog Volume or vice versa.
-* Fallback to the local file system access when running within a Databricks workspace.
+* Fallbacks to the local file system access when running inside a Databricks workspace.
 * Implemented on [Databricks Python SDK](https://github.com/databricks/databricks-sdk-py).
     * Uses [Databricks Unified Authentication](https://docs.databricks.com/aws/en/dev-tools/auth/unified-auth)
 
@@ -33,6 +33,15 @@ and supports copying and streaming between them.
 * Databricks workspace: Tested on the following environments at the moment.
     * Azure Databricks
     * Databricks Free Edition
+
+## Project status
+
+The current status of this library is **early beta**. Its API and behavior are subject to change during further
+development and testing.
+
+* The current version relies on the undocumented multipart upload API for Unity
+  Catalog Volume file write, which Databricks does not officially support and may change without notice.
+* For more details about the current limitations, see the [Limitations](#limitations) section below.
 
 ## Getting started
 
@@ -210,8 +219,7 @@ In addition to the authentication parameters, `fsspec-databricks` supports the f
 
 ## Differences from the original `DatabricksFileSystem` in `fsspec`
 
-`fsspec` provides its own implementation of `DatabricksFileSystem` ([
-`fsspec.implementations.DatabricksFileSystem`](https://github.com/fsspec/filesystem_spec/blob/master/fsspec/implementations/dbfs.py)).
+`fsspec` provides its own implementation of `DatabricksFileSystem` (`fsspec.implementations.DatabricksFileSystem`).
 
 The main difference between `DatabricksFileSystem` in `fsspec-databricks` and the original one in `fsspec` is that
 the original one is for [legacy DBFS (Databricks File System)](https://docs.databricks.com/aws/en/dbfs/),
@@ -224,64 +232,16 @@ and it continues to use the `dbfs:/` URL scheme for both legacy DBFS and the oth
 `fsspec-databricks` primarily aims to support new file systems (workspace files and Unity Catalog volumes)
 and enable seamless access to them using the same `dbfs:/` URL scheme supported in Databricks workspaces.
 
-## Project status
-
-The current status of this library is **early beta**. Its API and behavior are subject to change during further
-development and testing. In addition, the current version relies on the undocumented multipart upload API for Unity
-Catalog Volume file write, which Databricks does not officially support and may change without notice.
-
 ## Limitations
 
-In addition, the following features are not yet implemented or have not been tested well.
+The following features are not yet implemented or have not been tested yet.
 
-* Resumable file upload for Unity Catalog Volume files (required for Databricks on GCP)
-* Legacy DBFS support (deprecated by Databricks and not recommended for use)
-* Compatibility with Databricks on AWS and Databricks on GCP
+* Compatibility with Databricks on AWS and Databricks on GCP (not tested)
+* Resumable file upload for Unity Catalog Volume files (not implemented, required for Databricks on GCP)
+* Legacy DBFS support (not tested)
+* Use of the storage proxy when running inside a Databricks workspace or notebook (not implemented)
 
 We are actively developing and testing the library, and we welcome contributions and feedback from the community.
-
-## Development
-
-Some tests in this library require access to actual Databricks workspaces to verify its file system operations
-in the real Databricks environment. You need to configure access to a Databricks workspace and create work
-directories within it before running the tests.
-
-### Work directories in Databricks workspace
-
-You need to create work directories in your Databricks workspace and Unity Catalog to use for the tests and
-set the **POSIX paths** (without the `dbfs:/` scheme) of the test directories in the following environment variables.
-
-| Location             | Environment variable name               | default                                                |
-|----------------------|-----------------------------------------|--------------------------------------------------------|
-| Unity Catalog Volume | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | `/Volumes/fsspec_test_catalog/fsspec_test_schema/test` | 
-| Workspace files      | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | `/fsspec-databricks-test`                              | 
-
-### Local development
-
-Configure Databricks Unified authentication locally, and set environment variable
-`FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` and `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` to specify the
-location of work directories to use.
-
-You can set authentication parameters and the environment variables above to `.env` file
-in the project root directory.
-
-### GitHub Actions
-
-You need a Databricks service principal that has read-write access to the work directories.
-
-Set the following GitHub Actions secrets and variables in the repository settings.
-
-| Secret name                | Description                                                              |
-|----------------------------|--------------------------------------------------------------------------|
-| `DATABRICKS_HOST`          | The URL of the Databricks workspace                                      |
-| `DATABRICKS_CLIENT_ID`     | The client ID of the Databricks service principal to use for testing     |
-| `DATABRICKS_CLIENT_SECRET` | The client secret of the Databricks service principal to use for testing |
-| `CODECOV_TOKEN`            | The repository upload token for [Codecov](https://about.codecov.io/)     |
-
-| Variable name                           | Description                                                                       |
-|-----------------------------------------|-----------------------------------------------------------------------------------|
-| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | The POSIX path of the work directory in Unity Catalog Volume to use for testing.  |
-| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | The POSIX path of the directory in Databricks Workspace files to use for testing. |
 
 ## License
 

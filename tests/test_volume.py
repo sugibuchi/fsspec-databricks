@@ -771,13 +771,11 @@ def test_volume_fs_open_w(
         DatabricksFileSystem,
     ],
 )
-def test_volume_fs_open_w_aboart(
+def test_volume_fs_open_w_abort(
     client: WorkspaceClient,
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
-
     test_dir = init_test_dir(client, volume_test_root, fs_class)
 
     with patch.object(
@@ -787,6 +785,7 @@ def test_volume_fs_open_w_aboart(
             VolumeWritableFile, "_abort_multipart_upload"
         ) as _abort_multipart_upload:
             with pytest.raises(OSError):
-                with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
-                    f.write(randbytes(10 * 1024 * 1024))
+                with fs_class(client=client, verbose_debug_log=True) as fs:
+                    with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+                        f.write(randbytes(10 * 1024 * 1024))
         assert _abort_multipart_upload.called
