@@ -34,8 +34,6 @@ on:
         required: true
         default: false
 
-env:
-  NO_COLOR: "true"
 
 concurrency:
   group: "test-${{ github.ref_name }}-${{ inputs.python-version }}"
