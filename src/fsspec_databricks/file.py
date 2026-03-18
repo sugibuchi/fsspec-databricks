@@ -869,15 +869,14 @@ class AbstractCachedFile(AbstractFile, ABC):
         self._cache = None
         self._updated = False
 
+        if max_size is not None and max_size <= 0:
+            raise ValueError("max_size must be a positive integer or None")
+
+        if "x" in mode and self._do_remote_file_exists():
+            raise file_exists_error(path)
+
+        self._cache = self._initialize_cache()
         try:
-            if max_size is not None and max_size <= 0:
-                raise ValueError("max_size must be a positive integer or None")
-
-            if "x" in mode and self._do_remote_file_exists():
-                raise file_exists_error(path)
-
-            self._cache = self._initialize_cache()
-
             if "r" in mode or "a" in mode:
                 if self._do_remote_file_exists():
                     self._download_remote_file_to_cache()
@@ -886,7 +885,8 @@ class AbstractCachedFile(AbstractFile, ABC):
                 elif "r" in mode:
                     raise file_not_found_error(path)
         except:
-            self.close()
+            # Eagerly release cache resources
+            self._release_cache()
             raise
 
     @abstractmethod
