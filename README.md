@@ -22,7 +22,7 @@ and supports copying and streaming between them.
     * Automatically routes file operations to appropriate file systems based on file path patterns.
     * Implements file operations across different file systems, for example, copying a file from Workspace to Unity
       Catalog Volume or vice versa.
-* Fallbacks to the local file system access when running inside a Databricks workspace.
+* Falls back to the local file system when running inside a Databricks workspace.
 * Implemented on [Databricks Python SDK](https://github.com/databricks/databricks-sdk-py).
     * Uses [Databricks Unified Authentication](https://docs.databricks.com/aws/en/dev-tools/auth/unified-auth)
 
@@ -118,7 +118,7 @@ fs.ls("/Workspace/Users/user-a/path")  # Access workspace files (only in DBFS-di
 fs.ls("/data/path")  # Access legacy DBFS files
 ```
 
-For more details about`dbfs:/` and POSIX path support in Databricks, see
+For more details about `dbfs:/` and POSIX path support in Databricks, see
 [the official documentation](https://docs.databricks.com/aws/en/files/).
 
 ## Authentication
@@ -134,7 +134,7 @@ If Databricks Unified Authentication is configured, `fsspec-databricks` will pic
 profile. For more, see the above Databricks SDK docs.
 
 ```python
-from fsspec_databricks.spec import DatabricksFileSystem
+from fsspec_databricks import DatabricksFileSystem
 
 fs = DatabricksFileSystem()
 
@@ -190,7 +190,7 @@ fs = DatabricksFileSystem(client=client)
 ```
 
 Note: a `DatabricksFileSystem` created with a `WorkspaceClient` will generally not be serializable, because
-`WorkspaceClient` instances are not serializable. Consider using other configuration methods for if you need
+`WorkspaceClient` instances are not serializable. Consider using other configuration methods if you need
 serializable filesystem objects.
 
 ## Configuration options
@@ -208,14 +208,15 @@ In addition to the authentication parameters, `fsspec-databricks` supports the f
 
 ### Options for Unity Catalog Volume file system
 
-| Parameter name                  | Description                                                                             | Default                    |
-|---------------------------------|-----------------------------------------------------------------------------------------|----------------------------|
-| volume_fs_max_read_concurrency  | The maximum number of concurrent file read operations on a Unity Catalog Volume file.   | `10`                       |
-| volume_fs_min_read_block_size   | The minimum data size to read for each read operation on a Unity Catalog Volume file.   | `512 * 1024` (512 kb)      |
-| volume_fs_max_read_block_size   | The maximum data size to read for each read operation on a Unity Catalog Volume file.   | `8 * 1024 * 1024` (8 mb)   |
-| volume_fs_max_write_concurrency | The maximum number of concurrent file write operations on a Unity Catalog Volume file.  | `10`                       |
-| volume_fs_min_write_block_size  | The minimum data size to write for each write operation on a Unity Catalog Volume file. | `5 * 1024 * 1024` (5 mb)   |
-| volume_fs_max_write_block_size  | The maximum data size to write for each write operation on a Unity Catalog Volume file. | `32 * 1024 * 1024` (32 mb) |
+| Parameter name                   | Description                                                                               | Default                    |
+|----------------------------------|-------------------------------------------------------------------------------------------|----------------------------|
+| volume_fs_max_read_concurrency   | The maximum number of concurrent file read operations on a Unity Catalog Volume file.     | `10`                       |
+| volume_fs_min_read_block_size    | The minimum data size to read for each read operation on a Unity Catalog Volume file.     | `512 * 1024` (512 kb)      |
+| volume_fs_max_read_block_size    | The maximum data size to read for each read operation on a Unity Catalog Volume file.     | `8 * 1024 * 1024` (8 mb)   |
+| volume_fs_max_write_concurrency  | The maximum number of concurrent file write operations on a Unity Catalog Volume file.    | `10`                       |
+| volume_fs_min_write_block_size   | The minimum data size to write for each write operation on a Unity Catalog Volume file.   | `5 * 1024 * 1024` (5 mb)   |
+| volume_fs_max_write_block_size   | The maximum data size to write for each write operation on a Unity Catalog Volume file.   | `32 * 1024 * 1024` (32 mb) |
+| volume_min_multipart_upload_size | The minimum file size to use multipart upload for uploading files to Unity Catalog Volume. | `5 * 1024 * 1024` (5 mb)  |
 
 ## Differences from the original `DatabricksFileSystem` in `fsspec`
 
