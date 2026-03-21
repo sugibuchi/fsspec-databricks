@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from asyncio import AbstractEventLoop
+from contextlib import suppress
 from threading import Event, Thread
 
 import pytest
@@ -120,7 +121,8 @@ def volume_test_root(client):
         return path
 
     for i in client.files.list_directory_contents(directory_path=fullpath):
-        client.dbfs.delete(i.path, recursive=True)
+        with suppress(NotFound): # Strange but NotFound sometimes thrown on Databricks on GCP
+            client.dbfs.delete(i.path, recursive=True)
 
     # Changed f-string logging to lazy-format
     log.info("Volume test root has been cleaned: %s", path)
