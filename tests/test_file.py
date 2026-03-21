@@ -479,6 +479,8 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
         self._session_token: str | None = None
 
+        self.last_index = []
+
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(
             f"/api/2.0/fs/files{self.path}",
@@ -497,7 +499,7 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             self._session_token = result["multipart_upload"]["session_token"]
 
     async def _upload_part(
-        self, data: bytes, start: int, end: int, part_index: int
+        self, data: bytes, start: int, end: int, part_index: int, last_part: bool
     ) -> Any:
         async with self._session.put(
             f"/api/2.0/fs/files{self.path}",
@@ -509,6 +511,8 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             data=data,
         ) as response:
             response.raise_for_status()
+            if last_part:
+                self.last_index.append(part_index)
             return part_index, response.headers["etag"]
 
     async def _complete_multipart_upload(self) -> None:
@@ -601,6 +605,7 @@ async def test_abstract_async_writable_file_write(
         assert len(dummy_api_context.upload_sessions) == 1
 
     assert bytes_sig(data) == bytes_sig(dummy_api_context.files["/path/to/file"])
+    assert file.last_index == [9]
 
     # Single shot upload
     with DummyWritableFile(

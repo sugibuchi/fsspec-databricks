@@ -1,4 +1,13 @@
+from datetime import datetime
 from hashlib import sha256
+
+
+def datetime_eq(a: datetime, b: datetime):
+    """Compares two datetimes for equality, ignoring microseconds."""
+    if a is None:
+        return b is None
+    else:
+        return a.replace(microsecond=0) == b.replace(microsecond=0)
 
 
 def bytes_sig(data: bytes) -> tuple[int, str]:

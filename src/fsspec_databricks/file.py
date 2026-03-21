@@ -167,7 +167,7 @@ class FileRangeTaskSupport(AbstractAsyncFile):
         self._tasks: deque[_FileRangeTask] = deque()
 
         self._task_name_prefix = "file-" + re.sub(
-            r"\W+", "-", self.path.rsplit("/")[-1].lower()
+            r"\W+", "-", self.path.rsplit("/", 1)[-1].lower()
         )
 
         self._task_error: BaseException | None = None
@@ -285,18 +285,13 @@ class FileRangeTaskSupport(AbstractAsyncFile):
                 "Attempting to cancel %s tasks: path=%s", to_cancel, self.path
             )
 
-        num_canceled = 0
-        num_exceptions = 0
+        tasks = list(self._tasks)
+        self._tasks.clear()
 
-        while self._tasks:
-            task = self._tasks.popleft()
-            canceled, exception = await self._cancel_task(task)
+        results = await asyncio.gather(*[self._cancel_task(t) for t in tasks])
 
-            if canceled:
-                num_canceled += 1
-
-            if exception:
-                num_exceptions += 1
+        num_canceled = sum(1 for canceled, _ in results if canceled)
+        num_exceptions = sum(1 for _, exception in results if exception)
 
         if num_canceled and self.verbose_debug_log:
             self.log.debug("Cancelled %s tasks: path=%s", num_canceled, self.path)
@@ -551,9 +546,11 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
             await self._cancel_all_tasks()
 
         # Cancel tasks before the new position
+        to_cancel = []
         while self._tasks and self._pos >= self._tasks[0].end:
-            task = self._tasks.popleft()
-            await self._cancel_task(task)
+            to_cancel.append(self._tasks.popleft())
+        if to_cancel:
+            await asyncio.gather(*[self._cancel_task(t) for t in to_cancel])
 
         # Reset the consecutive read length
         self._read_length = 0
@@ -569,10 +566,10 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
     """Abstract file-like object that supports asynchronous writing to a file by using a background asyncio event loop."""
 
     min_block_size: int = 1024 * 1024
-    """The minimum data size to write for each read operation on the file."""
+    """The minimum data size to write for each write operation on the file."""
 
     max_block_size: int = 16 * 1024 * 1024
-    """The maximum data size to write for each read operation on the file."""
+    """The maximum data size to write for each write operation on the file."""
 
     min_multipart_upload_size: int = 5 * 1024 * 1024
     """The minimum file size to use multipart upload for uploading the file content."""
@@ -619,7 +616,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
 
     @abstractmethod
     async def _upload_part(
-        self, data: bytes, start: int, end: int, part_index: int
+        self, data: bytes, start: int, end: int, part_index: int, last_part: bool
     ) -> Any:
         """Upload a part of the file and return the part token."""
 
@@ -649,7 +646,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                 self.path,
             )
 
-        except BaseException as e:
+        except Exception as e:
             raise io_error(self.path, "Failed to upload all data.") from e
 
     async def _do_start_multipart_upload(self) -> None:
@@ -661,7 +658,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             await self._start_multipart_upload()
             self._multipart_uploading = True
             self.log.debug("Multipart upload started: path=%s", self.path)
-        except BaseException as e:
+        except Exception as e:
             raise io_error(self.path, "Failed to start upload.") from e
 
     async def _do_complete_multipart_upload(self) -> None:
@@ -672,7 +669,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             self.log.debug("Completing multipart upload: path=%s", self.path)
             await self._complete_multipart_upload()
             self.log.debug("Multipart upload completed: path=%s", self.path)
-        except BaseException as e:
+        except Exception as e:
             await self._do_abort_multipart_upload()
             raise io_error(self.path, "Failed to complete upload.") from e
         finally:
@@ -687,7 +684,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             self.log.warning("Aborting multipart upload: path=%s", self.path)
             await self._abort_multipart_upload()
             self.log.warning("Multipart upload aborted: path=%s", self.path)
-        except BaseException as e:
+        except Exception as e:
             raise io_error(self.path, "Failed to abort upload.") from e
         finally:
             self._multipart_uploading = False
@@ -762,6 +759,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                 start,
                 end,
                 self._part_index,
+                flush and len(data) == upload_size,
             )
 
             offset += upload_size
@@ -907,7 +905,7 @@ class AbstractCachedFile(AbstractFile, ABC):
     def _do_remote_file_exists(self):
         try:
             return self._remote_file_exists()
-        except BaseException as e:
+        except Exception as e:
             raise io_error(
                 self.path, message="Failed to check if remote file exists."
             ) from e
@@ -915,7 +913,7 @@ class AbstractCachedFile(AbstractFile, ABC):
     def _do_remote_file_download(self):
         try:
             return self._remote_file_download()
-        except BaseException as e:
+        except Exception as e:
             raise io_error(
                 self.path, message="Failed to download remote file to cache."
             ) from e
@@ -923,7 +921,7 @@ class AbstractCachedFile(AbstractFile, ABC):
     def _do_remote_file_upload(self, data):
         try:
             self._remote_file_upload(data)
-        except BaseException as e:
+        except Exception as e:
             raise io_error(
                 self.path, message="Failed to upload cache to remote file."
             ) from e
@@ -1111,11 +1109,12 @@ class FileCachedFile(AbstractCachedFile, ABC):
         pos = self._cache.tell()
         self._cache.close()
 
-        with open(self._cache_file_name, "rb") as f:
-            yield f
-
-        self._cache = open(self._cache_file_name, "r+b")  # noqa: SIM115
-        self._cache.seek(pos)
+        try:
+            with open(self._cache_file_name, "rb") as f:
+                yield f
+        finally:
+            self._cache = open(self._cache_file_name, "r+b")  # noqa: SIM115
+            self._cache.seek(pos)
 
     def _release_cache(self):
         if self._cache:
