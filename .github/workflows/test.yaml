@@ -50,7 +50,7 @@ on:
 
 
 concurrency:
-  group: "test-${{ github.ref_name }}-${{ inputs.python-version }}"
+  group: "test-${{ inputs.environment }}-${{ github.ref_name }}-${{ inputs.python-version }}"
   cancel-in-progress: false
 
 jobs:
