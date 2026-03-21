@@ -188,7 +188,7 @@ class DBFS(AbstractDatabricksFileSystem):
     ):
         self.log.debug("Opening file: path=%s, mode=%s", path, mode)
 
-        with error_mapping():
+        with error_mapping(path):
             return self.client.dbfs.open(
                 parse_dbfs_path(path),
                 read="r" in mode,

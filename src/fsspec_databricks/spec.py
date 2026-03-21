@@ -35,10 +35,10 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
     """The maximum number of concurrent file write operations on a Unity Catalog Volume file."""
 
     volume_fs_min_write_block_size: int = 5 * 1024 * 1024
-    """The minimum data size to write for each read operation on a Unity Catalog Volume file."""
+    """The minimum data size to write for each write operation on a Unity Catalog Volume file."""
 
     volume_fs_max_write_block_size: int = 32 * 1024 * 1024
-    """The maximum data size to write for each read operation on a Unity Catalog Volume file."""
+    """The maximum data size to write for each write operation on a Unity Catalog Volume file."""
 
     volume_min_multipart_upload_size: int = 5 * 1024 * 1024
     """The minimum file size to use multipart upload for uploading files to Unity Catalog Volume."""

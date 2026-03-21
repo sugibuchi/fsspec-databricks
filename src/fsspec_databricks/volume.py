@@ -3,8 +3,7 @@ import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from io import UnsupportedOperation
-from threading import Thread
-from time import sleep
+from threading import Event, Thread
 from typing import Any
 
 from aiohttp import (
@@ -199,11 +198,13 @@ class VolumeFileSystem(DBFS):
             raise RuntimeError("The file system is already closed")
 
         if self.__loop is None:
+            ready = Event()
 
             def run_loop():
                 self.__loop = asyncio.new_event_loop()
                 self.log.debug("Running event loop in IO thread.")
                 asyncio.set_event_loop(self.__loop)
+                self.__loop.call_soon(ready.set)
 
                 try:
                     self.__loop.run_forever()
@@ -219,11 +220,7 @@ class VolumeFileSystem(DBFS):
             )
 
             self.__io_thread.start()
-
-            for _ in range(50):
-                if self.__loop is not None and self.__loop.is_running():
-                    break
-                sleep(0.1)
+            ready.wait(timeout=5.0)
 
             if self.__loop is None or not self.__loop.is_running():
                 raise RuntimeError("Event loop in IO thread failed to start")
@@ -584,7 +581,7 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
 
                     self._presigned_url = result["url"]
                     self._presigned_url_headers = {
-                        h["name"]: h["value"] for h in result.get("headers", {}).items()
+                        h["name"]: h["value"] for h in result.get("headers", [])
                     }
                     self._presigned_url_refresh_time = refresh_time
                     self.log.debug("Created presigned URL: path=%s", self.path)
@@ -764,7 +761,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             middlewares = ()
         else:
             path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
-            headers = {"Content-Type": "Content-Type"}
+            headers = {"Content-Type": "application/octet-stream"}
             params = {
                 "session_token": self._session_token,
                 "upload_type": "multipart",
@@ -784,7 +781,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             return part_number, response.headers.get("etag", "")
 
     async def _complete_multipart_upload(self) -> None:
-        parts = [await t for t in self._tasks]
+        parts = list(await asyncio.gather(*self._tasks))
         parts.sort()
 
         async with self._session.post(
