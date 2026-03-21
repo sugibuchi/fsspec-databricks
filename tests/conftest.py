@@ -2,8 +2,7 @@ import asyncio
 import logging
 import os
 from asyncio import AbstractEventLoop
-from threading import Thread
-from time import sleep
+from threading import Event, Thread
 
 import pytest
 from databricks.sdk import WorkspaceClient
@@ -29,10 +28,13 @@ AbstractDatabricksFileSystem.cachable = False
 def _event_loop(thread_name: str):
     loop: AbstractEventLoop | None = None
 
+    ready = Event()
+
     def run():
         nonlocal loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        loop.call_soon(ready.set)
 
         try:
             loop.run_forever()
@@ -43,11 +45,7 @@ def _event_loop(thread_name: str):
 
     thread = Thread(name=thread_name, target=run)
     thread.start()
-
-    for _ in range(50):
-        if loop and loop.is_running():
-            break
-        sleep(0.1)
+    ready.wait(timeout=5.0)
 
     if not loop or not loop.is_running():
         raise RuntimeError(f"Event loop in thread {thread_name} failed to start")

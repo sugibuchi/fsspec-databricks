@@ -789,8 +789,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                 "Waiting for the completion of all upload tasks: path=%s",
                 self.path,
             )
-            for task in self._tasks:
-                await task
+            await asyncio.gather(*self._tasks)
 
     def writable(self):
         self._ensure_not_closed()

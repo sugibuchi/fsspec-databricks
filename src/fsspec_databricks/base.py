@@ -263,12 +263,12 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
         newline: str | None = None,
         **kwargs,
     ):
-        """Open a file in the Unity Catalog Volume file system.
+        """Open a file for reading or writing.
 
         Parameters
         ----------
         path : str
-            The path to the file in the Unity Catalog Volume file system.
+            The path to the file to open.
         mode : str, optional
             The file mode like `rb`, `w`.
         block_size : int, optional

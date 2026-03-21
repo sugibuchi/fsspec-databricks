@@ -9,10 +9,10 @@ directories within it before running the tests.
 You need to create work directories in your Databricks workspace and Unity Catalog to use for the tests and
 set the **POSIX paths** (without the `dbfs:/` scheme) of the test directories in the following environment variables.
 
-| Location             | Environment variable name               | Default                                                |
-|----------------------|-----------------------------------------|--------------------------------------------------------|
-| Unity Catalog Volume | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | `/Volumes/fsspec_test_catalog/fsspec_test_schema/test` | 
-| Workspace files      | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | `/fsspec-databricks-test`                              | 
+| Location             | Environment variable name               | Default                                                        |
+|----------------------|-----------------------------------------|----------------------------------------------------------------|
+| Unity Catalog Volume | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | `/Volumes/fsspec_databricks_test/fsspec_dbx_test/test/local`  |
+| Workspace files      | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | `/fsspec-databricks-test/local`                                |
 
 ## Local development
 
@@ -20,8 +20,14 @@ Configure Databricks Unified authentication locally, and set environment variabl
 `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` and `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` to specify the
 location of work directories to use.
 
-You can set authentication parameters and the environment variables above to `.env` file
-in the project root directory.
+You can set authentication parameters and the environment variables above in a `.env` file
+in the project root directory. The test suite loads it automatically via `python-dotenv`.
+
+Run the tests with:
+
+```bash
+uv run pytest
+```
 
 ## GitHub Actions
 

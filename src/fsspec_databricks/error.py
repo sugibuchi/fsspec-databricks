@@ -81,8 +81,6 @@ def error_mapping(path) -> Generator[None, Any, None]:
         raise access_error(path) from e
     except PermissionDenied as e:
         raise access_error(path) from e
-    except:
-        raise
 
 
 __all__ = [
