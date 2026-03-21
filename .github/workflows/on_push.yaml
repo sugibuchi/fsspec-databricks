@@ -19,6 +19,7 @@ jobs:
     with:
       python-version: "3.14"
       coverage: ${{ github.ref_name == 'main' }}
+      environment: "default"
     secrets: inherit
 
   cross_version_test:
@@ -35,4 +36,35 @@ jobs:
     with:
       python-version: ${{ matrix.python-version }}
       coverage: false
+      environment: "default"
+    secrets: inherit
+
+  test_on_azure:
+    name: Test Python package on Azure Databricks
+    if: ${{ contains(vars.TEST_ENVIRONMENTS, 'azure') }}
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: "3.14"
+      coverage: false
+      environment: "azure"
+    secrets: inherit
+
+  test_on_aws:
+    name: Test Python package on Databricks on AWS
+    if: ${{ contains(vars.TEST_ENVIRONMENTS, 'aws') }}
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: "3.14"
+      coverage: false
+      environment: "aws"
+    secrets: inherit
+
+  test_on_gcp:
+    name: Test Python package on Databricks on GCP
+    if: ${{ contains(vars.TEST_ENVIRONMENTS, 'gcp') }}
+    uses: ./.github/workflows/test.yaml
+    with:
+      python-version: "3.14"
+      coverage: false
+      environment: "gcp"
     secrets: inherit

@@ -13,6 +13,10 @@ on:
         type: boolean
         required: false
         default: false
+      environment:
+        description: "The environment to run tests"
+        type: string
+        required: true
     secrets:
       DATABRICKS_HOST:
         required: true
@@ -33,10 +37,20 @@ on:
         type: boolean
         required: true
         default: false
+      environment:
+        description: "The environment to run tests"
+        type: choice
+        required: true
+        options:
+          - default
+          - azure
+          - aws
+          - gcp
+        default: default
 
 
 concurrency:
-  group: "test-${{ github.ref_name }}-${{ inputs.python-version }}"
+  group: "test-${{ inputs.environment }}-${{ github.ref_name }}-${{ inputs.python-version }}"
   cancel-in-progress: false
 
 jobs:
@@ -44,6 +58,7 @@ jobs:
   test:
     name: Test Python package
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
 
     steps:
       - uses: actions/checkout@v6
