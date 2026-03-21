@@ -31,8 +31,9 @@ and supports copying and streaming between them.
 * Python 3.10 to 3.14
 * `databricks-sdk`: 0.99.0 or later
 * Databricks workspace: Tested on the following environments at the moment.
-    * Azure Databricks
     * Databricks Free Edition
+    * Azure Databricks
+    * Databricks on Google Cloud
 
 ## Project status
 
@@ -208,15 +209,15 @@ In addition to the authentication parameters, `fsspec-databricks` supports the f
 
 ### Options for Unity Catalog Volume file system
 
-| Parameter name                   | Description                                                                               | Default                    |
-|----------------------------------|-------------------------------------------------------------------------------------------|----------------------------|
-| volume_fs_max_read_concurrency   | The maximum number of concurrent file read operations on a Unity Catalog Volume file.     | `10`                       |
-| volume_fs_min_read_block_size    | The minimum data size to read for each read operation on a Unity Catalog Volume file.     | `512 * 1024` (512 kb)      |
-| volume_fs_max_read_block_size    | The maximum data size to read for each read operation on a Unity Catalog Volume file.     | `8 * 1024 * 1024` (8 mb)   |
-| volume_fs_max_write_concurrency  | The maximum number of concurrent file write operations on a Unity Catalog Volume file.    | `10`                       |
-| volume_fs_min_write_block_size   | The minimum data size to write for each write operation on a Unity Catalog Volume file.   | `5 * 1024 * 1024` (5 mb)   |
-| volume_fs_max_write_block_size   | The maximum data size to write for each write operation on a Unity Catalog Volume file.   | `32 * 1024 * 1024` (32 mb) |
-| volume_min_multipart_upload_size | The minimum file size to use multipart upload for uploading files to Unity Catalog Volume. | `5 * 1024 * 1024` (5 mb)  |
+| Parameter name                   | Description                                                                                | Default                    |
+|----------------------------------|--------------------------------------------------------------------------------------------|----------------------------|
+| volume_fs_max_read_concurrency   | The maximum number of concurrent file read operations on a Unity Catalog Volume file.      | `10`                       |
+| volume_fs_min_read_block_size    | The minimum data size to read for each read operation on a Unity Catalog Volume file.      | `512 * 1024` (512 kb)      |
+| volume_fs_max_read_block_size    | The maximum data size to read for each read operation on a Unity Catalog Volume file.      | `8 * 1024 * 1024` (8 mb)   |
+| volume_fs_max_write_concurrency  | The maximum number of concurrent file write operations on a Unity Catalog Volume file.     | `10`                       |
+| volume_fs_min_write_block_size   | The minimum data size to write for each write operation on a Unity Catalog Volume file.    | `5 * 1024 * 1024` (5 mb)   |
+| volume_fs_max_write_block_size   | The maximum data size to write for each write operation on a Unity Catalog Volume file.    | `32 * 1024 * 1024` (32 mb) |
+| volume_min_multipart_upload_size | The minimum file size to use multipart upload for uploading files to Unity Catalog Volume. | `5 * 1024 * 1024` (5 mb)   |
 
 ## Differences from the original `DatabricksFileSystem` in `fsspec`
 
