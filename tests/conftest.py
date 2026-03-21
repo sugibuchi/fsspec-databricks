@@ -121,8 +121,10 @@ def volume_test_root(client):
         return path
 
     for i in client.files.list_directory_contents(directory_path=fullpath):
-        with suppress(NotFound): # Strange but NotFound sometimes thrown on Databricks on GCP
+        try:
             client.dbfs.delete(i.path, recursive=True)
+        except NotFound:  # Strange but NotFound sometimes thrown on Databricks on GCP  # noqa: PERF203
+            client.dbfs.delete(i.path, recursive=False)
 
     # Changed f-string logging to lazy-format
     log.info("Volume test root has been cleaned: %s", path)
