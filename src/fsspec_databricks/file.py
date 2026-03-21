@@ -616,7 +616,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
 
     @abstractmethod
     async def _upload_part(
-        self, data: bytes, start: int, end: int, part_index: int
+        self, data: bytes, start: int, end: int, part_index: int, last_part: bool
     ) -> Any:
         """Upload a part of the file and return the part token."""
 
@@ -759,6 +759,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                 start,
                 end,
                 self._part_index,
+                flush and len(data) == upload_size,
             )
 
             offset += upload_size

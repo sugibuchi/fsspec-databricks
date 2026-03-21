@@ -237,8 +237,7 @@ and enable seamless access to them using the same `dbfs:/` URL scheme supported 
 
 The following features are not yet implemented or have not been tested yet.
 
-* Compatibility with Databricks on AWS and Databricks on GCP (not tested)
-* Resumable file upload for Unity Catalog Volume files (not implemented, required for Databricks on GCP)
+* Compatibility with Databricks on AWS (not tested)
 * Legacy DBFS support (not tested)
 * Use of the storage proxy when running inside a Databricks workspace or notebook (not implemented)
 

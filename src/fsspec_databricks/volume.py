@@ -1,10 +1,11 @@
 import asyncio
 import logging
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from io import UnsupportedOperation
 from threading import Event, Thread
-from typing import Any
+from typing import Any, Literal
 
 from aiohttp import (
     ClientHandlerType,
@@ -26,6 +27,7 @@ from .error import (
     error_mapping,
     file_exists_error,
     file_not_found_error,
+    io_error,
     is_a_directory_error,
     not_empty_error,
 )
@@ -396,13 +398,25 @@ class VolumeFileSystem(DBFS):
                 verbose_debug_log=self.verbose_debug_log,
             )
         else:
+            min_block_size = min_block_size or self.min_write_block_size
+            max_block_size = max_block_size or self.max_write_block_size
+            if min_block_size % (256 * 1024) != 0:
+                raise ValueError(
+                    f"min_block_size is {min_block_size} but it must be a multiple of 256 KB (256 * 1024): path={path}"
+                )
+
+            if max_block_size % (256 * 1024) != 0:
+                raise ValueError(
+                    f"max_block_size is {max_block_size} but it must be a multiple of 256 KB (256 * 1024): path={path}"
+                )
+
             return VolumeWritableFile(
                 path=path,
                 workspace_config=self.config,
                 loop=self._loop,
                 max_concurrency=max_concurrency or self.max_write_concurrency,
-                min_block_size=min_block_size or self.min_write_block_size,
-                max_block_size=max_block_size or self.max_write_block_size,
+                min_block_size=min_block_size,
+                max_block_size=max_block_size,
                 min_multipart_upload_size=self.min_multipart_upload_size,
                 block_size=block_size,
                 verbose_debug_log=self.verbose_debug_log,
@@ -615,6 +629,9 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
                 await self._close_session()
 
 
+_range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
+
+
 class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     timeout_total: float | None = None
     """The maximal number of seconds for the whole operation including connection establishment,
@@ -679,7 +696,12 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
         self._auth = _workspace_authenticator(workspace_config)
 
+        self._upload_mode: Literal["multipart", "resumable"] = "multipart"
         self._session_token: str | None = None
+
+        self._resumable_upload_url: str | None = None
+        self._resumable_upload_headers: dict[str, str] = {}
+        self._resumable_upload_params: dict[str, Any] | None = None
 
         self.use_presigned_url = use_presigned_url
         self.url_expiration_duration = timedelta(
@@ -712,53 +734,56 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 )
                 raise
 
-            self._session_token = result["multipart_upload"]["session_token"]
+            if "multipart_upload" in result:
+                self.log.debug("Upload mode - multipart: path=%s", self.path)
+                self._upload_mode = "multipart"
+                self._session_token = result["multipart_upload"]["session_token"]
+            elif "resumable_upload" in result:
+                self.log.debug("Upload mode - resumable: path=%s", self.path)
+                self._upload_mode = "resumable"
+                self._session_token = result["resumable_upload"]["session_token"]
 
-    async def _get_presigned_upload_url(
+                self.max_concurrency = 1
+                url, headers, params = await self._get_resumable_upload_url()
+                self._resumable_upload_url = url
+                self._resumable_upload_headers = headers
+                self._resumable_upload_params = params
+            else:
+                raise ValueError(f"Unexpected initiate-upload response: {result}")
+
+    async def _get_multipart_upload_url(
         self, part_number: int
     ) -> tuple[str, dict[str, str], dict[str, str] | None]:
-        async with self._session.post(
-            "/api/2.0/fs/create-upload-part-urls",
-            json={
-                "path": self._posix_path,
-                "session_token": self._session_token,
-                "start_part_number": part_number,
-                "count": 1,
-                "expire_time": self._url_expire_time(),
-            },
-            middlewares=(self._auth,),
-        ) as response:
-            result = await response.json()
-            try:
-                response.raise_for_status()
-            except:
-                self.log.error(
-                    "Failed to get URL for part upload: path=%s, response=%s",
-                    self.path,
-                    result,
-                )
-                raise
-
-        path = result["upload_part_urls"][0]["url"]
-        headers = {
-            h["name"]: h["value"]
-            for h in result["upload_part_urls"][0].get("headers", [])
-        }
-        headers["Content-Type"] = "application/octet-stream"
-        params = None
-
-        return path, headers, params
-
-    async def _upload_part(
-        self, data: bytes, start: int, end: int, part_index: int
-    ) -> tuple[int, str]:
-        # Add 1 as part_number used by the multipart upload API is 1-based index
-        # while the part_index used in the code is 0-based.
-        part_number = part_index + 1
-
         if self.use_presigned_url:
-            path, headers, params = await self._get_presigned_upload_url(part_number)
-            middlewares = ()
+            async with self._session.post(
+                "/api/2.0/fs/create-upload-part-urls",
+                json={
+                    "path": self._posix_path,
+                    "session_token": self._session_token,
+                    "start_part_number": part_number,
+                    "count": 1,
+                    "expire_time": self._url_expire_time(),
+                },
+                middlewares=(self._auth,),
+            ) as response:
+                result = await response.json()
+                try:
+                    response.raise_for_status()
+                except:
+                    self.log.error(
+                        "Failed to get URL for part upload: path=%s, response=%s",
+                        self.path,
+                        result,
+                    )
+                    raise
+
+            path = result["upload_part_urls"][0]["url"]
+            headers = {
+                h["name"]: h["value"]
+                for h in result["upload_part_urls"][0].get("headers", [])
+            }
+            headers["Content-Type"] = "application/octet-stream"
+            params = None
         else:
             path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
             headers = {"Content-Type": "application/octet-stream"}
@@ -767,20 +792,116 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 "upload_type": "multipart",
                 "part_number": part_number,
             }
-            middlewares = (self._auth,)
+
+        return path, headers, params
+
+    async def _upload_part(
+        self, data: bytes, start: int, end: int, part_index: int, last_part: bool
+    ) -> tuple[int, str] | None:
+        if self._upload_mode == "resumable":
+            await self._upload_resumable_part(data, start, end, last_part)
+            return None
+
+        # Add 1 as part_number used by the multipart upload API is 1-based index
+        # while the part_index used in the code is 0-based.
+        part_number = part_index + 1
+
+        path, headers, params = await self._get_multipart_upload_url(part_number)
 
         async with self._session.put(
             path,
             headers=headers,
             params=params,
             data=data,
-            middlewares=middlewares,
+            middlewares=() if self.use_presigned_url else (self._auth,),
             timeout=self._upload_part_timeout,
         ) as response:
             response.raise_for_status()
             return part_number, response.headers.get("etag", "")
 
+    async def _get_resumable_upload_url(
+        self,
+    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+        if self.use_presigned_url:
+            async with self._session.post(
+                "/api/2.0/fs/create-resumable-upload-url",
+                json={
+                    "path": self._posix_path,
+                    "session_token": self._session_token,
+                    "expire_time": self._url_expire_time(),
+                },
+                middlewares=(self._auth,),
+            ) as response:
+                result = await response.json()
+                try:
+                    response.raise_for_status()
+                except:
+                    self.log.error(
+                        "Failed to get URL for resumable upload: path=%s, response=%s",
+                        self.path,
+                        result,
+                    )
+                    raise
+            url = result["resumable_upload_url"]["url"]
+            headers = {
+                h["name"]: h["value"]
+                for h in result["resumable_upload_url"].get("headers", [])
+            }
+            params = None
+        else:
+            url = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            headers = {"Content-Type": "application/octet-stream"}
+            params = {
+                "session_token": self._session_token,
+                "upload_type": "resumable",
+            }
+
+        return url, headers, params
+
+    async def _upload_resumable_part(
+        self, data: bytes, start: int, end: int, last_part: bool
+    ) -> None:
+        original_start = start
+        while True:
+            headers = dict(self._resumable_upload_headers)
+            headers["Content-Range"] = (
+                f"bytes {start}-{end - 1}/{end if last_part else '*'}"
+            )
+            headers["Content-Type"] = "application/octet-stream"
+
+            async with self._session.put(
+                self._resumable_upload_url,
+                headers=headers,
+                params=self._resumable_upload_params,
+                data=data[start - original_start :],
+                timeout=self._upload_part_timeout,
+                middlewares=() if self.use_presigned_url else (self._auth,),
+            ) as response:
+                if response.status in (200, 201) and last_part:
+                    break  # Upload is done
+                if response.status == 308:
+                    m = _range_pat.match(response.headers.get("Range") or "")
+                    confirmed = int(m.group("end"))
+                    if confirmed == end - 1:
+                        break
+                    else:
+                        start = confirmed + 1
+                        continue  # Retry the upload for the remaining part
+                else:
+                    self.log.error(
+                        "Unexpected response for resumable upload: path=%s, status=%d",
+                        self.path,
+                        response.status,
+                    )
+                    raise io_error(
+                        self.path,
+                        f"Unexpected response for resumable upload: status={response.status}",
+                    )
+
     async def _complete_multipart_upload(self) -> None:
+        if self._upload_mode == "resumable":
+            return  # No need to complete the resumable upload as it's completed when uploading the last part.
+
         parts = list(await asyncio.gather(*self._tasks))
         parts.sort()
 
@@ -796,55 +917,46 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             },
             middlewares=(self._auth,),
         ) as response:
-            result = await response.json()
+            text = await response.text()
             try:
                 response.raise_for_status()
             except:
                 self.log.error(
-                    "Failed to complete upload: path=%s, response=%s", self.path, result
+                    "Failed to complete upload: path=%s, response=%s", self.path, text
                 )
                 raise
 
-    async def _get_presigned_abort_url(
+    async def _get_multipart_upload_abort_url(
         self,
     ) -> tuple[str, dict[str, str], dict[str, str] | None]:
-        async with self._session.post(
-            "/api/2.0/fs/create-abort-upload-url",
-            json={
-                "path": self._posix_path,
-                "session_token": self._session_token,
-                "expire_time": self._url_expire_time(),
-            },
-            middlewares=(self._auth,),
-        ) as response:
-            result = await response.json()
-            try:
-                response.raise_for_status()
-            except:
-                self.log.error(
-                    "Failed to get URL for upload abort: path=%s, response=%s",
-                    self.path,
-                    result,
-                )
-                raise
-
-        path = result["abort_upload_url"]["url"]
-        headers = {
-            h["name"]: h["value"] for h in result["abort_upload_url"].get("headers", [])
-        }
-        headers["Content-Type"] = "application/octet-stream"
-        params = None
-
-        return path, headers, params
-
-    async def _abort_multipart_upload(self) -> None:
         if self.use_presigned_url:
-            try:
-                path, headers, params = await self._get_presigned_abort_url()
-            except BadRequest:
-                # For Azure Databricks, which does not support presigned URLs for aborting multipart uploads
-                return
-            middlewares = ()
+            async with self._session.post(
+                "/api/2.0/fs/create-abort-upload-url",
+                json={
+                    "path": self._posix_path,
+                    "session_token": self._session_token,
+                    "expire_time": self._url_expire_time(),
+                },
+                middlewares=(self._auth,),
+            ) as response:
+                result = await response.json()
+                try:
+                    response.raise_for_status()
+                except:
+                    self.log.error(
+                        "Failed to get URL for upload abort: path=%s, response=%s",
+                        self.path,
+                        result,
+                    )
+                    raise
+
+            path = result["abort_upload_url"]["url"]
+            headers = {
+                h["name"]: h["value"]
+                for h in result["abort_upload_url"].get("headers", [])
+            }
+            headers["Content-Type"] = "application/octet-stream"
+            params = None
         else:
             path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
             headers = {"Content-Type": "application/json"}
@@ -852,13 +964,25 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 "action": "abort-upload",
                 "session_token": self._session_token,
             }
-            middlewares = (self._auth,)
+
+        return path, headers, params
+
+    async def _abort_multipart_upload(self) -> None:
+        if self._upload_mode == "multipart":
+            try:
+                path, headers, params = await self._get_multipart_upload_abort_url()
+            except BadRequest:
+                return  # Azure Databricks does not support abort of multipart upload
+        else:
+            path = self._resumable_upload_url
+            headers = self._resumable_upload_headers
+            params = self._resumable_upload_params
 
         async with self._session.delete(
             path,
             headers=headers,
             params=params,
-            middlewares=middlewares,
+            middlewares=() if self.use_presigned_url else (self._auth,),
             data=b"",
         ) as response:
             response.raise_for_status()

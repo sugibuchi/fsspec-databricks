@@ -771,6 +771,36 @@ def test_volume_fs_open_w(
         DatabricksFileSystem,
     ],
 )
+def test_volume_fs_open_w_invalid_block_size(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    test_dir = init_test_dir(client, volume_test_root, fs_class)
+
+    with fs_class(client=client, verbose_debug_log=True) as fs:
+        with pytest.raises(ValueError):
+            fs.open(
+                dbfs_url(f"{test_dir}/1_data.bin"),
+                mode="wb",
+                min_block_size=10 * 1024 * 1023,
+            )
+
+        with pytest.raises(ValueError):
+            fs.open(
+                dbfs_url(f"{test_dir}/1_data.bin"),
+                mode="wb",
+                max_block_size=10 * 1024 * 1023,
+            )
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
 def test_volume_fs_open_w_abort(
     client: WorkspaceClient,
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
