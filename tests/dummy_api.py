@@ -61,9 +61,7 @@ def _now_rfc7231():
     return datetime.now(tz=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 
-_content_range_pat = re.compile(
-    r"bytes (?P<first_pos>\d+)-(?P<last_pos>\d+)/(?P<length>\d+|\*)"
-)
+_range_pat = re.compile(r"bytes=(?P<first_pos>\d+)-(?P<last_pos>\d+)")
 
 
 @app.get("/_headers")
@@ -75,7 +73,7 @@ async def get_headers(request: Request):
 async def get_file(
     context: Annotated[DummyAPIContext, Depends(dummy_context)],
     file_path: str,
-    content_range: Annotated[str | None, Header()] = None,
+    range: Annotated[str | None, Header()] = None,
 ):
     if file_path not in context.files:
         raise HTTPException(
@@ -87,33 +85,23 @@ async def get_file(
         )
 
     data = context.files[file_path]
-    if content_range:
-        m = _content_range_pat.fullmatch(content_range)
+    if range:
+        m = _range_pat.fullmatch(range)
         if not m:
             raise HTTPException(
                 detail={
                     "error_code": "BAD_REQUEST",
-                    "message": "Invalid Content-Range header",
+                    "message": "Invalid Range header",
                 },
                 status_code=400,
             )
-
         first_pos = int(m.group("first_pos"))
         last_pos = int(m.group("last_pos"))
-        length = m.group("length")
-        if length != "*" and int(length) != last_pos - first_pos + 1:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": "Content-Range length does not match the specified range",
-                },
-                status_code=400,
-            )
         return Response(
             status_code=206,
             media_type="application/octet-stream",
             headers={
-                "content-range": f"bytes {first_pos}-{last_pos}/{last_pos - first_pos + 1}",
+                "content-range": f"bytes {first_pos}-{last_pos}/{len(data)}",
                 "content-length": str(last_pos - first_pos + 1),
                 "last-modified": _now_rfc7231(),
             },
@@ -141,7 +129,6 @@ async def post_file(
     session_token: Annotated[str | None, Query()] = None,
     upload_type: Annotated[str | None, Query()] = None,
     overwrite: Annotated[str | None, Query()] = None,
-    part_number: Annotated[int | None, Query()] = None,
 ):
     if not overwrite and file_path in context.files:
         raise HTTPException(
@@ -165,21 +152,6 @@ async def post_file(
                     "message": f"Invalid upload_type: {upload_type}",
                 },
                 status_code=400,
-            )
-
-        if action == "upload-part":
-            data = await request.body()
-            etag = b64encode(hashlib.sha256(data).digest()).decode()
-            context.upload_sessions[session_token][(part_number, etag)] = data
-
-            return Response(
-                status_code=206,
-                media_type="text/plain",
-                headers={
-                    "etag": etag,
-                    "date": _now_rfc7231(),
-                    "transfer-encoding": "chunked",
-                },
             )
 
         elif action == "complete-upload":
@@ -233,9 +205,27 @@ async def put_file(
     context: Annotated[DummyAPIContext, Depends(dummy_context)],
     file_path: str,
     request: Request,
+    session_token: Annotated[str | None, Query()] = None,
+    upload_type: Annotated[str | None, Query()] = None,
+    part_number: Annotated[int | None, Query()] = None,
 ):
-    context.files[file_path] = bytes(await request.body())
-    return Response(status_code=204)
+    data = bytes(await request.body())
+    if upload_type == "multipart":
+        etag = b64encode(hashlib.sha256(data).digest()).decode()
+        context.upload_sessions[session_token][(part_number, etag)] = data
+
+        return Response(
+            status_code=206,
+            media_type="text/plain",
+            headers={
+                "etag": etag,
+                "date": _now_rfc7231(),
+                "transfer-encoding": "chunked",
+            },
+        )
+    else:
+        context.files[file_path] = data
+        return Response(status_code=204)
 
 
 @app.delete("/api/2.0/fs/files{file_path:path}")
@@ -276,36 +266,6 @@ async def delete_file(
 
         del context.files[file_path]
         return Response(status_code=204)
-
-
-@app.post("/api/2.0/fs/create-upload-part-urls")
-async def create_upload_part_url(
-    request: UploadPartUrlRequest,
-    host: Annotated[str, Header()],
-):
-    return {
-        "upload_part_urls": [
-            {
-                "part_number": i,
-                "url": f"http://{host}/api/2.0/fs/files{request.path}?action=upload-part&upload_type=multipart&session_token={request.session_token}&part_number={i}",
-            }
-            for i in range(
-                request.start_part_number, request.start_part_number + request.count
-            )
-        ]
-    }
-
-
-@app.post("/api/2.0/fs/create-abort-upload-url")
-async def create_abort_upload_url(
-    request: UploadPartUrlRequest,
-    host: Annotated[str, Header()],
-):
-    return {
-        "abort_upload_url": {
-            "url": f"http://{host}/api/2.0/fs/files{request.path}?action=abort-upload&upload_type=multipart&session_token={request.session_token}",
-        },
-    }
 
 
 def _find_free_port(start_port=8000, end_port=9000) -> str:
