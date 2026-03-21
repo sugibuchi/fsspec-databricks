@@ -37,6 +37,16 @@ on:
         type: boolean
         required: true
         default: false
+      environment:
+        description: "The environment to run tests"
+        type: choice
+        required: true
+        options:
+          - default
+          - azure
+          - aws
+          - gcp
+        default: default
 
 
 concurrency:
