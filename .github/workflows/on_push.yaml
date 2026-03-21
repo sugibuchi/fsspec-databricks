@@ -45,7 +45,7 @@ jobs:
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
-      coverage: false
+      coverage: ${{ github.ref_name == 'main' }}
       environment: "azure"
     secrets: inherit
 
@@ -55,7 +55,7 @@ jobs:
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
-      coverage: false
+      coverage: ${{ github.ref_name == 'main' }}
       environment: "aws"
     secrets: inherit
 
@@ -65,6 +65,6 @@ jobs:
     uses: ./.github/workflows/test.yaml
     with:
       python-version: "3.14"
-      coverage: false
+      coverage: ${{ github.ref_name == 'main' }}
       environment: "gcp"
     secrets: inherit
