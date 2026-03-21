@@ -221,7 +221,7 @@ class DummyReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
         self.fetched_ranges.append((start, end))
         async with self._session.get(
             f"/api/2.0/fs/files{self.path}",
-            headers={"Content-Range": f"bytes {start}-{end - 1}/*"},
+            headers={"Range": f"bytes={start}-{end - 1}"},
         ) as response:
             response.raise_for_status()
             return await response.read()
@@ -499,22 +499,15 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     async def _upload_part(
         self, data: bytes, start: int, end: int, part_index: int
     ) -> Any:
-        async with self._session.post(
-            "/api/2.0/fs/create-upload-part-urls",
-            json={
-                "path": self.path,
+        async with self._session.put(
+            f"/api/2.0/fs/files{self.path}",
+            params={
+                "upload_type": "multipart",
+                "part_number": part_index,
                 "session_token": self._session_token,
-                "start_part_number": part_index,
-                "count": 1,
-                "expire_time": expire_time(),
             },
+            data=data,
         ) as response:
-            response.raise_for_status()
-
-            result = await response.json()
-            upload_url = result["upload_part_urls"][0]["url"]
-
-        async with self._session.post(upload_url, data=data) as response:
             response.raise_for_status()
             return part_index, response.headers["etag"]
 
@@ -537,21 +530,13 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             response.raise_for_status()
 
     async def _abort_multipart_upload(self) -> None:
-        async with self._session.post(
-            "/api/2.0/fs/create-abort-upload-url",
-            json={
-                "path": self.path,
-                "session_token": self._session_token,
-                "expire_time": expire_time(),
-            },
-        ) as response:
-            response.raise_for_status()
-
-            result = await response.json()
-            abort_url = result["abort_upload_url"]["url"]
-
         async with self._session.delete(
-            abort_url,
+            f"/api/2.0/fs/files{self.path}",
+            params={
+                "action": "abort-upload",
+                "upload_type": "multipart",
+                "session_token": self._session_token,
+            },
         ) as response:
             response.raise_for_status()
 
