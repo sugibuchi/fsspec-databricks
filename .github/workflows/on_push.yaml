@@ -19,6 +19,7 @@ jobs:
     with:
       python-version: "3.14"
       coverage: ${{ github.ref_name == 'main' }}
+      environment: "default"
     secrets: inherit
 
   cross_version_test:
@@ -35,4 +36,5 @@ jobs:
     with:
       python-version: ${{ matrix.python-version }}
       coverage: false
+      environment: "default"
     secrets: inherit
