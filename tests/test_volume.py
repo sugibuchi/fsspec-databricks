@@ -20,7 +20,7 @@ from fsspec_databricks.volume import (
     VolumeWritableFile,
 )
 
-from .utils import bytes_sig
+from .utils import bytes_sig, datetime_eq
 
 log = logging.getLogger(__name__)
 
@@ -285,8 +285,8 @@ def test_volume_fs_ls(
     assert items[0]["created"] is None
     assert datetime.now(tz=timezone.utc) - items[0]["modified"] < timedelta(minutes=1)
     assert items[0]["islink"] is False
-    assert fs.created(dbfs_url(data_path)) == items[0]["created"]
-    assert fs.modified(dbfs_url(data_path)) == items[0]["modified"]
+    assert datetime_eq(fs.created(dbfs_url(data_path)), items[0]["created"])
+    assert datetime_eq(fs.modified(dbfs_url(data_path)), items[0]["modified"])
 
     dir_path = f"{test_dir}/2_directory"
     assert items[1]["name"] == stripped_dbfs_url(dir_path)
