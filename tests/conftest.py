@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 from asyncio import AbstractEventLoop
-from contextlib import suppress
 from threading import Event, Thread
 
 import pytest
