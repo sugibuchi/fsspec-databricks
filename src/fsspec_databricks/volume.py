@@ -388,7 +388,8 @@ class VolumeFileSystem(DBFS):
         if "r" in mode:
             return VolumeReadableFile(
                 path=path,
-                workspace_config=self.config,
+                host=self.config.host,
+                auth=_workspace_authenticator(self.config),
                 loop=self._loop,
                 size=int(info.get("size")),
                 max_concurrency=max_concurrency or self.max_read_concurrency,
@@ -412,7 +413,8 @@ class VolumeFileSystem(DBFS):
 
             return VolumeWritableFile(
                 path=path,
-                workspace_config=self.config,
+                host=self.config.host,
+                auth=_workspace_authenticator(self.config),
                 loop=self._loop,
                 max_concurrency=max_concurrency or self.max_write_concurrency,
                 min_block_size=min_block_size,
@@ -458,7 +460,7 @@ def _workspace_authenticator(config: Config) -> ClientMiddlewareType:
         request: ClientRequest, handler: ClientHandlerType
     ) -> ClientResponse:
         ### From https://github.com/databricks/databricks-sdk-py/blob/main/databricks/sdk/core.py
-        headers = cfg.authenticate()
+        headers = await asyncio.to_thread(cfg.authenticate)
         # Add X-Databricks-Org-Id header for workspace clients on unified hosts
         if cfg.workspace_id and cfg.host_type == HostType.UNIFIED:
             headers["X-Databricks-Org-Id"] = cfg.workspace_id
@@ -508,7 +510,8 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
     def __init__(
         self,
         path: str,
-        workspace_config: Config,
+        host: str,
+        auth: ClientMiddlewareType,
         loop,
         size: int,
         max_concurrency: int | None = None,
@@ -530,8 +533,7 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
         )
 
         self._config_session(
-            base_url=workspace_config.host,
-            middlewares=(_workspace_authenticator(workspace_config),),
+            base_url=host,
             timeout=ClientTimeout(
                 total=self.timeout_total,
                 connect=self.timeout_connect,
@@ -542,7 +544,7 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
 
         _, _, _, _, self._posix_path = parse_volume_path(path)
 
-        self._auth = _workspace_authenticator(workspace_config)
+        self._auth = auth
 
         self.use_presigned_url = (
             prefer_presigned_url and size >= self.min_presigned_url_size
@@ -663,7 +665,8 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     def __init__(
         self,
         path: str,
-        workspace_config: Config,
+        host: str,
+        auth: ClientMiddlewareType,
         loop,
         max_concurrency: int | None = None,
         min_block_size: int | None = None,
@@ -690,11 +693,11 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             sock_read=self.timeout_sock_read,
         )
 
-        self._config_session(base_url=workspace_config.host)
+        self._config_session(base_url=host)
 
         _, _, _, _, self._posix_path = parse_volume_path(path)
 
-        self._auth = _workspace_authenticator(workspace_config)
+        self._auth = auth
 
         self._upload_mode: Literal["multipart", "resumable"] = "multipart"
         self._session_token: str | None = None
