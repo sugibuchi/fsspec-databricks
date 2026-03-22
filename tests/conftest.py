@@ -22,7 +22,7 @@ logging.getLogger("urllib3").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 # Disabling the caching of file system instances for Databricks
-AbstractDatabricksFileSystem.cachable = False
+AbstractDatabricksFileSystem.cacheable = False
 
 
 def _event_loop(thread_name: str):
@@ -82,7 +82,11 @@ def dummy_api_context(dummy_api):
         yield context
     finally:
         context.files.clear()
-        context.upload_sessions.clear()
+        context.multipart_upload_sessions.clear()
+        context.resumable_upload_sessions.clear()
+
+        context.check_signed_url = False
+        context.upload_mode = "multipart"
 
 
 @pytest.fixture(scope="session")

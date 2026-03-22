@@ -602,7 +602,7 @@ async def test_abstract_async_writable_file_write(
         for i in range(0, len(data), step):
             file.write(data[i : min(i + step, len(data))])
 
-        assert len(dummy_api_context.upload_sessions) == 1
+        assert len(dummy_api_context.multipart_upload_sessions) == 1
 
     assert bytes_sig(data) == bytes_sig(dummy_api_context.files["/path/to/file"])
     assert file.last_index == [9]
@@ -619,7 +619,7 @@ async def test_abstract_async_writable_file_write(
         for i in range(0, len(data), step):
             file.write(data[i : min(i + step, len(data))])
 
-        assert len(dummy_api_context.upload_sessions) == 0
+        assert len(dummy_api_context.multipart_upload_sessions) == 0
 
     assert bytes_sig(data) == bytes_sig(dummy_api_context.files["/path/to/file2"])
 
@@ -653,7 +653,7 @@ async def test_abstract_async_writable_file_write_with_errors(
 
     assert not file._multipart_uploading
     assert not dummy_api_context.files
-    assert not dummy_api_context.upload_sessions
+    assert not dummy_api_context.multipart_upload_sessions
 
     with patch.object(
         DummyWritableFile,
@@ -672,13 +672,13 @@ async def test_abstract_async_writable_file_write_with_errors(
                     for i in range(0, len(data), step):
                         file.write(data[i : min(i + step, len(data))])
 
-    org_exc = exc_info.value.__cause__
+    org_exc = exc_info.value.__cause__.__cause__
     assert isinstance(org_exc, RuntimeError)
     assert org_exc.args == ("Dummy",)
 
     assert not file._multipart_uploading
     assert not dummy_api_context.files
-    assert not dummy_api_context.upload_sessions
+    assert not dummy_api_context.multipart_upload_sessions
 
     with patch.object(
         DummyWritableFile,
@@ -702,7 +702,7 @@ async def test_abstract_async_writable_file_write_with_errors(
 
     assert not file._multipart_uploading
     assert not dummy_api_context.files
-    assert not dummy_api_context.upload_sessions
+    assert not dummy_api_context.multipart_upload_sessions
 
     with patch.object(
         DummyWritableFile,
@@ -736,7 +736,7 @@ async def test_abstract_async_writable_file_write_with_errors(
     assert not file._multipart_uploading
     assert not dummy_api_context.files
     # Abort of the file upload failed -> Session remains
-    assert dummy_api_context.upload_sessions
+    assert dummy_api_context.multipart_upload_sessions
 
 
 class DummyCachedFileMixin:

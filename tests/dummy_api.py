@@ -7,13 +7,14 @@ import hashlib
 import re
 import socket
 import time
+import urllib.parse
 import uuid
 from base64 import b64encode
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import sleep
-from typing import Annotated
+from typing import Annotated, Literal
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -25,10 +26,38 @@ from pydantic import BaseModel
 
 @dataclass
 class DummyAPIContext:
+    upload_mode: Literal["multipart", "resumable"] = "multipart"
+    check_signed_url: bool = False
+
     files: dict[str, bytes] = field(default_factory=dict)
-    upload_sessions: dict[str, dict[tuple[int, str], bytes | None]] = field(
+
+    multipart_upload_sessions: dict[str, dict[tuple[int, str], bytes | None]] = field(
         default_factory=dict
     )
+
+    resumable_upload_sessions: dict[str, tuple[bytes, bool]] = field(
+        default_factory=dict
+    )
+
+    def check_multipart_upload_session(self, session_token: str):
+        if session_token not in self.multipart_upload_sessions:
+            raise HTTPException(
+                detail={
+                    "error_code": "BAD_REQUEST",
+                    "message": f"Unknown multipart upload session: {session_token}",
+                },
+                status_code=400,
+            )
+
+    def check_resumable_upload_session(self, session_token: str):
+        if session_token not in self.resumable_upload_sessions:
+            raise HTTPException(
+                detail={
+                    "error_code": "BAD_REQUEST",
+                    "message": f"Unknown resumable upload session: {session_token}",
+                },
+                status_code=400,
+            )
 
 
 class UploadPartUrlRequest(BaseModel):
@@ -62,6 +91,9 @@ def _now_rfc7231():
 
 
 _range_pat = re.compile(r"bytes=(?P<first_pos>\d+)-(?P<last_pos>\d+)")
+_resumable_upload_content_range_pat = re.compile(
+    r"bytes (?:(?P<first_pos>\d+)-(?P<last_pos>\d+)|(?P<unknown_range>\*))/(?P<total_size>\d+|\*)"
+)
 
 
 @app.get("/_headers")
@@ -74,7 +106,17 @@ async def get_file(
     context: Annotated[DummyAPIContext, Depends(dummy_context)],
     file_path: str,
     range: Annotated[str | None, Header()] = None,
+    signed: Annotated[str | None, Query()] = None,
 ):
+    if context.check_signed_url and signed != "true":
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": "Signed URL is required",
+            },
+            status_code=400,
+        )
+
     if file_path not in context.files:
         raise HTTPException(
             detail={
@@ -142,27 +184,32 @@ async def post_file(
     if action is not None:
         if action == "initiate-upload":
             session_token = str(uuid.uuid4())
-            context.upload_sessions[session_token] = {}
-            return {"multipart_upload": {"session_token": session_token}}
-
-        if upload_type != "multipart":
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": f"Invalid upload_type: {upload_type}",
-                },
-                status_code=400,
-            )
+            if context.upload_mode == "multipart":
+                context.multipart_upload_sessions[session_token] = {}
+                return {"multipart_upload": {"session_token": session_token}}
+            else:
+                context.resumable_upload_sessions[session_token] = (b"", False)
+                return {"resumable_upload": {"session_token": session_token}}
 
         elif action == "complete-upload":
-            parts = [
-                (p.part_number, p.etag)
-                for p in Parts.model_validate(await request.json()).parts
-            ]
+            if upload_type != "multipart":
+                raise HTTPException(
+                    detail={
+                        "error_code": "BAD_REQUEST",
+                        "message": f"Invalid upload_type: {upload_type}",
+                    },
+                    status_code=400,
+                )
 
-            parts.sort()
+            context.check_multipart_upload_session(session_token)
+            session = context.multipart_upload_sessions.pop(session_token)
 
-            session = context.upload_sessions.pop(session_token)
+            parts = sorted(
+                [
+                    (p.part_number, p.etag)
+                    for p in Parts.model_validate(await request.json()).parts
+                ]
+            )
 
             data = bytearray()
             for p in sorted(parts):
@@ -187,17 +234,14 @@ async def post_file(
             context.files[file_path] = bytes(data)
 
             return Response(status_code=206)
-        else:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": f"Invalid action: {action}",
-                },
-                status_code=400,
-            )
-    else:
-        context.files[file_path] = bytes(await request.body())
-        return Response(status_code=206)
+
+    raise HTTPException(
+        detail={
+            "error_code": "BAD_REQUEST",
+            "message": f"Invalid action: {action}",
+        },
+        status_code=400,
+    )
 
 
 @app.put("/api/2.0/fs/files{file_path:path}")
@@ -208,11 +252,25 @@ async def put_file(
     session_token: Annotated[str | None, Query()] = None,
     upload_type: Annotated[str | None, Query()] = None,
     part_number: Annotated[int | None, Query()] = None,
+    content_range: Annotated[str | None, Header()] = None,
+    signed: Annotated[str | None, Query()] = None,
 ):
+    if context.check_signed_url and signed != "true":
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": "Signed URL is required",
+            },
+            status_code=400,
+        )
+
     data = bytes(await request.body())
+
     if upload_type == "multipart":
+        context.check_multipart_upload_session(session_token)
+
         etag = b64encode(hashlib.sha256(data).digest()).decode()
-        context.upload_sessions[session_token][(part_number, etag)] = data
+        context.multipart_upload_sessions[session_token][(part_number, etag)] = data
 
         return Response(
             status_code=206,
@@ -223,6 +281,64 @@ async def put_file(
                 "transfer-encoding": "chunked",
             },
         )
+    if upload_type == "resumable":
+        context.check_resumable_upload_session(session_token)
+        uploaded, completed = context.resumable_upload_sessions[session_token]
+
+        if content_range is None:
+            raise HTTPException(
+                detail={
+                    "error_code": "BAD_REQUEST",
+                    "message": "Content-Range header is required for resumable upload",
+                },
+                status_code=400,
+            )
+        m = _resumable_upload_content_range_pat.fullmatch(content_range)
+
+        if not m:
+            raise HTTPException(
+                detail={
+                    "error_code": "BAD_REQUEST",
+                    "message": f"Invalid Content-Range header: {content_range}",
+                },
+                status_code=400,
+            )
+
+        d = m.groupdict()
+        if d["unknown_range"] != "*":
+            if completed:
+                raise HTTPException(
+                    detail={
+                        "error_code": "BAD_REQUEST",
+                        "message": "File upload has already been completed",
+                    },
+                    status_code=400,
+                )
+
+            start = int(d["first_pos"])
+            end = int(d["last_pos"]) + 1
+            total_size = None if d["total_size"] == "*" else int(d["total_size"])
+
+            if total_size is None and (end - start) % (256 * 1024) != 0:
+                raise HTTPException(
+                    detail={
+                        "error_code": "BAD_REQUEST",
+                        "message": f"Content-Range must be a multiple of 256KB (256 * 1024): {content_range}",
+                    },
+                    status_code=400,
+                )
+
+            data = uploaded + data
+            completed = uploaded is not None and len(data) == total_size
+            context.resumable_upload_sessions[session_token] = (data, completed)
+            if completed:
+                context.files[file_path] = data
+
+        return Response(
+            status_code=201 if completed else 308,
+            headers={"Range": f"bytes=0-{len(data) - 1}"},
+        )
+
     else:
         context.files[file_path] = data
         return Response(status_code=204)
@@ -233,31 +349,28 @@ async def delete_file(
     context: Annotated[DummyAPIContext, Depends(dummy_context)],
     file_path: str,
     action: Annotated[str | None, Query()] = None,
-    session_token: Annotated[str | None, Query()] = None,
     upload_type: Annotated[str | None, Query()] = None,
+    session_token: Annotated[str | None, Query()] = None,
+    signed: Annotated[str | None, Query()] = None,
 ):
-    if action:
-        if action == "abort-upload":
-            if upload_type == "multipart" and session_token in context.upload_sessions:
-                context.upload_sessions.pop(session_token)
-                return Response(status_code=204)
-            else:
-                raise HTTPException(
-                    detail={
-                        "error_code": "BAD_REQUEST",
-                        "message": f"Invalid upload_type or session_token: {upload_type}, {session_token}",
-                    },
-                    status_code=400,
-                )
-        else:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": f"Invalid action: {action}",
-                },
-                status_code=400,
-            )
-    else:
+    if context.check_signed_url and signed != "true":
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": "Signed URL is required",
+            },
+            status_code=400,
+        )
+
+    if action == "abort-upload":
+        context.check_multipart_upload_session(session_token)
+        context.multipart_upload_sessions.pop(session_token)
+        return Response(status_code=204)
+    if upload_type == "resumable":
+        context.check_resumable_upload_session(session_token)
+        context.resumable_upload_sessions.pop(session_token)
+        return Response(status_code=204)
+    elif action is None and upload_type is None and session_token is None:
         if file_path not in context.files:
             raise HTTPException(
                 detail={"error_code": "NOT_FOUND", "message": "File not found"},
@@ -266,6 +379,130 @@ async def delete_file(
 
         del context.files[file_path]
         return Response(status_code=204)
+    else:
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": f"Invalid action: action={action}, upload_type={upload_type}",
+            },
+            status_code=400,
+        )
+
+
+@app.post("/api/2.0/fs/create-download-url")
+async def create_download_url(
+    path: Annotated[str | None, Query()] = None,
+    expire_time: Annotated[datetime | None, Query()] = None,
+):
+    if path is None or expire_time is None:
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": f"Missing required queries: (path, expire_time)=({path}, {expire_time})",
+            },
+            status_code=400,
+        )
+
+    query = urllib.parse.urlencode({"signed": "true"})
+
+    return {
+        "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+        "headers": [],
+    }
+
+
+@app.post("/api/2.0/fs/create-upload-part-urls")
+async def create_upload_part_url(request: Request):
+    body = await request.json()
+    try:
+        path = body["path"]
+        session_token = body["session_token"]
+        start_part_number = body["start_part_number"]
+        count = body["count"]
+        _ = body["expire_time"]
+    except KeyError as e:
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": str(e),
+            },
+            status_code=400,
+        ) from e
+
+    return {
+        "upload_part_urls": [
+            {
+                "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+                "headers": [],
+            }
+            for query in [
+                urllib.parse.urlencode(
+                    {
+                        "session_token": session_token,
+                        "upload_type": "multipart",
+                        "part_number": i,
+                        "signed": "true",
+                    }
+                )
+                for i in range(start_part_number, start_part_number + count)
+            ]
+        ]
+    }
+
+
+@app.post("/api/2.0/fs/create-resumable-upload-url")
+async def create_resumable_upload_url(request: Request):
+    body = await request.json()
+    try:
+        path = body["path"]
+        session_token = body["session_token"]
+    except KeyError as e:
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": str(e),
+            },
+            status_code=400,
+        ) from e
+
+    query = urllib.parse.urlencode(
+        {"session_token": session_token, "upload_type": "resumable", "signed": "true"}
+    )
+
+    return {
+        "resumable_upload_url": {
+            "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+            "headers": [],
+        }
+    }
+
+
+@app.post("/api/2.0/fs/create-abort-upload-url")
+async def create_abort_upload_url(request: Request):
+    body = await request.json()
+    try:
+        path = body["path"]
+        session_token = body["session_token"]
+        _ = body["expire_time"]
+    except KeyError as e:
+        raise HTTPException(
+            detail={
+                "error_code": "BAD_REQUEST",
+                "message": str(e),
+            },
+            status_code=400,
+        ) from e
+
+    query = urllib.parse.urlencode(
+        {"action": "abort-upload", "session_token": session_token, "signed": "true"}
+    )
+
+    return {
+        "abort_upload_url": {
+            "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+            "headers": [],
+        }
+    }
 
 
 def _find_free_port(start_port=8000, end_port=9000) -> str:
