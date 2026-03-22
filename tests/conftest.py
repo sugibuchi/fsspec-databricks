@@ -22,7 +22,7 @@ logging.getLogger("urllib3").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 # Disabling the caching of file system instances for Databricks
-AbstractDatabricksFileSystem.cacheable = False
+AbstractDatabricksFileSystem.cachable = False
 
 
 def _event_loop(thread_name: str):
