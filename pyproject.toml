@@ -55,6 +55,8 @@ dev = [
     "hypercorn",
     "ipykernel",
     "python-dotenv",
+    "ruff",
+    "codespell",
 ]
 
 [tool.pytest.ini_options]
