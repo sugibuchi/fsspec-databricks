@@ -7,23 +7,22 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat
 
 from fsspec_databricks import DatabricksFileSystem, use
-
-from .test_volume import (
+from tests.integration.test_volume import (
     dbfs_url as volume_dbfs_url,
 )
-from .test_volume import (
+from tests.integration.test_volume import (
     download as volume_download,
 )
-from .test_volume import (
+from tests.integration.test_volume import (
     init_test_dir as init_volume_test_dir,
 )
-from .test_workspace import (
+from tests.integration.test_workspace import (
     dbfs_url as workspace_dbfs_url,
 )
-from .test_workspace import (
+from tests.integration.test_workspace import (
     download as workspace_download,
 )
-from .test_workspace import (
+from tests.integration.test_workspace import (
     init_test_dir as init_workspace_test_dir,
 )
 
@@ -135,7 +134,7 @@ def test_dbx_fs_serialization():
     assert fs._legacy_fs is not fs2._legacy_fs
     assert fs._volume_fs is not fs2._volume_fs
     assert fs._workspace_fs is not fs2._workspace_fs
-    assert fs._local_fs is fs2._local_fs  # Local FS is cachable
+    assert fs._local_fs is fs2._local_fs  # Local FS is cacheable
 
 
 def test_dbx_fs_copy_file(
