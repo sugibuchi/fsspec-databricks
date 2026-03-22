@@ -19,8 +19,7 @@ from fsspec_databricks.volume import (
     VolumeReadableFile,
     VolumeWritableFile,
 )
-
-from .utils import bytes_sig, datetime_eq
+from tests.utils import bytes_sig, datetime_eq
 
 log = logging.getLogger(__name__)
 
