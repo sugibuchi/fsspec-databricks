@@ -81,7 +81,7 @@ jobs:
         run: |
           test_path="${{ github.ref_name }}/${{ inputs.python-version }}"
 
-          has_error=no          
+          has_error=no
           if [[ "${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}" == "" ]]; then
             echo "GitHub Actions variable FSSPEC_DATABRICKS_VOLUME_TEST_ROOT must be set."
             has_error=yes
@@ -108,7 +108,7 @@ jobs:
           DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
         run: |
-          uv run pytest
+          uv run pytest --log-cli-level=DEBUG
 
       - name: Run test with coverage
         if: ${{ inputs.coverage }}

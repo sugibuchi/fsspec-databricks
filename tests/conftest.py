@@ -33,6 +33,7 @@ def _event_loop(thread_name: str):
     def run():
         nonlocal loop
         loop = asyncio.new_event_loop()
+        loop.set_debug(True)
         asyncio.set_event_loop(loop)
         loop.call_soon(ready.set)
 
