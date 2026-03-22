@@ -929,7 +929,7 @@ class AbstractCachedFile(AbstractFile, ABC):
     @abstractmethod
     @contextmanager
     def _cached_data(self):
-        pass
+        """Return a file-like object for reading cached data"""
 
     def _release_cache(self):
         """Release the cache resource."""
