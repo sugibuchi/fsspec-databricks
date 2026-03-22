@@ -22,7 +22,7 @@ logging.getLogger("urllib3").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 # Disabling the caching of file system instances for Databricks
-AbstractDatabricksFileSystem.cachable = False
+AbstractDatabricksFileSystem.cacheable = False
 
 
 def _event_loop(thread_name: str):
@@ -39,11 +39,10 @@ def _event_loop(thread_name: str):
         try:
             loop.run_forever()
         finally:
-            if loop and not loop.is_closed():
-                loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
 
-    thread = Thread(name=thread_name, target=run)
+    thread = Thread(name=thread_name, target=run, daemon=True)
     thread.start()
     ready.wait(timeout=5.0)
 

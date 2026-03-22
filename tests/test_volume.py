@@ -102,36 +102,36 @@ def test_volume_file_multipart_write(
             f.write(data)
 
 
-# def test_volume_file_resumable_write(
-#     dummy_api,
-#     dummy_api_context,
-#     client_event_loop,
-# ):
-#     data = randbytes(20 * 1000 * 1000)
-#     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
-#
-#     dummy_api_context.upload_mode = "resumable"
-#
-#     with VolumeWritableFile(
-#         path=path,
-#         host=dummy_api,
-#         auth=_dummy_auth,
-#         loop=client_event_loop,
-#     ) as f:
-#         f.write(data)
-#
-#     actual = dummy_api_context.files[path]
-#     assert bytes_sig(data) == bytes_sig(actual)
-#
-#     dummy_api_context.check_signed_url = True
-#     dummy_api_context.files.clear()
-#
-#     with pytest.raises(IOError):
-#         with VolumeWritableFile(
-#             path=path,
-#             host=dummy_api,
-#             auth=_dummy_auth,
-#             loop=client_event_loop,
-#             use_presigned_url=False,
-#         ) as f:
-#             f.write(data)
+def test_volume_file_resumable_write(
+    dummy_api,
+    dummy_api_context,
+    client_event_loop,
+):
+    data = randbytes(20 * 1000 * 1000)
+    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+
+    dummy_api_context.upload_mode = "resumable"
+
+    with VolumeWritableFile(
+        path=path,
+        host=dummy_api,
+        auth=_dummy_auth,
+        loop=client_event_loop,
+    ) as f:
+        f.write(data)
+
+    actual = dummy_api_context.files[path]
+    assert bytes_sig(data) == bytes_sig(actual)
+
+    dummy_api_context.check_signed_url = True
+    dummy_api_context.files.clear()
+
+    with pytest.raises(IOError):
+        with VolumeWritableFile(
+            path=path,
+            host=dummy_api,
+            auth=_dummy_auth,
+            loop=client_event_loop,
+            use_presigned_url=False,
+        ) as f:
+            f.write(data)
