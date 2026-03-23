@@ -47,6 +47,7 @@ class AioHttpClientMixin:
             if self.__session is not None:
                 self.log.debug("Closing aiohttp ClientSession")
                 await self.__session.close()
+                self.log.debug("Closed aiohttp ClientSession")
         finally:
             self.__session = None
 

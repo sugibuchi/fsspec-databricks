@@ -367,8 +367,18 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
             The bytes in the specified range.
         """
 
+    async def _do_fetch_range(self, start: int, end: int) -> bytes:
+        try:
+            return await self._fetch_range(start, end)
+        except OSError:
+            raise
+        except Exception as e:
+            raise io_error(
+                self.path, f"Failed to fetch file range ({start}-{end})"
+            ) from e
+
     async def _schedule_fetch_task(self, start: int, end: int):
-        await self._schedule_task(start, end, self._fetch_range, start, end)
+        await self._schedule_task(start, end, self._do_fetch_range, start, end)
 
     async def _read(self, size: int = -1) -> bytes:  # noqa: C901
         self._ensure_not_closed()
@@ -647,7 +657,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             )
 
         except Exception as e:
-            raise io_error(self.path, "Failed to upload all data.") from e
+            raise io_error(self.path, "Failed to upload data") from e
 
     async def _do_start_multipart_upload(self) -> None:
         if self._multipart_uploading:
@@ -659,7 +669,19 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             self._multipart_uploading = True
             self.log.debug("Multipart upload started: path=%s", self.path)
         except Exception as e:
-            raise io_error(self.path, "Failed to start upload.") from e
+            raise io_error(self.path, "Failed to start upload") from e
+
+    async def _do_upload_part(
+        self, data: bytes, start: int, end: int, part_index: int, last_part: bool
+    ) -> Any:
+        try:
+            return await self._upload_part(data, start, end, part_index, last_part)
+        except OSError:
+            raise
+        except Exception as e:
+            raise io_error(
+                self.path, f"Failed to upload part {part_index} (bytes {start}-{end})"
+            ) from e
 
     async def _do_complete_multipart_upload(self) -> None:
         if not self._multipart_uploading:
@@ -671,7 +693,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             self.log.debug("Multipart upload completed: path=%s", self.path)
         except Exception as e:
             await self._do_abort_multipart_upload()
-            raise io_error(self.path, "Failed to complete upload.") from e
+            raise io_error(self.path, "Failed to complete upload") from e
         finally:
             self._multipart_uploading = False
             await self._cancel_all_tasks()
@@ -685,7 +707,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             await self._abort_multipart_upload()
             self.log.warning("Multipart upload aborted: path=%s", self.path)
         except Exception as e:
-            raise io_error(self.path, "Failed to abort upload.") from e
+            raise io_error(self.path, "Failed to abort upload") from e
         finally:
             self._multipart_uploading = False
             await self._cancel_all_tasks()
@@ -754,7 +776,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             await self._schedule_task(
                 start,
                 end,
-                self._upload_part,
+                self._do_upload_part,
                 data[:upload_size].tobytes(),
                 start,
                 end,
@@ -907,7 +929,7 @@ class AbstractCachedFile(AbstractFile, ABC):
             return self._remote_file_exists()
         except Exception as e:
             raise io_error(
-                self.path, message="Failed to check if remote file exists."
+                self.path, message="Failed to check if remote file exists"
             ) from e
 
     def _do_remote_file_download(self):
@@ -915,7 +937,7 @@ class AbstractCachedFile(AbstractFile, ABC):
             return self._remote_file_download()
         except Exception as e:
             raise io_error(
-                self.path, message="Failed to download remote file to cache."
+                self.path, message="Failed to download remote file to cache"
             ) from e
 
     def _do_remote_file_upload(self, data):
@@ -923,7 +945,7 @@ class AbstractCachedFile(AbstractFile, ABC):
             self._remote_file_upload(data)
         except Exception as e:
             raise io_error(
-                self.path, message="Failed to upload cache to remote file."
+                self.path, message="Failed to upload cache to remote file"
             ) from e
 
     @abstractmethod

@@ -18,8 +18,7 @@ from databricks.sdk.service.workspace import (
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.workspace import WorkspaceFileSystem
-
-from .utils import bytes_sig
+from tests.utils import bytes_sig
 
 log = logging.getLogger(__name__)
 

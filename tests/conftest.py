@@ -39,25 +39,31 @@ def _event_loop(thread_name: str):
         try:
             loop.run_forever()
         finally:
-            if loop and not loop.is_closed():
-                loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
 
-    thread = Thread(name=thread_name, target=run)
+    thread = Thread(name=thread_name, target=run, daemon=True)
+    log.debug("Starting thread for event loop: %s", thread_name)
     thread.start()
     ready.wait(timeout=5.0)
 
     if not loop or not loop.is_running():
         raise RuntimeError(f"Event loop in thread {thread_name} failed to start")
 
+    log.debug("Event loop in thread %s is ready: %s", thread_name, loop)
+
     try:
         yield loop
     finally:
         if loop and not loop.is_closed():
+            log.debug("Stopping event loop in thread: %s", thread_name)
             loop.call_soon_threadsafe(loop.stop)
+        log.debug("Waiting for event loop thread %s to stop", thread_name)
         thread.join(timeout=5.0)
         if thread.is_alive():
             raise RuntimeError(f"Event loop thread {thread_name} failed to stop")
+        else:
+            log.debug("Event loop thread %s has stopped", thread_name)
 
 
 @pytest.fixture(scope="session")
@@ -82,7 +88,11 @@ def dummy_api_context(dummy_api):
         yield context
     finally:
         context.files.clear()
-        context.upload_sessions.clear()
+        context.multipart_upload_sessions.clear()
+        context.resumable_upload_sessions.clear()
+
+        context.check_signed_url = False
+        context.upload_mode = "multipart"
 
 
 @pytest.fixture(scope="session")
