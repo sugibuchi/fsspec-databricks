@@ -7,22 +7,22 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat
 
 from fsspec_databricks import DatabricksFileSystem, use
-from tests.integration.test_volume import (
+from tests.test_volume_fs import (
     dbfs_url as volume_dbfs_url,
 )
-from tests.integration.test_volume import (
+from tests.test_volume_fs import (
     download as volume_download,
 )
-from tests.integration.test_volume import (
+from tests.test_volume_fs import (
     init_test_dir as init_volume_test_dir,
 )
-from tests.integration.test_workspace import (
+from tests.test_workspace_fs import (
     dbfs_url as workspace_dbfs_url,
 )
-from tests.integration.test_workspace import (
+from tests.test_workspace_fs import (
     download as workspace_download,
 )
-from tests.integration.test_workspace import (
+from tests.test_workspace_fs import (
     init_test_dir as init_workspace_test_dir,
 )
 
