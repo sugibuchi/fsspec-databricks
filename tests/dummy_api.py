@@ -61,7 +61,7 @@ class DummyAPIContext:
 
 def http_exception(error_code: str, message: str, status_code: int):
     """Create HTTPException object with logging"""
-    log.info(
+    log.debug(
         "Raising HTTPException: error_code=%s, message=%s, status_code=%d",
         error_code,
         message,
