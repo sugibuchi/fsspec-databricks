@@ -4,6 +4,7 @@ FastAPI application that simulates the behavior of the Databricks Files System A
 
 import asyncio
 import hashlib
+import logging
 import re
 import socket
 import time
@@ -23,6 +24,8 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from pydantic import BaseModel
 
+log = logging.getLogger(__name__)
+
 
 @dataclass
 class DummyAPIContext:
@@ -41,31 +44,37 @@ class DummyAPIContext:
 
     def check_multipart_upload_session(self, session_token: str):
         if session_token not in self.multipart_upload_sessions:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": f"Unknown multipart upload session: {session_token}",
-                },
-                status_code=400,
+            raise http_exception(
+                "BAD_REQUEST",
+                f"Unknown multipart upload session: {session_token}",
+                400,
             )
 
     def check_resumable_upload_session(self, session_token: str):
         if session_token not in self.resumable_upload_sessions:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": f"Unknown resumable upload session: {session_token}",
-                },
-                status_code=400,
+            raise http_exception(
+                "BAD_REQUEST",
+                f"Unknown resumable upload session: {session_token}",
+                400,
             )
 
 
-class UploadPartUrlRequest(BaseModel):
-    path: str
-    session_token: str
-    start_part_number: int | None = None
-    count: int | None = None
-    expire_time: datetime
+def http_exception(error_code: str, message: str, status_code: int):
+    """Create HTTPException object with logging"""
+    log.info(
+        "Raising HTTPException: error_code=%s, message=%s, status_code=%d",
+        error_code,
+        message,
+        status_code,
+    )
+
+    return HTTPException(
+        detail={
+            "error_code": error_code,
+            "message": message,
+        },
+        status_code=status_code,
+    )
 
 
 class Part(BaseModel):
@@ -109,33 +118,27 @@ async def get_file(
     signed: Annotated[str | None, Query()] = None,
 ):
     if context.check_signed_url and signed != "true":
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": "Signed URL is required",
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            "Signed URL is required",
+            400,
         )
 
     if file_path not in context.files:
-        raise HTTPException(
-            detail={
-                "error_code": "NOT_FOUND",
-                "message": "File not found",
-            },
-            status_code=404,
+        raise http_exception(
+            "NOT_FOUND",
+            "File not found",
+            404,
         )
 
     data = context.files[file_path]
     if range:
         m = _range_pat.fullmatch(range)
         if not m:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": "Invalid Range header",
-                },
-                status_code=400,
+            raise http_exception(
+                "BAD_REQUEST",
+                "Invalid Range header",
+                400,
             )
         first_pos = int(m.group("first_pos"))
         last_pos = int(m.group("last_pos"))
@@ -173,12 +176,10 @@ async def post_file(
     overwrite: Annotated[str | None, Query()] = None,
 ):
     if not overwrite and file_path in context.files:
-        raise HTTPException(
-            detail={
-                "error_code": "RESOURCE_ALREADY_EXISTS",
-                "message": f"File already exists: {file_path}",
-            },
-            status_code=409,
+        raise http_exception(
+            "RESOURCE_ALREADY_EXISTS",
+            f"File already exists: {file_path}",
+            409,
         )
 
     if action is not None:
@@ -193,12 +194,10 @@ async def post_file(
 
         elif action == "complete-upload":
             if upload_type != "multipart":
-                raise HTTPException(
-                    detail={
-                        "error_code": "BAD_REQUEST",
-                        "message": f"Invalid upload_type: {upload_type}",
-                    },
-                    status_code=400,
+                raise http_exception(
+                    "BAD_REQUEST",
+                    f"Invalid upload_type: {upload_type}",
+                    400,
                 )
 
             context.check_multipart_upload_session(session_token)
@@ -214,33 +213,27 @@ async def post_file(
             data = bytearray()
             for p in sorted(parts):
                 if p not in session:
-                    raise HTTPException(
-                        detail={
-                            "error_code": "BAD_REQUEST",
-                            "message": f"Invalid part number or etag: {p}",
-                        },
-                        status_code=400,
+                    raise http_exception(
+                        "BAD_REQUEST",
+                        f"Invalid part number or etag: {p}",
+                        400,
                     )
 
                 if session[p] is None:
-                    raise HTTPException(
-                        detail={
-                            "error_code": "BAD_REQUEST",
-                            "message": f"Data for part number {p[0]} is not uploaded",
-                        },
-                        status_code=400,
+                    raise http_exception(
+                        "BAD_REQUEST",
+                        f"Data for part number {p[0]} is not uploaded",
+                        400,
                     )
                 data.extend(session[p])
             context.files[file_path] = bytes(data)
 
             return Response(status_code=206)
 
-    raise HTTPException(
-        detail={
-            "error_code": "BAD_REQUEST",
-            "message": f"Invalid action: {action}",
-        },
-        status_code=400,
+    raise http_exception(
+        "BAD_REQUEST",
+        f"Invalid action: {action}",
+        400,
     )
 
 
@@ -256,12 +249,10 @@ async def put_file(
     signed: Annotated[str | None, Query()] = None,
 ):
     if context.check_signed_url and signed != "true":
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": "Signed URL is required",
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            "Signed URL is required",
+            400,
         )
 
     data = bytes(await request.body())
@@ -281,38 +272,32 @@ async def put_file(
                 "transfer-encoding": "chunked",
             },
         )
-    if upload_type == "resumable":
+    elif upload_type == "resumable":
         context.check_resumable_upload_session(session_token)
         uploaded, completed = context.resumable_upload_sessions[session_token]
 
         if content_range is None:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": "Content-Range header is required for resumable upload",
-                },
-                status_code=400,
+            raise http_exception(
+                "BAD_REQUEST",
+                "Content-Range header is required for resumable upload",
+                400,
             )
         m = _resumable_upload_content_range_pat.fullmatch(content_range)
 
         if not m:
-            raise HTTPException(
-                detail={
-                    "error_code": "BAD_REQUEST",
-                    "message": f"Invalid Content-Range header: {content_range}",
-                },
-                status_code=400,
+            raise http_exception(
+                "BAD_REQUEST",
+                f"Invalid Content-Range header: {content_range}",
+                400,
             )
 
         d = m.groupdict()
         if d["unknown_range"] != "*":
             if completed:
-                raise HTTPException(
-                    detail={
-                        "error_code": "BAD_REQUEST",
-                        "message": "File upload has already been completed",
-                    },
-                    status_code=400,
+                raise http_exception(
+                    "BAD_REQUEST",
+                    "File upload has already been completed",
+                    400,
                 )
 
             start = int(d["first_pos"])
@@ -320,12 +305,10 @@ async def put_file(
             total_size = None if d["total_size"] == "*" else int(d["total_size"])
 
             if total_size is None and (end - start) % (256 * 1024) != 0:
-                raise HTTPException(
-                    detail={
-                        "error_code": "BAD_REQUEST",
-                        "message": f"Content-Range must be a multiple of 256KB (256 * 1024): {content_range}",
-                    },
-                    status_code=400,
+                raise http_exception(
+                    "BAD_REQUEST",
+                    f"Content-Range must be a multiple of 256KB (256 * 1024): {content_range}",
+                    400,
                 )
 
             data = uploaded + data
@@ -354,12 +337,10 @@ async def delete_file(
     signed: Annotated[str | None, Query()] = None,
 ):
     if context.check_signed_url and signed != "true":
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": "Signed URL is required",
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            "Signed URL is required",
+            400,
         )
 
     if action == "abort-upload":
@@ -372,20 +353,19 @@ async def delete_file(
         return Response(status_code=204)
     elif action is None and upload_type is None and session_token is None:
         if file_path not in context.files:
-            raise HTTPException(
-                detail={"error_code": "NOT_FOUND", "message": "File not found"},
-                status_code=404,
+            raise http_exception(
+                "NOT_FOUND",
+                "File not found",
+                404,
             )
 
         del context.files[file_path]
         return Response(status_code=204)
     else:
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": f"Invalid action: action={action}, upload_type={upload_type}",
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            f"Invalid action: action={action}, upload_type={upload_type}",
+            400,
         )
 
 
@@ -395,12 +375,10 @@ async def create_download_url(
     expire_time: Annotated[datetime | None, Query()] = None,
 ):
     if path is None or expire_time is None:
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": f"Missing required queries: (path, expire_time)=({path}, {expire_time})",
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            f"Missing required queries: (path, expire_time)=({path}, {expire_time})",
+            400,
         )
 
     query = urllib.parse.urlencode({"signed": "true"})
@@ -421,12 +399,10 @@ async def create_upload_part_url(request: Request):
         count = body["count"]
         _ = body["expire_time"]
     except KeyError as e:
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": str(e),
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            str(e),
+            400,
         ) from e
 
     return {
@@ -457,12 +433,10 @@ async def create_resumable_upload_url(request: Request):
         path = body["path"]
         session_token = body["session_token"]
     except KeyError as e:
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": str(e),
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            str(e),
+            400,
         ) from e
 
     query = urllib.parse.urlencode(
@@ -485,12 +459,10 @@ async def create_abort_upload_url(request: Request):
         session_token = body["session_token"]
         _ = body["expire_time"]
     except KeyError as e:
-        raise HTTPException(
-            detail={
-                "error_code": "BAD_REQUEST",
-                "message": str(e),
-            },
-            status_code=400,
+        raise http_exception(
+            "BAD_REQUEST",
+            str(e),
+            400,
         ) from e
 
     query = urllib.parse.urlencode(
@@ -542,8 +514,13 @@ def serve_app(loop):
     try:
         yield server_url
     finally:
+        log.info("Closing the dummy API server")
         loop.call_soon_threadsafe(shutdown_event.set)
-        future.result()
+        try:
+            future.result(timeout=5.0)
+            log.info("Closed the dummy API server")
+        except TimeoutError:
+            log.info("Closed the dummy API server with timeout")
 
 
 __all__ = [
