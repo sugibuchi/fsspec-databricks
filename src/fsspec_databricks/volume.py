@@ -4,7 +4,7 @@ import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from io import UnsupportedOperation
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Any, Literal
 
 from aiohttp import (
@@ -12,6 +12,7 @@ from aiohttp import (
     ClientMiddlewareType,
     ClientRequest,
     ClientResponse,
+    ClientResponseError,
     ClientTimeout,
 )
 from databricks.sdk import WorkspaceClient
@@ -182,50 +183,54 @@ class VolumeFileSystem(DBFS):
 
         self.__loop = None
         self.__io_thread: Thread | None = None
+        self._lock = Lock()
 
     def __getstate__(self):
         state = super().__getstate__()
         del state["_VolumeFileSystem__loop"]
         del state["_VolumeFileSystem__io_thread"]
+        del state["_lock"]
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self.__loop = None
         self.__io_thread = None
+        self._lock = Lock()
 
     @property
     def _loop(self):
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
-        if self.__loop is None:
-            ready = Event()
+        with self._lock:
+            if self.__loop is None:
+                ready = Event()
 
-            def run_loop():
-                self.__loop = asyncio.new_event_loop()
-                self.log.debug("Running event loop in IO thread.")
-                asyncio.set_event_loop(self.__loop)
-                self.__loop.call_soon(ready.set)
+                def run_loop():
+                    self.__loop = asyncio.new_event_loop()
+                    self.log.debug("Running event loop in IO thread.")
+                    asyncio.set_event_loop(self.__loop)
+                    self.__loop.call_soon(ready.set)
 
-                try:
-                    self.__loop.run_forever()
-                finally:
-                    self.log.debug("Shutting down async tasks.")
-                    self.__loop.run_until_complete(self.__loop.shutdown_asyncgens())
-                    self.log.debug("Closing event loop.")
-                    self.__loop.close()
-                    self.log.debug("Event loop closed. Finishing IO thread.")
+                    try:
+                        self.__loop.run_forever()
+                    finally:
+                        self.log.debug("Shutting down async tasks.")
+                        self.__loop.run_until_complete(self.__loop.shutdown_asyncgens())
+                        self.log.debug("Closing event loop.")
+                        self.__loop.close()
+                        self.log.debug("Event loop closed. Finishing IO thread.")
 
-            self.__io_thread = Thread(
-                target=run_loop, name="dbfs-io-thread", daemon=True
-            )
+                self.__io_thread = Thread(
+                    target=run_loop, name="dbfs-io-thread", daemon=True
+                )
 
-            self.__io_thread.start()
-            ready.wait(timeout=5.0)
+                self.__io_thread.start()
+                ready.wait(timeout=5.0)
 
-            if self.__loop is None or not self.__loop.is_running():
-                raise RuntimeError("Event loop in IO thread failed to start")
+                if self.__loop is None or not self.__loop.is_running():
+                    raise RuntimeError("Event loop in IO thread failed to start")
 
         return self.__loop
 
@@ -587,7 +592,7 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
                     result = await response.json()
                     try:
                         response.raise_for_status()
-                    except:
+                    except ClientResponseError:
                         self.log.error(
                             "Failed to create presigned URL: path=%s, response=%s",
                             self.path,
