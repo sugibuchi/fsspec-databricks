@@ -1,3 +1,5 @@
+"""Utilities for parsing Databricks file path URLs."""
+
 import re
 from enum import Enum
 
@@ -127,10 +129,10 @@ def parse_volume_path(
     if not m:
         raise ValueError(f"Invalid Unity Catalog Volume URL: {path}")
 
-    catalog = m.group(1) or None
-    schema = m.group(2) or None
-    volume = m.group(3) or None
-    path = f"/{m.group(4) or ''}" if volume else None
+    catalog = m.group("catalog") or None
+    schema = m.group("schema") or None
+    volume = m.group("volume") or None
+    path = f"/{m.group('path') or ''}" if volume else None
     return catalog, schema, volume, path, stripped
 
 
@@ -153,7 +155,7 @@ def parse_workspace_path(path: str) -> str:
     if not m:
         raise ValueError(f"Invalid Workspace file URL: {path}")
 
-    return f"/{m.group(1) or ''}"
+    return f"/{m.group('path') or ''}"
 
 
 def parse_dbfs_path(path: str) -> str:
