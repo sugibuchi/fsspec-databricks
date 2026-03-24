@@ -889,6 +889,10 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                     break  # Upload is done
                 if response.status == 308:
                     m = _range_pat.match(response.headers.get("Range") or "")
+                    if m is None:
+                        raise io_error(
+                            f"Invalid or missing Range header in resumable upload response: path={self.path}"
+                        )
                     confirmed = int(m.group("end"))
                     if confirmed == end - 1:
                         break
