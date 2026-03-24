@@ -5,16 +5,18 @@ import math
 import os
 import re
 from abc import ABC, abstractmethod
-from asyncio import CancelledError
+from asyncio import AbstractEventLoop, CancelledError
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import contextmanager
 from io import BytesIO, RawIOBase, UnsupportedOperation
 from tempfile import NamedTemporaryFile
 from time import perf_counter
-from typing import Any
+from typing import Any, TypeVar
 
 from .error import file_exists_error, file_not_found_error, io_error, os_error
+
+T = TypeVar("T")
 
 
 class AbstractFile(RawIOBase):
@@ -64,14 +66,16 @@ class AbstractAsyncFile(AbstractFile):
     def __init__(
         self,
         path: str,
-        loop,
+        loop: AbstractEventLoop,
         verbose_debug_log: bool | None = None,
     ):
         super().__init__(path=path, verbose_debug_log=verbose_debug_log)
 
-        self._loop = loop
+        self._loop: AbstractEventLoop | None = loop
 
-    def _run_and_wait(self, async_func: Callable[..., Coroutine], *args, **kwargs):
+    def _run_and_wait(
+        self, async_func: Callable[..., Coroutine[Any, Any, T]], *args, **kwargs
+    ) -> T:
         """Run an asynchronous function in the background event loop and wait for the result."""
         try:
             running_loop = asyncio.get_running_loop()
@@ -94,7 +98,7 @@ class AbstractAsyncFile(AbstractFile):
             async_func(*args, **kwargs), self._loop
         ).result()
 
-    async def aclose(self):
+    async def aclose(self) -> None:
         """Asynchronously flush and close the file, releasing any resources associated with it."""
         if not self.closed:
             try:
@@ -127,7 +131,7 @@ class _FileRangeTask(Awaitable):
     def get_name(self) -> str:
         return self.task.get_name()
 
-    def done(self):
+    def done(self) -> None:
         return self.task.done()
 
     def cancel(self, msg: Any | None = None) -> bool:
@@ -151,7 +155,7 @@ class FileRangeTaskSupport(AbstractAsyncFile):
     def __init__(
         self,
         path: str,
-        loop,
+        loop: AbstractEventLoop,
         max_concurrency: int | None = None,
         verbose_debug_log: bool | None = None,
     ):
@@ -302,7 +306,7 @@ class FileRangeTaskSupport(AbstractAsyncFile):
                 self.path,
             )
 
-    async def aclose(self):
+    async def aclose(self) -> None:
         if not self.closed:
             try:
                 await self._cancel_all_tasks()
@@ -322,7 +326,7 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
     def __init__(
         self,
         path: str,
-        loop,
+        loop: AbstractEventLoop,
         size: int,
         max_concurrency: int | None = None,
         min_block_size: int | None = None,
@@ -502,7 +506,7 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
 
         return bytes(data)
 
-    def readable(self):
+    def readable(self) -> bool:
         self._ensure_not_closed()
         return True
 
@@ -587,7 +591,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
     def __init__(
         self,
         path: str,
-        loop,
+        loop: AbstractEventLoop,
         max_concurrency: int | None = None,
         min_block_size: int | None = None,
         max_block_size: int | None = None,
@@ -811,7 +815,7 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
             )
             await asyncio.gather(*self._tasks)
 
-    def writable(self):
+    def writable(self) -> bool:
         self._ensure_not_closed()
         return True
 
@@ -836,11 +840,11 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
         self._ensure_not_closed()
         return self._run_and_wait(self._write, data)
 
-    def flush(self):
+    def flush(self) -> None:
         self._ensure_not_closed()
         # No eager flush operation to avoid uploading too small data blocks.
 
-    async def aclose(self):
+    async def aclose(self) -> None:
         if not self.closed:
             try:
                 if self._task_error:
