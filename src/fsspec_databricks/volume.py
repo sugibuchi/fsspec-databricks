@@ -183,27 +183,27 @@ class VolumeFileSystem(DBFS):
 
         self.__loop = None
         self.__io_thread: Thread | None = None
-        self._lock = Lock()
+        self.__lock = Lock()
 
     def __getstate__(self):
         state = super().__getstate__()
         del state["_VolumeFileSystem__loop"]
         del state["_VolumeFileSystem__io_thread"]
-        del state["_lock"]
+        del state["_VolumeFileSystem__lock"]
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self.__loop = None
         self.__io_thread = None
-        self._lock = Lock()
+        self.__lock = Lock()
 
     @property
     def _loop(self):
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
-        with self._lock:
+        with self.__lock:
             if self.__loop is None:
                 ready = Event()
 
@@ -360,7 +360,7 @@ class VolumeFileSystem(DBFS):
                 if "is not empty" in e.args[0]:
                     raise not_empty_error(path) from e
                 else:
-                    raise e
+                    raise
 
     def _open(
         self,
@@ -736,7 +736,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             result = await response.json()
             try:
                 response.raise_for_status()
-            except:
+            except ClientResponseError:
                 self.log.error(
                     "Failed to initiate upload: path=%s, response=%s", self.path, result
                 )
@@ -777,7 +777,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 result = await response.json()
                 try:
                     response.raise_for_status()
-                except:
+                except ClientResponseError:
                     self.log.error(
                         "Failed to get URL for part upload: path=%s, response=%s",
                         self.path,
@@ -843,7 +843,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 result = await response.json()
                 try:
                     response.raise_for_status()
-                except:
+                except ClientResponseError:
                     self.log.error(
                         "Failed to get URL for resumable upload: path=%s, response=%s",
                         self.path,
@@ -928,7 +928,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             text = await response.text()
             try:
                 response.raise_for_status()
-            except:
+            except ClientResponseError:
                 self.log.error(
                     "Failed to complete upload: path=%s, response=%s", self.path, text
                 )
@@ -950,7 +950,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 result = await response.json()
                 try:
                     response.raise_for_status()
-                except:
+                except ClientResponseError:
                     self.log.error(
                         "Failed to get URL for upload abort: path=%s, response=%s",
                         self.path,
