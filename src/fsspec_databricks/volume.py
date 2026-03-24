@@ -183,27 +183,27 @@ class VolumeFileSystem(DBFS):
 
         self.__loop = None
         self.__io_thread: Thread | None = None
-        self._lock = Lock()
+        self.__lock = Lock()
 
     def __getstate__(self):
         state = super().__getstate__()
         del state["_VolumeFileSystem__loop"]
         del state["_VolumeFileSystem__io_thread"]
-        del state["_lock"]
+        del state["_VolumeFileSystem__lock"]
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self.__loop = None
         self.__io_thread = None
-        self._lock = Lock()
+        self.__lock = Lock()
 
     @property
     def _loop(self):
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
-        with self._lock:
+        with self.__lock:
             if self.__loop is None:
                 ready = Event()
 
