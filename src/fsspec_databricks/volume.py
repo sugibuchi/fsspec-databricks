@@ -736,7 +736,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             result = await response.json()
             try:
                 response.raise_for_status()
-            except:
+            except ClientResponseError:
                 self.log.error(
                     "Failed to initiate upload: path=%s, response=%s", self.path, result
                 )
@@ -777,7 +777,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 result = await response.json()
                 try:
                     response.raise_for_status()
-                except:
+                except ClientResponseError:
                     self.log.error(
                         "Failed to get URL for part upload: path=%s, response=%s",
                         self.path,
@@ -843,7 +843,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 result = await response.json()
                 try:
                     response.raise_for_status()
-                except:
+                except ClientResponseError:
                     self.log.error(
                         "Failed to get URL for resumable upload: path=%s, response=%s",
                         self.path,
@@ -928,7 +928,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             text = await response.text()
             try:
                 response.raise_for_status()
-            except:
+            except ClientResponseError:
                 self.log.error(
                     "Failed to complete upload: path=%s, response=%s", self.path, text
                 )
@@ -950,7 +950,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                 result = await response.json()
                 try:
                     response.raise_for_status()
-                except:
+                except ClientResponseError:
                     self.log.error(
                         "Failed to get URL for upload abort: path=%s, response=%s",
                         self.path,
