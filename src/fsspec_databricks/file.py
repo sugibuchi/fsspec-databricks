@@ -7,12 +7,12 @@ import re
 from abc import ABC, abstractmethod
 from asyncio import AbstractEventLoop, CancelledError
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Generator
 from contextlib import contextmanager
 from io import BytesIO, RawIOBase, UnsupportedOperation
 from tempfile import NamedTemporaryFile
 from time import perf_counter
-from typing import Any, TypeVar
+from typing import IO, Any, TypeVar
 
 from .error import file_exists_error, file_not_found_error, io_error, os_error
 
@@ -131,7 +131,7 @@ class _FileRangeTask(Awaitable):
     def get_name(self) -> str:
         return self.task.get_name()
 
-    def done(self) -> None:
+    def done(self) -> bool:
         return self.task.done()
 
     def cancel(self, msg: Any | None = None) -> bool:
@@ -913,7 +913,7 @@ class AbstractCachedFile(AbstractFile, ABC):
             raise
 
     @abstractmethod
-    def _initialize_cache(self):
+    def _initialize_cache(self) -> IO[bytes]:
         """Initialize the local cache resource for the file content and return the resource object."""
 
     @abstractmethod
@@ -925,7 +925,7 @@ class AbstractCachedFile(AbstractFile, ABC):
         """Download the remote file and return a readable file-like object for the downloaded content."""
 
     @abstractmethod
-    def _remote_file_upload(self, data) -> None:
+    def _remote_file_upload(self, data: IO[bytes]) -> None:
         """Upload the given data from a readable file-like object to the remote file."""
 
     def _do_remote_file_exists(self):
@@ -954,7 +954,7 @@ class AbstractCachedFile(AbstractFile, ABC):
 
     @abstractmethod
     @contextmanager
-    def _cached_data(self):
+    def _cached_data(self) -> Generator[IO[bytes], None, None]:
         """Return a file-like object for reading cached data"""
 
     def _release_cache(self):
