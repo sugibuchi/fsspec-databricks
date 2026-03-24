@@ -360,7 +360,7 @@ class VolumeFileSystem(DBFS):
                 if "is not empty" in e.args[0]:
                     raise not_empty_error(path) from e
                 else:
-                    raise e
+                    raise
 
     def _open(
         self,
