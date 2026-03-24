@@ -928,7 +928,7 @@ class AbstractCachedFile(AbstractFile, ABC):
     def _remote_file_upload(self, data: IO[bytes]) -> None:
         """Upload the given data from a readable file-like object to the remote file."""
 
-    def _do_remote_file_exists(self):
+    def _do_remote_file_exists(self) -> bool:
         try:
             return self._remote_file_exists()
         except Exception as e:
@@ -936,7 +936,7 @@ class AbstractCachedFile(AbstractFile, ABC):
                 self.path, message="Failed to check if remote file exists"
             ) from e
 
-    def _do_remote_file_download(self):
+    def _do_remote_file_download(self) -> Any:
         try:
             return self._remote_file_download()
         except Exception as e:
@@ -944,7 +944,7 @@ class AbstractCachedFile(AbstractFile, ABC):
                 self.path, message="Failed to download remote file to cache"
             ) from e
 
-    def _do_remote_file_upload(self, data):
+    def _do_remote_file_upload(self, data: IO[bytes]) -> None:
         try:
             self._remote_file_upload(data)
         except Exception as e:
@@ -957,7 +957,7 @@ class AbstractCachedFile(AbstractFile, ABC):
     def _cached_data(self) -> Generator[IO[bytes], None, None]:
         """Return a file-like object for reading cached data"""
 
-    def _release_cache(self):
+    def _release_cache(self) -> None:
         """Release the cache resource."""
         if self._cache:
             try:
@@ -965,7 +965,7 @@ class AbstractCachedFile(AbstractFile, ABC):
             finally:
                 self._cache = None
 
-    def _download_remote_file_to_cache(self):
+    def _download_remote_file_to_cache(self) -> None:
         self.log.debug("Downloading remote file to cache: path=%s", self.path)
 
         with self._do_remote_file_download() as src:
@@ -982,7 +982,7 @@ class AbstractCachedFile(AbstractFile, ABC):
             self._cache.tell(),
         )
 
-    def _upload_cache_to_remote_file(self):
+    def _upload_cache_to_remote_file(self) -> None:
         self.log.debug("Uploading cache to remote file: path=%s", self.path)
 
         with self._cached_data() as data:
@@ -1000,15 +1000,15 @@ class AbstractCachedFile(AbstractFile, ABC):
             finally:
                 self._release_cache()
 
-    def readable(self):
+    def readable(self) -> bool:
         """Return True if the file can be read from."""
         return self._readable and self._ensure_not_closed()
 
-    def writable(self):
+    def writable(self) -> bool:
         """Return True if the file can be written to."""
         return self._writable and self._ensure_not_closed()
 
-    def seekable(self):
+    def seekable(self) -> bool:
         """Return True if the file supports random access."""
         return self._ensure_not_closed()
 
@@ -1142,7 +1142,7 @@ class FileCachedFile(AbstractCachedFile, ABC):
             self._cache = open(self._cache_file_name, "r+b")  # noqa: SIM115
             self._cache.seek(pos)
 
-    def _release_cache(self):
+    def _release_cache(self) -> None:
         if self._cache:
             try:
                 super()._release_cache()
