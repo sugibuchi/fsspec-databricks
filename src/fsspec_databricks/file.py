@@ -903,7 +903,7 @@ class AbstractCachedFile(AbstractFile, ABC):
                         self._cache.seek(0)
                 elif "r" in mode:
                     raise file_not_found_error(path)
-        except:
+        except BaseException:
             # Eagerly release cache resources
             self._release_cache()
             raise
