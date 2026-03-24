@@ -159,7 +159,7 @@ class WorkspaceFileSystem(AbstractDatabricksFileSystem):
         if source_info["object_type"] == "NOTEBOOK":
             export_format = ExportFormat.SOURCE
             import_format = ImportFormat.SOURCE
-            language = Language(source_info["language"])
+            language = value_of(source_info["language"], Language)
         else:
             export_format = ExportFormat.AUTO
             import_format = ImportFormat.RAW

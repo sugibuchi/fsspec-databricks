@@ -250,7 +250,7 @@ class VolumeFileSystem(DBFS):
                 super().close()
 
     @staticmethod
-    def _ensure_in_volume(*paths: str):
+    def _ensure_in_volume(*paths: str) -> None:
         """Ensure the given paths are within Unity Catalog Volumes"""
         for path in paths:
             _, _, _, path_in_volume, _ = parse_volume_path(path)
@@ -396,7 +396,7 @@ class VolumeFileSystem(DBFS):
                 host=self.config.host,
                 auth=_workspace_authenticator(self.config),
                 loop=self._loop,
-                size=int(info.get("size")),
+                size=int(info["size"]),
                 max_concurrency=max_concurrency or self.max_read_concurrency,
                 min_block_size=min_block_size or self.min_read_block_size,
                 max_block_size=max_block_size or self.max_read_block_size,
@@ -889,6 +889,11 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
                     break  # Upload is done
                 if response.status == 308:
                     m = _range_pat.match(response.headers.get("Range") or "")
+                    if m is None:
+                        raise io_error(
+                            f"Invalid or missing Range header in resumable upload response: "
+                            f"header={response.headers.get('Range')!r}, path={self.path}"
+                        )
                     confirmed = int(m.group("end"))
                     if confirmed == end - 1:
                         break
