@@ -1,9 +1,14 @@
 import asyncio
 import logging
 import os
+import tempfile
 from asyncio import AbstractEventLoop
+from base64 import b64encode
+from random import randbytes, randint
 from threading import Event, Thread
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
@@ -93,6 +98,28 @@ def dummy_api_context(dummy_api):
 
         context.check_signed_url = False
         context.upload_mode = "multipart"
+
+
+@pytest.fixture(scope="session")
+def dummy_table():
+    return [
+        {
+            "id": i,
+            "col_1": randint(0, 256),
+            "col_2": b64encode(randbytes(64)),
+        }
+        for i in range(256 * 1024)
+    ]
+
+
+@pytest.fixture(scope="session")
+def dummy_table_parquet(dummy_table):
+    with tempfile.TemporaryFile() as f:
+        pq.write_table(pa.Table.from_pylist(dummy_table), f)
+        f.seek(0)
+        data = f.read()
+
+    return data
 
 
 @pytest.fixture(scope="session")
