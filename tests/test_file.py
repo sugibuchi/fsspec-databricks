@@ -1,11 +1,16 @@
 import asyncio
+import tempfile
+from base64 import b64encode
 from datetime import datetime, timedelta, timezone
 from io import BytesIO, UnsupportedOperation
-from random import randbytes
+from random import randbytes, randint
 from time import perf_counter
 from typing import Any
 from unittest.mock import patch
 
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from fsspec_databricks.file import (
@@ -447,6 +452,39 @@ async def test_abstract_async_readable_file_adaptive_read(
         assert file._read_length == 0
 
 
+def test_abstract_async_readable_file_read_parquet(
+    client_event_loop, dummy_api, dummy_api_context
+):
+    with tempfile.TemporaryFile() as f:
+        table = [
+            {
+                "id": i,
+                "col_1": randint(0, 256),
+                "col_2": b64encode(randbytes(64)),
+            }
+            for i in range(256 * 1024)
+        ]
+        pq.write_table(pa.Table.from_pylist(table), f)
+        f.seek(0)
+        data = f.read()
+
+    dummy_api_context.files["/path/to/file.parquet"] = data
+
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file.parquet",
+        loop=client_event_loop,
+        size=len(data),
+    ) as file:
+        df = pd.read_parquet(file)
+
+    df.sort_values(by="id")
+    assert df.shape == (256 * 1024, 3)
+    assert df.head(1).to_dict("records") == [table[0]]
+    assert df.iloc[123:456, :].to_dict("records") == table[123:456]
+    assert df.tail(1).to_dict("records") == [table[-1]]
+
+
 def expire_time() -> str:
     return (datetime.now(tz=timezone.utc) + timedelta(minutes=10)).isoformat()
 
@@ -737,6 +775,36 @@ async def test_abstract_async_writable_file_write_with_errors(
     assert not dummy_api_context.files
     # Abort of the file upload failed -> Session remains
     assert dummy_api_context.multipart_upload_sessions
+
+
+def test_abstract_async_readable_file_write_parquet(
+    client_event_loop, dummy_api, dummy_api_context
+):
+    with DummyWritableFile(
+        base_url=dummy_api,
+        path="/path/to/file.parquet",
+        loop=client_event_loop,
+    ) as file:
+        table = [
+            {
+                "id": i,
+                "col_1": randint(0, 256),
+                "col_2": b64encode(randbytes(64)),
+            }
+            for i in range(256 * 1024)
+        ]
+        pq.write_table(pa.Table.from_pylist(table), file)
+
+    with tempfile.TemporaryFile() as f:
+        f.write(dummy_api_context.files["/path/to/file.parquet"])
+        f.seek(0)
+        df = pd.read_parquet(f)
+
+    df.sort_values(by="id")
+    assert df.shape == (256 * 1024, 3)
+    assert df.head(1).to_dict("records") == [table[0]]
+    assert df.iloc[123:456, :].to_dict("records") == table[123:456]
+    assert df.tail(1).to_dict("records") == [table[-1]]
 
 
 class DummyCachedFileMixin:
