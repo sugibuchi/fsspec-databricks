@@ -38,8 +38,8 @@ classifiers = [
 
 dependencies = [
     "fsspec",
-    "databricks-sdk",
-    "aiohttp",
+    "databricks-sdk>0.99",
+    "aiohttp>3.12",
 ]
 
 [project.urls]

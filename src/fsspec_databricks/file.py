@@ -514,6 +514,15 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
         self._ensure_not_closed()
         return self._run_and_wait(self._read, size)
 
+    def readall(self) -> bytes:
+        return self.read(-1)
+
+    def readinto(self, b) -> int:
+        data = self.read(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
     def tell(self) -> int:
         self._ensure_not_closed()
         return self._pos

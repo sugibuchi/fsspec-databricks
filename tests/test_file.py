@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
-from io import BytesIO, UnsupportedOperation
+from io import BufferedReader, BufferedWriter, BytesIO, UnsupportedOperation
 from random import randbytes
 from time import perf_counter
 from typing import Any
@@ -300,6 +300,94 @@ async def test_abstract_async_readable_file_read(
 
 
 @pytest.mark.asyncio
+async def test_abstract_async_readable_file_readall(
+    dummy_api, dummy_api_context, client_event_loop
+):
+    size = 10 * 1024 * 1024
+    block_size = 1000 * 1000
+    dummy_api_context.files["/path/to/file"] = randbytes(size)
+
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as file:
+        data = file.readall()
+        assert bytes_sig(data) == bytes_sig(dummy_api_context.files["/path/to/file"])
+        assert file.tell() == size
+
+    # readall from a non-zero position
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as file:
+        file.seek(1000)
+        data = file.readall()
+        assert bytes_sig(data) == bytes_sig(
+            dummy_api_context.files["/path/to/file"][1000:]
+        )
+        assert file.tell() == size
+
+
+@pytest.mark.asyncio
+async def test_abstract_async_readable_file_readinto(
+    dummy_api, dummy_api_context, client_event_loop
+):
+    size = 10 * 1024 * 1024
+    block_size = 1000 * 1000
+    dummy_api_context.files["/path/to/file"] = randbytes(size)
+
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as file:
+        buf = bytearray(size)
+        n = file.readinto(buf)
+        assert n == size
+        assert bytes_sig(bytes(buf)) == bytes_sig(
+            dummy_api_context.files["/path/to/file"]
+        )
+        assert file.tell() == size
+
+    # readinto with a larger buffer than remaining data
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as file:
+        file.seek(size - 100)
+        buf = bytearray(200)
+        n = file.readinto(buf)
+        assert n == 100
+        assert bytes_sig(buf[:100]) == bytes_sig(
+            dummy_api_context.files["/path/to/file"][size - 100 :]
+        )
+
+    # readinto at EOF returns 0
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as file:
+        file.seek(size)
+        buf = bytearray(100)
+        n = file.readinto(buf)
+        assert n == 0
+
+
+@pytest.mark.asyncio
 async def test_abstract_async_readable_file_seek(
     dummy_api, dummy_api_context, client_event_loop
 ):
@@ -448,6 +536,66 @@ async def test_abstract_async_readable_file_adaptive_read(
 
         file.seek(123)
         assert file._read_length == 0
+
+
+@pytest.mark.asyncio
+async def test_abstract_async_readable_file_buffered_reader(
+    dummy_api, dummy_api_context, client_event_loop
+):
+    size = 10 * 1024 * 1024
+    block_size = 1000 * 1000
+    dummy_api_context.files["/path/to/file"] = randbytes(size)
+
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as raw:
+        with BufferedReader(raw) as buf:
+            data = buf.read()
+            assert bytes_sig(data) == bytes_sig(
+                dummy_api_context.files["/path/to/file"]
+            )
+
+    # Partial reads via BufferedReader
+    with DummyReadableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        size=size,
+        block_size=block_size,
+    ) as raw:
+        with BufferedReader(raw) as buf:
+            chunk1 = buf.read(1024)
+            chunk2 = buf.read(1024)
+            assert bytes_sig(chunk1) == bytes_sig(
+                dummy_api_context.files["/path/to/file"][:1024]
+            )
+            assert bytes_sig(chunk2) == bytes_sig(
+                dummy_api_context.files["/path/to/file"][1024:2048]
+            )
+
+
+@pytest.mark.asyncio
+async def test_abstract_async_writable_file_buffered_writer(
+    dummy_api, dummy_api_context, client_event_loop
+):
+    data = randbytes(10 * 1024 * 1024)
+
+    with DummyWritableFile(
+        base_url=dummy_api,
+        path="/path/to/file",
+        loop=client_event_loop,
+        block_size=1000 * 1000,
+        max_concurrency=5,
+    ) as raw:
+        with BufferedWriter(raw) as buf:
+            buf.write(data[: 5 * 1024 * 1024])
+            buf.write(data[5 * 1024 * 1024 :])
+
+    assert bytes_sig(data) == bytes_sig(dummy_api_context.files["/path/to/file"])
 
 
 def test_abstract_async_readable_file_read_parquet(
