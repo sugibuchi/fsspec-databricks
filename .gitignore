@@ -87,3 +87,7 @@ uv.lock
 
 build/
 downstream/*
+
+# Claude Code
+CLAUDE.local.md
+.claude/settings.local.json

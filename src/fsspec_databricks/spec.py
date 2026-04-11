@@ -22,22 +22,22 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     protocol = scheme
 
-    volume_fs_max_read_concurrency: int = 10
+    volume_fs_max_read_concurrency: int = 24
     """The maximum number of concurrent file read operations on a Unity Catalog Volume file."""
 
-    volume_fs_min_read_block_size: int = 512 * 1024
+    volume_fs_min_read_block_size: int = 1024 * 1024
     """The minimum data size to read for each read operation on a Unity Catalog Volume file."""
 
-    volume_fs_max_read_block_size: int = 8 * 1024 * 1024
+    volume_fs_max_read_block_size: int = 4 * 1024 * 1024
     """The maximum data size to read for each read operation on a Unity Catalog Volume file."""
 
-    volume_fs_max_write_concurrency: int = 10
+    volume_fs_max_write_concurrency: int = 24
     """The maximum number of concurrent file write operations on a Unity Catalog Volume file."""
 
     volume_fs_min_write_block_size: int = 5 * 1024 * 1024
     """The minimum data size to write for each write operation on a Unity Catalog Volume file."""
 
-    volume_fs_max_write_block_size: int = 32 * 1024 * 1024
+    volume_fs_max_write_block_size: int = 16 * 1024 * 1024
     """The maximum data size to write for each write operation on a Unity Catalog Volume file."""
 
     volume_min_multipart_upload_size: int = 5 * 1024 * 1024
