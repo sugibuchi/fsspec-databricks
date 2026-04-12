@@ -10,6 +10,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from aiohttp import ClientSession
 
 from fsspec_databricks.file import (
     AbstractAsyncFile,
@@ -19,7 +20,6 @@ from fsspec_databricks.file import (
     FileRangeTaskSupport,
     MemoryCachedFile,
 )
-from fsspec_databricks.http import AioHttpClientMixin
 
 from .utils import bytes_sig
 
@@ -192,10 +192,11 @@ async def test_file_range_task_support_cancel_all():
         assert all(t.task.done() for t in tasks)
 
 
-class DummyReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
+class DummyReadableFile(AbstractAsyncReadableFile):
     def __init__(
         self,
         path: str,
+        session: ClientSession,
         base_url: str,
         loop,
         size: int,
@@ -216,70 +217,69 @@ class DummyReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
             verbose_debug_log=verbose_debug_log,
         )
 
-        self._config_session(base_url=base_url)
-
+        self._session = session
+        self._base_url = base_url.rstrip("/")
         self.fetched_ranges = []
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
         self.fetched_ranges.append((start, end))
         async with self._session.get(
-            f"/api/2.0/fs/files{self.path}",
+            f"{self._base_url}/api/2.0/fs/files{self.path}",
             headers={"Range": f"bytes={start}-{end - 1}"},
         ) as response:
             response.raise_for_status()
             return await response.read()
 
-    async def aclose(self):
-        if not self.closed:
-            try:
-                await super().aclose()
-            finally:
-                await self._close_session()
-
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_init():
-    async with DummyReadableFile(
-        base_url="https:///text.api",
-        path="/path/to/file",
-        loop=asyncio.get_event_loop(),
-        size=10 * 1024 * 1024,
-    ) as file1:
-        assert file1._file_size == 10 * 1024 * 1024
-        assert file1.min_block_size == AbstractAsyncReadableFile.min_block_size
-        assert file1.max_block_size == AbstractAsyncReadableFile.max_block_size
+    loop = asyncio.get_event_loop()
+    async with ClientSession() as session:
+        async with DummyReadableFile(
+            session=session,
+            base_url="https://dummy.api",
+            path="/path/to/file",
+            loop=loop,
+            size=10 * 1024 * 1024,
+        ) as file1:
+            assert file1._file_size == 10 * 1024 * 1024
+            assert file1.min_block_size == AbstractAsyncReadableFile.min_block_size
+            assert file1.max_block_size == AbstractAsyncReadableFile.max_block_size
 
-    async with DummyReadableFile(
-        base_url="https:///text.api",
-        path="/path/to/file",
-        loop=asyncio.get_event_loop(),
-        size=10 * 1024 * 1024,
-        block_size=123 * 1024,
-    ) as file2:
-        assert file2.min_block_size == 123 * 1024
-        assert file2.max_block_size == 123 * 1024
+        async with DummyReadableFile(
+            session=session,
+            base_url="https://dummy.api",
+            path="/path/to/file",
+            loop=loop,
+            size=10 * 1024 * 1024,
+            block_size=123 * 1024,
+        ) as file2:
+            assert file2.min_block_size == 123 * 1024
+            assert file2.max_block_size == 123 * 1024
 
-    async with DummyReadableFile(
-        base_url="https:///text.api",
-        path="/path/to/file",
-        loop=asyncio.get_event_loop(),
-        size=10 * 1024 * 1024,
-        min_block_size=456 * 1024,
-        max_block_size=789 * 1024,
-    ) as file3:
-        assert file3.min_block_size == 456 * 1024
-        assert file3.max_block_size == 789 * 1024
+        async with DummyReadableFile(
+            session=session,
+            base_url="https://dummy.api",
+            path="/path/to/file",
+            loop=loop,
+            size=10 * 1024 * 1024,
+            min_block_size=456 * 1024,
+            max_block_size=789 * 1024,
+        ) as file3:
+            assert file3.min_block_size == 456 * 1024
+            assert file3.max_block_size == 789 * 1024
 
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_read(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     size = 10 * 1024 * 1024
     block_size = 1000 * 1000
     dummy_api_context.files["/path/to/file"] = randbytes(size)
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -301,13 +301,14 @@ async def test_abstract_async_readable_file_read(
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_readall(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     size = 10 * 1024 * 1024
     block_size = 1000 * 1000
     dummy_api_context.files["/path/to/file"] = randbytes(size)
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -320,6 +321,7 @@ async def test_abstract_async_readable_file_readall(
 
     # readall from a non-zero position
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -336,13 +338,14 @@ async def test_abstract_async_readable_file_readall(
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_readinto(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     size = 10 * 1024 * 1024
     block_size = 1000 * 1000
     dummy_api_context.files["/path/to/file"] = randbytes(size)
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -359,6 +362,7 @@ async def test_abstract_async_readable_file_readinto(
 
     # readinto with a larger buffer than remaining data
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -375,6 +379,7 @@ async def test_abstract_async_readable_file_readinto(
 
     # readinto at EOF returns 0
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -389,13 +394,14 @@ async def test_abstract_async_readable_file_readinto(
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_seek(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     size = 10 * 1024 * 1024
     block_size = 1000 * 1000
     dummy_api_context.files["/path/to/file"] = randbytes(size)
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -496,12 +502,13 @@ async def test_abstract_async_readable_file_seek(
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_adaptive_read(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     size = 10 * 1024 * 1024
     dummy_api_context.files["/path/to/file"] = randbytes(size)
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -540,13 +547,14 @@ async def test_abstract_async_readable_file_adaptive_read(
 
 @pytest.mark.asyncio
 async def test_abstract_async_readable_file_buffered_reader(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     size = 10 * 1024 * 1024
     block_size = 1000 * 1000
     dummy_api_context.files["/path/to/file"] = randbytes(size)
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -561,6 +569,7 @@ async def test_abstract_async_readable_file_buffered_reader(
 
     # Partial reads via BufferedReader
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -580,11 +589,12 @@ async def test_abstract_async_readable_file_buffered_reader(
 
 @pytest.mark.asyncio
 async def test_abstract_async_writable_file_buffered_writer(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(10 * 1024 * 1024)
 
     with DummyWritableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -599,15 +609,17 @@ async def test_abstract_async_writable_file_buffered_writer(
 
 
 def test_abstract_async_readable_file_read_parquet(
-    client_event_loop,
     dummy_api,
+    client_event_loop,
     dummy_api_context,
     dummy_table,
     dummy_table_parquet,
+    aiohttp_session,
 ):
     dummy_api_context.files["/path/to/file.parquet"] = dummy_table_parquet
 
     with DummyReadableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file.parquet",
         loop=client_event_loop,
@@ -626,10 +638,11 @@ def expire_time() -> str:
     return (datetime.now(tz=timezone.utc) + timedelta(minutes=10)).isoformat()
 
 
-class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
+class DummyWritableFile(AbstractAsyncWritableFile):
     def __init__(
         self,
         path: str,
+        session: ClientSession,
         base_url: str,
         loop,
         max_concurrency: int | None = None,
@@ -650,22 +663,22 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             verbose_debug_log=verbose_debug_log,
         )
 
-        self._config_session(base_url=base_url)
-
+        self._session = session
+        self._base_url = base_url.rstrip("/")
         self._session_token: str | None = None
 
         self.last_index = []
 
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(
-            f"/api/2.0/fs/files{self.path}",
+            f"{self._base_url}/api/2.0/fs/files{self.path}",
             data=data,
         ) as response:
             response.raise_for_status()
 
     async def _start_multipart_upload(self) -> None:
         async with self._session.post(
-            f"/api/2.0/fs/files{self.path}",
+            f"{self._base_url}/api/2.0/fs/files{self.path}",
             params={"action": "initiate-upload"},
         ) as response:
             response.raise_for_status()
@@ -677,7 +690,7 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         self, data: bytes, start: int, end: int, part_index: int, last_part: bool
     ) -> Any:
         async with self._session.put(
-            f"/api/2.0/fs/files{self.path}",
+            f"{self._base_url}/api/2.0/fs/files{self.path}",
             params={
                 "upload_type": "multipart",
                 "part_number": part_index,
@@ -695,7 +708,7 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         parts.sort()
 
         async with self._session.post(
-            f"/api/2.0/fs/files{self.path}",
+            f"{self._base_url}/api/2.0/fs/files{self.path}",
             params={
                 "action": "complete-upload",
                 "upload_type": "multipart",
@@ -710,7 +723,7 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
     async def _abort_multipart_upload(self) -> None:
         async with self._session.delete(
-            f"/api/2.0/fs/files{self.path}",
+            f"{self._base_url}/api/2.0/fs/files{self.path}",
             params={
                 "action": "abort-upload",
                 "upload_type": "multipart",
@@ -719,55 +732,54 @@ class DummyWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         ) as response:
             response.raise_for_status()
 
-    async def aclose(self):
-        if not self.closed:
-            try:
-                await super().aclose()
-            finally:
-                await self._close_session()
-
 
 @pytest.mark.asyncio
 async def test_abstract_async_writable_file_init():
-    async with DummyWritableFile(
-        base_url="https:///text.api",
-        path="/path/to/file",
-        loop=asyncio.get_event_loop(),
-    ) as file:
-        assert file.min_block_size == AbstractAsyncWritableFile.min_block_size
-        assert file.max_block_size == AbstractAsyncWritableFile.max_block_size
+    loop = asyncio.get_event_loop()
+    async with ClientSession() as session:
+        async with DummyWritableFile(
+            session=session,
+            base_url="https://dummy.api",
+            path="/path/to/file",
+            loop=loop,
+        ) as file:
+            assert file.min_block_size == AbstractAsyncWritableFile.min_block_size
+            assert file.max_block_size == AbstractAsyncWritableFile.max_block_size
 
-    async with DummyWritableFile(
-        base_url="https:///text.api",
-        path="/path/to/file",
-        loop=asyncio.get_event_loop(),
-        min_block_size=123 * 1024,
-        max_block_size=456 * 1024,
-    ) as file:
-        assert file.min_block_size == 123 * 1024
-        assert file.max_block_size == 456 * 1024
+        async with DummyWritableFile(
+            session=session,
+            base_url="https://dummy.api",
+            path="/path/to/file",
+            loop=loop,
+            min_block_size=123 * 1024,
+            max_block_size=456 * 1024,
+        ) as file:
+            assert file.min_block_size == 123 * 1024
+            assert file.max_block_size == 456 * 1024
 
-    async with DummyWritableFile(
-        base_url="https:///text.api",
-        path="/path/to/file",
-        loop=asyncio.get_event_loop(),
-        min_block_size=123 * 1024,
-        max_block_size=789 * 1024,
-        block_size=456 * 1024,
-    ) as file:
-        assert file.min_block_size == 456 * 1024
-        assert file.max_block_size == 456 * 1024
+        async with DummyWritableFile(
+            session=session,
+            base_url="https://dummy.api",
+            path="/path/to/file",
+            loop=loop,
+            min_block_size=123 * 1024,
+            max_block_size=789 * 1024,
+            block_size=456 * 1024,
+        ) as file:
+            assert file.min_block_size == 456 * 1024
+            assert file.max_block_size == 456 * 1024
 
 
 @pytest.mark.asyncio
 async def test_abstract_async_writable_file_write(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(10 * 1024 * 1024)
     step = 123 * 100
 
     # Multipart upload
     with DummyWritableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file",
         loop=client_event_loop,
@@ -784,6 +796,7 @@ async def test_abstract_async_writable_file_write(
 
     # Single shot upload
     with DummyWritableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file2",
         loop=client_event_loop,
@@ -801,7 +814,7 @@ async def test_abstract_async_writable_file_write(
 
 @pytest.mark.asyncio
 async def test_abstract_async_writable_file_write_with_errors(
-    dummy_api, dummy_api_context, client_event_loop
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(10 * 1024 * 1024)
     step = 123 * 100
@@ -813,6 +826,7 @@ async def test_abstract_async_writable_file_write_with_errors(
     ):
         with pytest.raises(OSError, match=r"Failed to start upload.") as exc_info:
             with DummyWritableFile(
+                session=aiohttp_session,
                 base_url=dummy_api,
                 path="/path/to/file",
                 loop=client_event_loop,
@@ -837,6 +851,7 @@ async def test_abstract_async_writable_file_write_with_errors(
     ):
         with pytest.raises(OSError, match="Multipart upload failed and was aborted"):
             with DummyWritableFile(
+                session=aiohttp_session,
                 base_url=dummy_api,
                 path="/path/to/file",
                 loop=client_event_loop,
@@ -862,6 +877,7 @@ async def test_abstract_async_writable_file_write_with_errors(
     ):
         with pytest.raises(OSError, match=r"Failed to complete upload.") as exc_info:
             with DummyWritableFile(
+                session=aiohttp_session,
                 base_url=dummy_api,
                 path="/path/to/file",
                 loop=client_event_loop,
@@ -891,6 +907,7 @@ async def test_abstract_async_writable_file_write_with_errors(
         ):
             with pytest.raises(OSError, match=r"Failed to abort upload") as exc_info:
                 with DummyWritableFile(
+                    session=aiohttp_session,
                     base_url=dummy_api,
                     path="/path/to/file",
                     loop=client_event_loop,
@@ -915,9 +932,10 @@ async def test_abstract_async_writable_file_write_with_errors(
 
 
 def test_abstract_async_readable_file_write_parquet(
-    client_event_loop, dummy_api, dummy_api_context, dummy_table
+    dummy_api, client_event_loop, dummy_api_context, dummy_table, aiohttp_session
 ):
     with DummyWritableFile(
+        session=aiohttp_session,
         base_url=dummy_api,
         path="/path/to/file.parquet",
         loop=client_event_loop,

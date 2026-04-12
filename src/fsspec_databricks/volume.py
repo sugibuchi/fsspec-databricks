@@ -4,7 +4,7 @@ import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from io import UnsupportedOperation
-from threading import Event, Lock, Thread
+from threading import Event, RLock, Thread
 from typing import Any, Literal
 
 from aiohttp import (
@@ -13,6 +13,7 @@ from aiohttp import (
     ClientRequest,
     ClientResponse,
     ClientResponseError,
+    ClientSession,
     ClientTimeout,
 )
 from databricks.sdk import WorkspaceClient
@@ -36,7 +37,6 @@ from .file import (
     AbstractAsyncReadableFile,
     AbstractAsyncWritableFile,
 )
-from .http import AioHttpClientMixin
 from .path import dbfs_root, parse_volume_path, volumes_root
 from .utils import to_datetime, to_rfc3339
 
@@ -139,6 +139,12 @@ class VolumeFileSystem(DBFS):
     min_multipart_upload_size: int = 5 * 1024 * 1024
     """The minimum file size to use multipart upload for uploading the file content."""
 
+    _storage_proxy_hostname: str = "http://storage-proxy.databricks.com"
+    """The hostname of the Databricks storage proxy."""
+
+    _storage_proxy_probe_timeout: float = 3.0
+    """The timeout in seconds for the storage proxy probe request."""
+
     log = logging.getLogger(__name__)
 
     def __init__(
@@ -181,22 +187,28 @@ class VolumeFileSystem(DBFS):
         if min_multipart_upload_size:
             self.min_multipart_upload_size = min_multipart_upload_size
 
+        self._workspace_id: int | None = None
+        self._storage_proxy_available: bool | None = None
+
         self.__loop = None
         self.__io_thread: Thread | None = None
-        self.__lock = Lock()
+        self.__lock = RLock()
+        self.__session: ClientSession | None = None
 
     def __getstate__(self):
         state = super().__getstate__()
         del state["_VolumeFileSystem__loop"]
         del state["_VolumeFileSystem__io_thread"]
         del state["_VolumeFileSystem__lock"]
+        del state["_VolumeFileSystem__session"]
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self.__loop = None
         self.__io_thread = None
-        self.__lock = Lock()
+        self.__lock = RLock()
+        self.__session = None
 
     @property
     def _loop(self):
@@ -234,10 +246,34 @@ class VolumeFileSystem(DBFS):
 
         return self.__loop
 
+    @property
+    def _session(self) -> ClientSession:
+        """aiohttp client session."""
+        with self.__lock:
+            if self.__session is None:
+
+                async def create():
+                    if self.verbose_debug_log:
+                        self.log.debug("Creating aiohttp ClientSession in event loop.")
+                    return ClientSession()
+
+                self.__session = asyncio.run_coroutine_threadsafe(
+                    create(), self._loop
+                ).result()
+                self.log.debug("aiohttp ClientSession is created in event loop.")
+        return self.__session
+
     def close(self):
         if not self.closed:
             try:
                 if self.__loop is not None:
+                    if self.__session is not None:
+                        self.log.debug("Closing aiohttp ClientSession.")
+                        asyncio.run_coroutine_threadsafe(
+                            self.__session.close(), self.__loop
+                        ).result(timeout=5.0)
+                        self.__session = None
+                        self.log.debug("aiohttp ClientSession closed.")
                     self.log.debug("Stopping event loop.")
                     self.__loop.call_soon_threadsafe(self.__loop.stop)
                     self.__io_thread.join(timeout=5.0)
@@ -248,6 +284,48 @@ class VolumeFileSystem(DBFS):
                 self.__loop = None
                 self.__io_thread = None
                 super().close()
+
+    @property
+    def workspace_id(self) -> int:
+        """Get the workspace ID for this file system."""
+        if self._workspace_id is None:
+            self._workspace_id = self.client.get_workspace_id()
+        return self._workspace_id
+
+    @property
+    def storage_proxy_available(self) -> bool:
+        """Whether the Databricks storage proxy is available for this workspace."""
+        if self._storage_proxy_available is None:
+            if self.verbose_debug_log:
+                self.log.debug(
+                    "Check availability of the storage proxy: workspace_id=%d",
+                    self.workspace_id,
+                )
+
+            async def probe(session: ClientSession, workspace_id: int) -> bool:
+                probe_url = (
+                    f"{self._storage_proxy_hostname}/api/2.0/fs/files"
+                    f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
+                )
+                auth = _workspace_authenticator(self.config)
+                async with session.head(
+                    probe_url,
+                    middlewares=(auth,),
+                    timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
+                ) as response:
+                    return response.status == 200
+
+            available = asyncio.run_coroutine_threadsafe(
+                probe(self._session, self.workspace_id), self._loop
+            ).result()
+            self.log.debug(
+                "Storage proxy is available: workspace_id=%d"
+                if available
+                else "Storage proxy is not available: workspace_id=%d",
+                self.workspace_id,
+            )
+            self._storage_proxy_available = available
+        return self._storage_proxy_available
 
     @staticmethod
     def _ensure_in_volume(*paths: str) -> None:
@@ -390,17 +468,28 @@ class VolumeFileSystem(DBFS):
         if "x" in mode and info is not None:
             raise file_exists_error(path)
 
+        auth = _workspace_authenticator(self.config)
+
+        if self.storage_proxy_available:
+            base_url = self._storage_proxy_hostname
+            use_presigned_url = False
+        else:
+            base_url = self.config.host
+            use_presigned_url = True
+
         if "r" in mode:
             return VolumeReadableFile(
                 path=path,
-                host=self.config.host,
-                auth=_workspace_authenticator(self.config),
+                session=self._session,
+                base_url=base_url,
+                auth=auth,
                 loop=self._loop,
                 size=int(info["size"]),
                 max_concurrency=max_concurrency or self.max_read_concurrency,
                 min_block_size=min_block_size or self.min_read_block_size,
                 max_block_size=max_block_size or self.max_read_block_size,
                 block_size=block_size,
+                prefer_presigned_url=use_presigned_url,
                 verbose_debug_log=self.verbose_debug_log,
             )
         else:
@@ -418,14 +507,16 @@ class VolumeFileSystem(DBFS):
 
             return VolumeWritableFile(
                 path=path,
-                host=self.config.host,
-                auth=_workspace_authenticator(self.config),
+                session=self._session,
+                base_url=base_url,
+                auth=auth,
                 loop=self._loop,
                 max_concurrency=max_concurrency or self.max_write_concurrency,
                 min_block_size=min_block_size,
                 max_block_size=max_block_size,
                 min_multipart_upload_size=self.min_multipart_upload_size,
                 block_size=block_size,
+                use_presigned_url=use_presigned_url,
                 verbose_debug_log=self.verbose_debug_log,
             )
 
@@ -477,7 +568,7 @@ def _workspace_authenticator(config: Config) -> ClientMiddlewareType:
     return auth
 
 
-class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
+class VolumeReadableFile(AbstractAsyncReadableFile):
     log = VolumeFileSystem.log
 
     timeout_total: float | None = None
@@ -515,7 +606,8 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
     def __init__(
         self,
         path: str,
-        host: str,
+        session: ClientSession,
+        base_url: str,
         auth: ClientMiddlewareType,
         loop,
         size: int,
@@ -537,14 +629,13 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
             verbose_debug_log=verbose_debug_log,
         )
 
-        self._config_session(
-            base_url=host,
-            timeout=ClientTimeout(
-                total=self.timeout_total,
-                connect=self.timeout_connect,
-                sock_connect=self.timeout_sock_connect,
-                sock_read=self.timeout_sock_read,
-            ),
+        self._session = session
+        self._base_url = base_url.rstrip("/")
+        self._timeout = ClientTimeout(
+            total=self.timeout_total,
+            connect=self.timeout_connect,
+            sock_connect=self.timeout_sock_connect,
+            sock_read=self.timeout_sock_read,
         )
 
         _, _, _, _, self._posix_path = parse_volume_path(path)
@@ -582,12 +673,13 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
                 refresh_time = now + self._presigned_url_refresh_after
 
                 async with self._session.post(
-                    "/api/2.0/fs/create-download-url",
+                    f"{self._base_url}/api/2.0/fs/create-download-url",
                     params={
                         "path": self._posix_path,
                         "expire_time": to_rfc3339(expire_time),
                     },
                     middlewares=(self._auth,),
+                    timeout=self._timeout,
                 ) as response:
                     result = await response.json()
                     try:
@@ -614,7 +706,7 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
             path, headers = await self._get_presigned_url()
             middlewares = ()
         else:
-            path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            path = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
             headers = {}
             middlewares = (self._auth,)
 
@@ -624,22 +716,16 @@ class VolumeReadableFile(AbstractAsyncReadableFile, AioHttpClientMixin):
             path,
             headers=headers,
             middlewares=middlewares,
+            timeout=self._timeout,
         ) as response:
             response.raise_for_status()
             return await response.read()
-
-    async def aclose(self):
-        if not self.closed:
-            try:
-                await super().aclose()
-            finally:
-                await self._close_session()
 
 
 _range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
 
 
-class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
+class VolumeWritableFile(AbstractAsyncWritableFile):
     timeout_total: float | None = None
     """The maximal number of seconds for the whole operation including connection establishment,
     request sending and response reading.
@@ -670,7 +756,8 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     def __init__(
         self,
         path: str,
-        host: str,
+        session: ClientSession,
+        base_url: str,
         auth: ClientMiddlewareType,
         loop,
         max_concurrency: int | None = None,
@@ -691,14 +778,15 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             block_size=block_size,
             verbose_debug_log=verbose_debug_log,
         )
+
+        self._session = session
+        self._base_url = base_url.rstrip("/")
         self._upload_part_timeout = ClientTimeout(
             total=self.timeout_total,
             connect=self.timeout_connect,
             sock_connect=self.timeout_sock_connect,
             sock_read=self.timeout_sock_read,
         )
-
-        self._config_session(base_url=host)
 
         _, _, _, _, self._posix_path = parse_volume_path(path)
 
@@ -721,7 +809,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(
-            f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
+            f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
             data=data,
             middlewares=(self._auth,),
         ) as response:
@@ -729,7 +817,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
 
     async def _start_multipart_upload(self) -> None:
         async with self._session.post(
-            f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
+            f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
             params={"action": "initiate-upload"},
             middlewares=(self._auth,),
         ) as response:
@@ -764,7 +852,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     ) -> tuple[str, dict[str, str], dict[str, str] | None]:
         if self.use_presigned_url:
             async with self._session.post(
-                "/api/2.0/fs/create-upload-part-urls",
+                f"{self._base_url}/api/2.0/fs/create-upload-part-urls",
                 json={
                     "path": self._posix_path,
                     "session_token": self._session_token,
@@ -793,7 +881,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             headers["Content-Type"] = "application/octet-stream"
             params = None
         else:
-            path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            path = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
             headers = {"Content-Type": "application/octet-stream"}
             params = {
                 "session_token": self._session_token,
@@ -832,7 +920,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
         if self.use_presigned_url:
             async with self._session.post(
-                "/api/2.0/fs/create-resumable-upload-url",
+                f"{self._base_url}/api/2.0/fs/create-resumable-upload-url",
                 json={
                     "path": self._posix_path,
                     "session_token": self._session_token,
@@ -857,7 +945,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             }
             params = None
         else:
-            url = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            url = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
             headers = {"Content-Type": "application/octet-stream"}
             params = {
                 "session_token": self._session_token,
@@ -919,7 +1007,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
         parts.sort()
 
         async with self._session.post(
-            f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
+            f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
             params={
                 "action": "complete-upload",
                 "upload_type": "multipart",
@@ -944,7 +1032,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
     ) -> tuple[str, dict[str, str], dict[str, str] | None]:
         if self.use_presigned_url:
             async with self._session.post(
-                "/api/2.0/fs/create-abort-upload-url",
+                f"{self._base_url}/api/2.0/fs/create-abort-upload-url",
                 json={
                     "path": self._posix_path,
                     "session_token": self._session_token,
@@ -971,7 +1059,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             headers["Content-Type"] = "application/octet-stream"
             params = None
         else:
-            path = f"/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            path = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
             headers = {"Content-Type": "application/json"}
             params = {
                 "action": "abort-upload",
@@ -999,13 +1087,6 @@ class VolumeWritableFile(AbstractAsyncWritableFile, AioHttpClientMixin):
             data=b"",
         ) as response:
             response.raise_for_status()
-
-    async def aclose(self):
-        if not self.closed:
-            try:
-                await super().aclose()
-            finally:
-                await self._close_session()
 
 
 __all__ = [

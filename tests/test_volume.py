@@ -22,7 +22,9 @@ async def _dummy_auth(
     return await handler(request)
 
 
-def test_volume_file_read(dummy_api, dummy_api_context, client_event_loop):
+def test_volume_file_read(
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+):
     data = randbytes(20 * 1000 * 1000)
     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
 
@@ -30,7 +32,8 @@ def test_volume_file_read(dummy_api, dummy_api_context, client_event_loop):
 
     with VolumeReadableFile(
         path=path,
-        host=dummy_api,
+        session=aiohttp_session,
+        base_url=dummy_api,
         auth=_dummy_auth,
         loop=client_event_loop,
         size=len(data),
@@ -44,7 +47,8 @@ def test_volume_file_read(dummy_api, dummy_api_context, client_event_loop):
     with pytest.raises(IOError):
         with VolumeReadableFile(
             path=path,
-            host=dummy_api,
+            session=aiohttp_session,
+            base_url=dummy_api,
             auth=_dummy_auth,
             loop=client_event_loop,
             size=len(data),
@@ -59,6 +63,7 @@ def test_volume_file_read_parquet(
     dummy_api_context,
     dummy_table,
     dummy_table_parquet,
+    aiohttp_session,
 ):
     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file.parquet"
 
@@ -66,7 +71,8 @@ def test_volume_file_read_parquet(
 
     with VolumeReadableFile(
         path=path,
-        host=dummy_api,
+        session=aiohttp_session,
+        base_url=dummy_api,
         auth=_dummy_auth,
         loop=client_event_loop,
         size=len(dummy_table_parquet),
@@ -84,13 +90,15 @@ def test_volume_file_oneshot_write(
     dummy_api,
     dummy_api_context,
     client_event_loop,
+    aiohttp_session,
 ):
     data = randbytes(1000 * 1000)
     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
 
     with VolumeWritableFile(
         path=path,
-        host=dummy_api,
+        session=aiohttp_session,
+        base_url=dummy_api,
         auth=_dummy_auth,
         loop=client_event_loop,
     ) as f:
@@ -104,13 +112,15 @@ def test_volume_file_multipart_write(
     dummy_api,
     dummy_api_context,
     client_event_loop,
+    aiohttp_session,
 ):
     data = randbytes(20 * 1000 * 1000)
     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
 
     with VolumeWritableFile(
         path=path,
-        host=dummy_api,
+        session=aiohttp_session,
+        base_url=dummy_api,
         auth=_dummy_auth,
         loop=client_event_loop,
     ) as f:
@@ -125,7 +135,8 @@ def test_volume_file_multipart_write(
     with pytest.raises(IOError):
         with VolumeWritableFile(
             path=path,
-            host=dummy_api,
+            session=aiohttp_session,
+            base_url=dummy_api,
             auth=_dummy_auth,
             loop=client_event_loop,
             use_presigned_url=False,
@@ -137,6 +148,7 @@ def test_volume_file_resumable_write(
     dummy_api,
     dummy_api_context,
     client_event_loop,
+    aiohttp_session,
 ):
     data = randbytes(20 * 1000 * 1000)
     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
@@ -145,7 +157,8 @@ def test_volume_file_resumable_write(
 
     with VolumeWritableFile(
         path=path,
-        host=dummy_api,
+        session=aiohttp_session,
+        base_url=dummy_api,
         auth=_dummy_auth,
         loop=client_event_loop,
     ) as f:
@@ -160,7 +173,8 @@ def test_volume_file_resumable_write(
     with pytest.raises(IOError):
         with VolumeWritableFile(
             path=path,
-            host=dummy_api,
+            session=aiohttp_session,
+            base_url=dummy_api,
             auth=_dummy_auth,
             loop=client_event_loop,
             use_presigned_url=False,
@@ -170,14 +184,20 @@ def test_volume_file_resumable_write(
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_abstract_async_readable_file_write_parquet(
-    client_event_loop, dummy_api, dummy_api_context, dummy_table, upload_mode
+    client_event_loop,
+    dummy_api,
+    dummy_api_context,
+    dummy_table,
+    upload_mode,
+    aiohttp_session,
 ):
     path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file.parquet"
     dummy_api_context.upload_mode = upload_mode
 
     with VolumeWritableFile(
         path=path,
-        host=dummy_api,
+        session=aiohttp_session,
+        base_url=dummy_api,
         auth=_dummy_auth,
         loop=client_event_loop,
     ) as f:

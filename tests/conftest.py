@@ -10,6 +10,7 @@ from threading import Event, Thread
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from aiohttp import ClientSession
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from dotenv import load_dotenv
@@ -19,15 +20,14 @@ from fsspec_databricks.path import parse_volume_path
 
 from .dummy_api import dummy_context, serve_app
 
-load_dotenv()
-
-logging.getLogger("databricks.sdk").setLevel(logging.INFO)
-logging.getLogger("urllib3").setLevel(logging.INFO)
-
 log = logging.getLogger(__name__)
 
-# Disabling the caching of file system instances for Databricks
-AbstractDatabricksFileSystem.cachable = False
+
+def pytest_configure(config):
+    load_dotenv()
+    logging.getLogger("databricks.sdk").setLevel(logging.INFO)
+    logging.getLogger("urllib3").setLevel(logging.INFO)
+    AbstractDatabricksFileSystem.cachable = False
 
 
 def _event_loop(thread_name: str):
@@ -84,6 +84,20 @@ def client_event_loop():
 @pytest.fixture(scope="session")
 def dummy_api(server_event_loop):
     yield from serve_app(server_event_loop)
+
+
+@pytest.fixture(scope="function")
+def aiohttp_session(dummy_api, client_event_loop):
+    """A function-scoped aiohttp ClientSession connected to the dummy API server."""
+
+    async def _create():
+        return ClientSession()
+
+    session = asyncio.run_coroutine_threadsafe(_create(), client_event_loop).result()
+    try:
+        yield session
+    finally:
+        asyncio.run_coroutine_threadsafe(session.close(), client_event_loop).result()
 
 
 @pytest.fixture(scope="function")
