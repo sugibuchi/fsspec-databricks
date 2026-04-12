@@ -19,19 +19,6 @@ from .error import file_exists_error, file_not_found_error, io_error, os_error
 T = TypeVar("T")
 
 
-def _compute_block_size(
-    target: int, min_block_size: int, max_block_size: int, max_concurrency: int
-) -> int:
-    """Return the smallest power-of-2 multiple of *min_block_size* such that
-    ``block_size * max_concurrency >= target``, capped at *max_block_size*."""
-    needed = math.ceil(target / max_concurrency)
-    if needed <= min_block_size:
-        return min_block_size
-    ratio = math.ceil(needed / min_block_size)
-    k = (ratio - 1).bit_length()  # == ceil(log2(ratio))
-    return min(min_block_size << k, max_block_size)
-
-
 class AbstractFile(RawIOBase):
     """Base class of file-like objects."""
 
@@ -325,6 +312,19 @@ class FileRangeTaskSupport(AbstractAsyncFile):
                 await self._cancel_all_tasks()
             finally:
                 await super().aclose()
+
+
+def _compute_block_size(
+    target: int, min_block_size: int, max_block_size: int, max_concurrency: int
+) -> int:
+    """Return the smallest power-of-2 multiple of *min_block_size* such that
+    ``block_size * max_concurrency >= target``, capped at *max_block_size*."""
+    needed = math.ceil(target / max_concurrency)
+    if needed <= min_block_size:
+        return min_block_size
+    ratio = math.ceil(needed / min_block_size)
+    k = (ratio - 1).bit_length()  # == ceil(log2(ratio))
+    return min(min_block_size << k, max_block_size)
 
 
 class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
