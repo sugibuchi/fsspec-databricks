@@ -420,31 +420,27 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
         # Start fetching data from the end of ongoing tasks or the current position if there is no ongoing task.
         fetch_start = self._tasks[-1].end if self._tasks else self._pos
 
+        # Update the consecutive read length
+        self._read_length += self._file_size - self._pos if size < 0 else size
+
         if size < 0:
-            # Optimize the block size to fetch the all remaining content of the file.
-            self._read_length += self._file_size - self._pos
-
+            # Total read size is known: fetch to EOF, split evenly across concurrency slots.
             fetch_end = self._file_size
-            fetch_length = fetch_end - fetch_start
-
-            block_size = max(
-                min(
-                    self.max_block_size, math.ceil(fetch_length / self.max_concurrency)
+            block_size = min(
+                max(
+                    math.ceil((fetch_end - fetch_start) / self.max_concurrency),
+                    self.min_block_size,
                 ),
-                self.min_block_size,
+                self.max_block_size,
             )
         else:
-            # Update the consecutive read length
-            self._read_length += size
-
-            # Determine the data block size based on _read_length
+            # Incremental read: adapt block size to the observed read pattern.
             block_size = _compute_block_size(
                 min(self._read_length, self._file_size - fetch_start),
                 self.min_block_size,
                 self.max_block_size,
                 self.max_concurrency,
             )
-
             fetch_end = min(
                 max(
                     # At least, fetch the current pos + size
