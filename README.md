@@ -155,15 +155,26 @@ and `WorkspaceClient` — see [AUTHENTICATION.md](AUTHENTICATION.md).
 
 ## Motivation
 
-Inside a Databricks workspace, all file systems — Unity Catalog Volumes, Workspace files, and the legacy DBFS — are accessible as local paths through FUSE mounts. Python code running on a Databricks cluster can read and write these files using ordinary POSIX paths without any special configuration.
+Python code running outside a Databricks cluster — on a local machine, a CI server, or a Kubernetes pod — has no
+standard way to access Unity Catalog Volumes or Workspace files. The Databricks SDK provides a file API, but it is not
+integrated with the Python data ecosystem: tools like pandas, PyArrow, and DuckDB cannot use it without custom glue
+code.
 
-[Databricks Connect](https://docs.databricks.com/aws/en/dev-tools/databricks-connect/python/index) extends this experience to remote environments: it allows you to develop and run code from a local IDE, a Jupyter server, or a platform like Kubernetes, while executing DataFrame operations on Databricks compute. For Spark workloads, Databricks Connect provides a fully transparent experience — your code looks the same whether it runs inside or outside the workspace.
+Inside a Databricks workspace, the experience is quite different. All file systems are mounted locally via FUSE, so code
+can read and write files using ordinary POSIX paths with no special handling.
+[Databricks Connect](https://docs.databricks.com/aws/en/dev-tools/databricks-connect/python/index) extends this
+transparency further — remote code submits Spark operations to Databricks compute as if running inside the workspace,
+with no code changes required.
 
-However, this transparency does not extend to file access. FUSE mounts exist only inside the Databricks cluster. When running remotely through Databricks Connect, there is no equivalent mechanism to access Unity Catalog Volumes or Workspace files using POSIX paths. File I/O must be handled separately, breaking the otherwise seamless remote development experience.
+File access from Python, however, is not covered. FUSE mounts exist only on the cluster, and Databricks Connect does not
+bridge them. Even when Spark compute is fully transparent, direct Python file I/O remains a special case that requires
+different code depending on where the application runs.
 
-`fsspec-databricks` aims to close this gap. It provides transparent access to Databricks file systems from any Python environment — local development machines, CI pipelines, Kubernetes pods, or anywhere else Databricks Connect runs — by implementing the [fsspec](https://filesystem-spec.readthedocs.io/en/latest/) interface on top of the Databricks REST API.
-
-`fsspec` was chosen because it is the de-facto file system abstraction in the Python data ecosystem. Libraries such as pandas, PyArrow, DuckDB, and many others accept fsspec-compatible file system objects directly, which means `fsspec-databricks` works with these tools without any additional integration work.
+`fsspec-databricks` restores that transparency for file access. It implements
+the [fsspec](https://filesystem-spec.readthedocs.io/en/latest/) interface — the de-facto file system abstraction in the
+Python data ecosystem — on top of the Databricks REST API, so the same application code works from any environment
+without modification, using a single `dbfs:/` path that consistently identifies a file regardless of where the code
+runs.
 
 ---
 
