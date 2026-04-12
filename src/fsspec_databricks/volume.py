@@ -176,22 +176,22 @@ class VolumeFileSystem(DBFS):
             **storage_options,
         )
 
-        if max_read_concurrency:
+        if max_read_concurrency is not None:
             self.max_read_concurrency = max_read_concurrency
-        if min_read_block_size:
+        if min_read_block_size is not None:
             self.min_read_block_size = min_read_block_size
-        if max_read_block_size:
+        if max_read_block_size is not None:
             self.max_read_block_size = max_read_block_size
 
-        if max_write_concurrency:
+        if max_write_concurrency is not None:
             self.max_write_concurrency = max_write_concurrency
-        if min_write_block_size:
+        if min_write_block_size is not None:
             self.min_write_block_size = min_write_block_size
-        if max_write_block_size:
+        if max_write_block_size is not None:
             self.max_write_block_size = max_write_block_size
-        if min_multipart_upload_size:
+        if min_multipart_upload_size is not None:
             self.min_multipart_upload_size = min_multipart_upload_size
-        if connection_pool_size:
+        if connection_pool_size is not None:
             self.connection_pool_size = connection_pool_size
 
         self._workspace_id: int | None = None
@@ -278,11 +278,13 @@ class VolumeFileSystem(DBFS):
                 if self.__loop is not None:
                     if self.__session is not None:
                         self.log.debug("Closing aiohttp ClientSession.")
-                        asyncio.run_coroutine_threadsafe(
-                            self.__session.close(), self.__loop
-                        ).result(timeout=5.0)
-                        self.__session = None
-                        self.log.debug("aiohttp ClientSession closed.")
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                self.__session.close(), self.__loop
+                            ).result(timeout=5.0)
+                            self.log.debug("aiohttp ClientSession closed.")
+                        finally:
+                            self.__session = None
                     self.log.debug("Stopping event loop.")
                     self.__loop.call_soon_threadsafe(self.__loop.stop)
                     self.__io_thread.join(timeout=5.0)
@@ -297,44 +299,46 @@ class VolumeFileSystem(DBFS):
     @property
     def workspace_id(self) -> int:
         """Get the workspace ID for this file system."""
-        if self._workspace_id is None:
-            self._workspace_id = self.client.get_workspace_id()
-        return self._workspace_id
+        with self.__lock:
+            if self._workspace_id is None:
+                self._workspace_id = self.client.get_workspace_id()
+            return self._workspace_id
 
     @property
     def storage_proxy_available(self) -> bool:
         """Whether the Databricks storage proxy is available for this workspace."""
-        if self._storage_proxy_available is None:
-            if self.verbose_debug_log:
+        with self.__lock:
+            if self._storage_proxy_available is None:
+                if self.verbose_debug_log:
+                    self.log.debug(
+                        "Check availability of the storage proxy: workspace_id=%d",
+                        self.workspace_id,
+                    )
+
+                async def probe(session: ClientSession, workspace_id: int) -> bool:
+                    probe_url = (
+                        f"{self._storage_proxy_hostname}/api/2.0/fs/files"
+                        f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
+                    )
+                    auth = _workspace_authenticator(self.config)
+                    async with session.head(
+                        probe_url,
+                        middlewares=(auth,),
+                        timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
+                    ) as response:
+                        return response.status == 200
+
+                available = asyncio.run_coroutine_threadsafe(
+                    probe(self._session, self.workspace_id), self._loop
+                ).result()
                 self.log.debug(
-                    "Check availability of the storage proxy: workspace_id=%d",
+                    "Storage proxy is available: workspace_id=%d"
+                    if available
+                    else "Storage proxy is not available: workspace_id=%d",
                     self.workspace_id,
                 )
-
-            async def probe(session: ClientSession, workspace_id: int) -> bool:
-                probe_url = (
-                    f"{self._storage_proxy_hostname}/api/2.0/fs/files"
-                    f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
-                )
-                auth = _workspace_authenticator(self.config)
-                async with session.head(
-                    probe_url,
-                    middlewares=(auth,),
-                    timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
-                ) as response:
-                    return response.status == 200
-
-            available = asyncio.run_coroutine_threadsafe(
-                probe(self._session, self.workspace_id), self._loop
-            ).result()
-            self.log.debug(
-                "Storage proxy is available: workspace_id=%d"
-                if available
-                else "Storage proxy is not available: workspace_id=%d",
-                self.workspace_id,
-            )
-            self._storage_proxy_available = available
-        return self._storage_proxy_available
+                self._storage_proxy_available = available
+            return self._storage_proxy_available
 
     @staticmethod
     def _ensure_in_volume(*paths: str) -> None:
@@ -494,16 +498,30 @@ class VolumeFileSystem(DBFS):
                 auth=auth,
                 loop=self._loop,
                 size=int(info["size"]),
-                max_concurrency=max_concurrency or self.max_read_concurrency,
-                min_block_size=min_block_size or self.min_read_block_size,
-                max_block_size=max_block_size or self.max_read_block_size,
+                max_concurrency=max_concurrency
+                if max_concurrency is not None
+                else self.max_read_concurrency,
+                min_block_size=min_block_size
+                if min_block_size is not None
+                else self.min_read_block_size,
+                max_block_size=max_block_size
+                if max_block_size is not None
+                else self.max_read_block_size,
                 block_size=block_size,
                 prefer_presigned_url=use_presigned_url,
                 verbose_debug_log=self.verbose_debug_log,
             )
         else:
-            min_block_size = min_block_size or self.min_write_block_size
-            max_block_size = max_block_size or self.max_write_block_size
+            min_block_size = (
+                min_block_size
+                if min_block_size is not None
+                else self.min_write_block_size
+            )
+            max_block_size = (
+                max_block_size
+                if max_block_size is not None
+                else self.max_write_block_size
+            )
             if min_block_size % (256 * 1024) != 0:
                 raise ValueError(
                     f"min_block_size is {min_block_size} but it must be a multiple of 256 KB (256 * 1024): path={path}"
@@ -729,6 +747,12 @@ class VolumeReadableFile(AbstractAsyncReadableFile):
         ) as response:
             response.raise_for_status()
             return await response.read()
+
+    async def aclose(self) -> None:
+        try:
+            await super().aclose()
+        finally:
+            self._session = None
 
 
 _range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
@@ -988,8 +1012,9 @@ class VolumeWritableFile(AbstractAsyncWritableFile):
                     m = _range_pat.match(response.headers.get("Range") or "")
                     if m is None:
                         raise io_error(
+                            self.path,
                             f"Invalid or missing Range header in resumable upload response: "
-                            f"header={response.headers.get('Range')!r}, path={self.path}"
+                            f"header={response.headers.get('Range')!r}",
                         )
                     confirmed = int(m.group("end"))
                     if confirmed == end - 1:
@@ -1096,6 +1121,12 @@ class VolumeWritableFile(AbstractAsyncWritableFile):
             data=b"",
         ) as response:
             response.raise_for_status()
+
+    async def aclose(self) -> None:
+        try:
+            await super().aclose()
+        finally:
+            self._session = None
 
 
 __all__ = [
