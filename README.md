@@ -89,9 +89,6 @@ fsspec_databricks.use()
 fs = fsspec.filesystem("dbfs")  # DatabricksFileSystem
 ```
 
-For more details on how to use the fsspec file system objects,
-see [fsspec's documentation](https://filesystem-spec.readthedocs.io/en/latest/usage.html).
-
 For detailed usage — common operations, POSIX paths, backend-specific behaviour and configuration parameters,
 see [USAGE.md](USAGE.md).
 
@@ -141,88 +138,32 @@ For more details about `dbfs:/` and POSIX path support in Databricks, see
 
 `fsspec-databricks` uses Databricks Unified Authentication provided by Databricks Python SDK.
 
-You can find information about supported authentication parameters and environment variables in
-the [Databricks Python SDK documentation](https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html).
-
-### Default authentication
-
-If Databricks Unified Authentication is configured, `fsspec-databricks` will pick up credentials from the default
-profile. For more, see the above Databricks SDK docs.
-
 ```python
 from fsspec_databricks import DatabricksFileSystem
 
+# Uses Databricks Unified Authentication with the default profile
 fs = DatabricksFileSystem()
 
 with fs.open("dbfs:/Volumes/...") as f:
     ...
 ```
 
-### Via constructor parameters
-
-You can programmatically configure authentication by passing parameters to `DatabricksFileSystem` constructor.
-
-```python
-# Authentication with PAT
-fs = DatabricksFileSystem(host=host_url, token=access_token)
-
-# Use different profile
-fs = DatabricksFileSystem(profile="production")
-```
-
-### Via environment variables
-
-Or, you can configure authentication via environment variables.
-
-```bash
-# Shell
-export DATABRICKS_CONFIG_PROFILE=production
-```
-
-```python
-# Then in Python
-fs = DatabricksFileSystem()  # will use the "production" profile
-```
-
-### By `fsspec` configuration
-
-You can use
-the [fsspec's configuration model](https://filesystem-spec.readthedocs.io/en/latest/features.html#configuration) to
-configure and persist authentication parameters.
-
-### With `WorkspaceClient`
-
-You can create `DatabricksFileSystem` by explicitly setting Databricks SDK's `WorkspaceClient` object.
-The created `DatabricksFileSystem` instance will use the authentication configured in the provided `WorkspaceClient`
-object.
-
-```python
-from databricks.sdk import WorkspaceClient
-
-client = WorkspaceClient(...)
-...
-
-fs = DatabricksFileSystem(client=client)
-```
-
-Note: a `DatabricksFileSystem` created with a `WorkspaceClient` will generally not be serializable, because
-`WorkspaceClient` instances are not serializable. Consider using other configuration methods if you need
-serializable filesystem objects.
+For all authentication options — constructor parameters, environment variables, `fsspec` configuration,
+and `WorkspaceClient` — see [AUTHENTICATION.md](AUTHENTICATION.md).
 
 ---
 
-## Configuration options
+## Motivation
 
-In addition to the authentication parameters, `fsspec-databricks` supports the following configuration options.
+Inside a Databricks workspace, all file systems — Unity Catalog Volumes, Workspace files, and the legacy DBFS — are accessible as local paths through FUSE mounts. Python code running on a Databricks cluster can read and write these files using ordinary POSIX paths without any special configuration.
 
-| Parameter name            | Description                                                                                                                                  | Default |
-|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| config                    | An optional pre-configured Databricks SDK `Config` object. If provided, it will be used for authentication.                                  | `None`  |
-| client                    | An optional pre-configured Databricks SDK `WorkspaceClient` object. If provided, it will be used for accessing the Databricks Workspace API. | `None`  |
-| use_local_fs_in_workspace | Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.                    | `True`  |
-| verbose_debug_log         | Whether to enable verbose debug logging for file system operations.                                                                          | `False` |
+[Databricks Connect](https://docs.databricks.com/aws/en/dev-tools/databricks-connect/python/index) extends this experience to remote environments: it allows you to develop and run code from a local IDE, a Jupyter server, or a platform like Kubernetes, while executing DataFrame operations on Databricks compute. For Spark workloads, Databricks Connect provides a fully transparent experience — your code looks the same whether it runs inside or outside the workspace.
 
-For backend-specific parameters and all other options, see [USAGE.md](USAGE.md).
+However, this transparency does not extend to file access. FUSE mounts exist only inside the Databricks cluster. When running remotely through Databricks Connect, there is no equivalent mechanism to access Unity Catalog Volumes or Workspace files using POSIX paths. File I/O must be handled separately, breaking the otherwise seamless remote development experience.
+
+`fsspec-databricks` aims to close this gap. It provides transparent access to Databricks file systems from any Python environment — local development machines, CI pipelines, Kubernetes pods, or anywhere else Databricks Connect runs — by implementing the [fsspec](https://filesystem-spec.readthedocs.io/en/latest/) interface on top of the Databricks REST API.
+
+`fsspec` was chosen because it is the de-facto file system abstraction in the Python data ecosystem. Libraries such as pandas, PyArrow, DuckDB, and many others accept fsspec-compatible file system objects directly, which means `fsspec-databricks` works with these tools without any additional integration work.
 
 ---
 

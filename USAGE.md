@@ -2,7 +2,7 @@
 
 This document covers how to use `fsspec-databricks` in detail.
 
-For installation and authentication, see [README.md](README.md).
+For installation and authentication, see [README.md](README.md) and [AUTHENTICATION.md](AUTHENTICATION.md).
 
 ---
 
@@ -25,6 +25,21 @@ fsspec_databricks.use()
 
 fs = fsspec.filesystem("dbfs")
 ```
+
+---
+
+## Configuration options
+
+In addition to the authentication parameters, `fsspec-databricks` supports the following configuration options.
+
+| Parameter name            | Description                                                                                                                                  | Default |
+|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|---------|
+| config                    | An optional pre-configured Databricks SDK `Config` object. If provided, it will be used for authentication.                                  | `None`  |
+| client                    | An optional pre-configured Databricks SDK `WorkspaceClient` object. If provided, it will be used for accessing the Databricks Workspace API. | `None`  |
+| use_local_fs_in_workspace | Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.                    | `True`  |
+| verbose_debug_log         | Whether to enable verbose debug logging for file system operations.                                                                          | `False` |
+
+For backend-specific parameters, see the [Unity Catalog Volume files](#unity-catalog-volume-files) section below.
 
 ---
 
