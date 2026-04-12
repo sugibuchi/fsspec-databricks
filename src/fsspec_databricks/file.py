@@ -483,8 +483,7 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
         task = None
         while self._tasks:
             task = self._tasks.popleft()
-            chunk = memoryview(await task)
-            chunk = chunk[max(0, self._pos - task.start) :]
+            chunk = memoryview(await task)[max(0, self._pos - task.start) :]
             if size > 0:
                 data.extend(chunk[: min(len(chunk), size - len(data))])
                 if size == len(data):
