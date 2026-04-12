@@ -220,6 +220,7 @@ In addition to the authentication parameters, `fsspec-databricks` supports the f
 | volume_fs_min_write_block_size   | The minimum data size to write for each write operation on a Unity Catalog Volume file.    | `5 * 1024 * 1024` (5 mb)   |
 | volume_fs_max_write_block_size   | The maximum data size to write for each write operation on a Unity Catalog Volume file.    | `16 * 1024 * 1024` (16 mb) |
 | volume_min_multipart_upload_size | The minimum file size to use multipart upload for uploading files to Unity Catalog Volume. | `5 * 1024 * 1024` (5 mb)   |
+| volume_fs_connection_pool_size   | The maximum number of connections in the aiohttp connection pool for Unity Catalog Volume file I/O. | `100`             |
 
 ## Differences from the original `DatabricksFileSystem` in `fsspec`
 
