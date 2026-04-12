@@ -43,6 +43,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
     volume_min_multipart_upload_size: int = 5 * 1024 * 1024
     """The minimum file size to use multipart upload for uploading files to Unity Catalog Volume."""
 
+    volume_fs_connection_pool_size: int = 100
+    """The maximum number of connections in the aiohttp connection pool for the Unity Catalog Volume file system."""
+
     use_local_fs_in_workspace: bool = True
     """Whether to access files from the local file system rather than the remote Databricks API when running within a Databricks workspace. Defaults to True."""
 
@@ -90,6 +93,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         volume_fs_min_write_block_size: int | None = None,
         volume_fs_max_write_block_size: int | None = None,
         volume_min_multipart_upload_size: int | None = None,
+        volume_fs_connection_pool_size: int | None = None,
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
         ## Logging option
@@ -156,6 +160,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             The maximum data size to write for each write operation on a Unity Catalog Volume file.
         volume_min_multipart_upload_size:
             The minimum file size to use multipart upload for uploading files to Unity Catalog Volume.
+        volume_fs_connection_pool_size : int, optional
+            The maximum number of connections in the aiohttp connection pool for the Unity Catalog Volume file system.
         use_local_fs_in_workspace
             Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
         verbose_debug_log : bool, optional
@@ -222,6 +228,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             self.volume_fs_max_write_block_size = volume_fs_max_write_block_size
         if volume_min_multipart_upload_size is not None:
             self.volume_min_multipart_upload_size = volume_min_multipart_upload_size
+        if volume_fs_connection_pool_size is not None:
+            self.volume_fs_connection_pool_size = volume_fs_connection_pool_size
         if use_local_fs_in_workspace is not None:
             self.use_local_fs_in_workspace = use_local_fs_in_workspace
 
@@ -296,6 +304,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 min_write_block_size=self.volume_fs_min_write_block_size,
                 max_write_block_size=self.volume_fs_max_write_block_size,
                 min_multipart_upload_size=self.volume_min_multipart_upload_size,
+                connection_pool_size=self.volume_fs_connection_pool_size,
                 verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )

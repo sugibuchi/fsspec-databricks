@@ -15,6 +15,7 @@ from aiohttp import (
     ClientResponseError,
     ClientSession,
     ClientTimeout,
+    TCPConnector,
 )
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.client_types import HostType
@@ -139,6 +140,9 @@ class VolumeFileSystem(DBFS):
     min_multipart_upload_size: int = 5 * 1024 * 1024
     """The minimum file size to use multipart upload for uploading the file content."""
 
+    connection_pool_size: int = 100
+    """The maximum number of connections in the aiohttp connection pool (TCPConnector limit)."""
+
     _storage_proxy_hostname: str = "http://storage-proxy.databricks.com"
     """The hostname of the Databricks storage proxy."""
 
@@ -159,6 +163,7 @@ class VolumeFileSystem(DBFS):
         min_write_block_size: int | None = None,
         max_write_block_size: int | None = None,
         min_multipart_upload_size: int | None = None,
+        connection_pool_size: int | None = None,
         verbose_debug_log: bool | None = None,
         **storage_options,
     ):
@@ -186,6 +191,8 @@ class VolumeFileSystem(DBFS):
             self.max_write_block_size = max_write_block_size
         if min_multipart_upload_size:
             self.min_multipart_upload_size = min_multipart_upload_size
+        if connection_pool_size:
+            self.connection_pool_size = connection_pool_size
 
         self._workspace_id: int | None = None
         self._storage_proxy_available: bool | None = None
@@ -255,7 +262,9 @@ class VolumeFileSystem(DBFS):
                 async def create():
                     if self.verbose_debug_log:
                         self.log.debug("Creating aiohttp ClientSession in event loop.")
-                    return ClientSession()
+                    return ClientSession(
+                        connector=TCPConnector(limit=self.connection_pool_size)
+                    )
 
                 self.__session = asyncio.run_coroutine_threadsafe(
                     create(), self._loop
