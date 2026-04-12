@@ -371,6 +371,7 @@ async def delete_file(
 
 @app.post("/api/2.0/fs/create-download-url")
 async def create_download_url(
+    request: Request,
     path: Annotated[str | None, Query()] = None,
     expire_time: Annotated[datetime | None, Query()] = None,
 ):
@@ -382,9 +383,10 @@ async def create_download_url(
         )
 
     query = urllib.parse.urlencode({"signed": "true"})
+    base = str(request.base_url).rstrip("/")
 
     return {
-        "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+        "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
         "headers": [],
     }
 
@@ -405,10 +407,12 @@ async def create_upload_part_url(request: Request):
             400,
         ) from e
 
+    base = str(request.base_url).rstrip("/")
+
     return {
         "upload_part_urls": [
             {
-                "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+                "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
                 "headers": [],
             }
             for query in [
@@ -442,10 +446,11 @@ async def create_resumable_upload_url(request: Request):
     query = urllib.parse.urlencode(
         {"session_token": session_token, "upload_type": "resumable", "signed": "true"}
     )
+    base = str(request.base_url).rstrip("/")
 
     return {
         "resumable_upload_url": {
-            "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+            "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
             "headers": [],
         }
     }
@@ -468,10 +473,11 @@ async def create_abort_upload_url(request: Request):
     query = urllib.parse.urlencode(
         {"action": "abort-upload", "session_token": session_token, "signed": "true"}
     )
+    base = str(request.base_url).rstrip("/")
 
     return {
         "abort_upload_url": {
-            "url": f"/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+            "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
             "headers": [],
         }
     }

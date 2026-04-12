@@ -150,6 +150,18 @@ def test_volume_fs_serialization():
     assert fs._loop is not fs2._loop
 
 
+def test_volume_fs_workspace_id(client: WorkspaceClient):
+    with VolumeFileSystem(client=client) as fs:
+        workspace_id = fs.workspace_id
+        assert isinstance(workspace_id, int)
+
+
+def test_volume_fs_storage_proxy_available(client: WorkspaceClient):
+    with VolumeFileSystem(client=client) as fs:
+        available = fs.storage_proxy_available
+        assert isinstance(available, bool)
+
+
 @pytest.mark.parametrize(
     "fs_class",
     [
