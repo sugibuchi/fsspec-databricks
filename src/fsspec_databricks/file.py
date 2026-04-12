@@ -19,6 +19,19 @@ from .error import file_exists_error, file_not_found_error, io_error, os_error
 T = TypeVar("T")
 
 
+def _compute_block_size(
+    target: int, min_block_size: int, max_block_size: int, max_concurrency: int
+) -> int:
+    """Return the smallest power-of-2 multiple of *min_block_size* such that
+    ``block_size * max_concurrency >= target``, capped at *max_block_size*."""
+    needed = math.ceil(target / max_concurrency)
+    if needed <= min_block_size:
+        return min_block_size
+    ratio = math.ceil(needed / min_block_size)
+    k = (ratio - 1).bit_length()  # == ceil(log2(ratio))
+    return min(min_block_size << k, max_block_size)
+
+
 class AbstractFile(RawIOBase):
     """Base class of file-like objects."""
 
@@ -425,18 +438,12 @@ class AbstractAsyncReadableFile(FileRangeTaskSupport, ABC):
             self._read_length += size
 
             # Determine the data block size based on _read_length
-            block_size = self.min_block_size
-            while (
-                # If n-bytes have been consecutively read, we assume another n-bytes to be read consecutively.
-                # We adjust the block size to make (block size x max concurrency) cover this n-bytes.
-                block_size * self.max_concurrency < self._read_length
-                # But we take the remaining bytes in the file into account.
-                and block_size * self.max_concurrency < self._file_size - fetch_start
-                # And we also limit the max block size.
-                and block_size < self.max_block_size
-            ):
-                block_size *= 2
-                block_size = min(block_size, self.max_block_size)
+            block_size = _compute_block_size(
+                min(self._read_length, self._file_size - fetch_start),
+                self.min_block_size,
+                self.max_block_size,
+                self.max_concurrency,
+            )
 
             fetch_end = min(
                 max(
@@ -756,32 +763,30 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
         target_size = buffered_size if flush else self._pos
 
         # Determine the data block size for upload tasks
-        block_size = self.min_block_size
-        while (
-            # We adjust the block size make (block size x max concurrency) cover the target data upload size.
-            block_size * self.max_concurrency < target_size
-            # But we also limit the max block size.
-            and block_size < self.max_block_size
-        ):
-            block_size *= 2
-            block_size = min(block_size, self.max_block_size)
+        block_size = _compute_block_size(
+            target_size,
+            self.min_block_size,
+            self.max_block_size,
+            self.max_concurrency,
+        )
 
-        offset = self._pos - buffered_size
-        uploaded = 0
+        file_offset = self._pos - buffered_size
+        data_pos = 0
 
-        while data:
+        while data_pos < buffered_size:
+            remaining = buffered_size - data_pos
             # Stop uploading if the remaining data size falls below the minimum block size...
-            if len(data) - block_size < self.min_block_size:
+            if remaining - block_size < self.min_block_size:
                 if flush:
                     # ... except when flushing the buffer.
-                    upload_size = len(data)
+                    upload_size = remaining
                 else:
                     break
             else:
                 upload_size = block_size
 
-            start = offset
-            end = offset + upload_size
+            start = file_offset
+            end = file_offset + upload_size
 
             if not self._multipart_uploading:
                 await self._do_start_multipart_upload()
@@ -790,25 +795,25 @@ class AbstractAsyncWritableFile(FileRangeTaskSupport, ABC):
                 start,
                 end,
                 self._do_upload_part,
-                data[:upload_size].tobytes(),
+                bytes(data[data_pos : data_pos + upload_size]),
                 start,
                 end,
                 self._part_index,
-                flush and len(data) == upload_size,
+                flush and remaining == upload_size,
             )
 
-            offset += upload_size
-            uploaded += upload_size
-            data = data[upload_size:]
+            file_offset += upload_size
+            data_pos += upload_size
             self._part_index += 1
 
+        uploaded = data_pos
         if uploaded:
-            remaining = data.tobytes()
+            remaining_bytes = bytes(data[data_pos:])
             del data
 
             self._buf.seek(0)
             self._buf.truncate(0)
-            self._buf.write(remaining)
+            self._buf.write(remaining_bytes)
 
             if self.verbose_debug_log:
                 self.log.debug(
