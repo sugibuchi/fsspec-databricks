@@ -242,7 +242,6 @@ The following features are not yet implemented or have not been tested yet.
 
 * Compatibility with Databricks on AWS (not tested)
 * Legacy DBFS support (not tested)
-* Use of the storage proxy when running inside a Databricks workspace or notebook (not implemented)
 
 We are actively developing and testing the library, and we welcome contributions and feedback from the community.
 
