@@ -4,6 +4,8 @@ Some tests in this library require access to actual Databricks workspaces to ver
 in the real Databricks environment. You need to configure access to a Databricks workspace and create work
 directories within it before running the tests.
 
+---
+
 ## Work directories in Databricks workspace
 
 You need to create work directories in your Databricks workspace and Unity Catalog to use for the tests and
@@ -13,6 +15,8 @@ set the **POSIX paths** (without the `dbfs:/` scheme) of the test directories in
 |----------------------|-----------------------------------------|--------------------------------------------------------------|
 | Unity Catalog Volume | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | `/Volumes/fsspec_databricks_test/fsspec_dbx_test/test/local` |
 | Workspace files      | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | `/fsspec-databricks-test/local`                              |
+
+---
 
 ## Local development
 
@@ -28,6 +32,8 @@ Run the tests with:
 ```bash
 uv run pytest
 ```
+
+---
 
 ## GitHub Actions
 

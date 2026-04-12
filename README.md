@@ -15,6 +15,8 @@ implementation that unifies access to Databricks file systems, including:
 The library routes `dbfs:/` and POSIX-style paths to the appropriate Databricks file system implementation
 and supports copying and streaming between them.
 
+---
+
 ## Features
 
 * Provides seamless access to files in different Databricks file systems with DBFS URLs (`dbfs:/path/to/file`) or POSIX
@@ -25,6 +27,8 @@ and supports copying and streaming between them.
 * Falls back to the local file system when running inside a Databricks workspace.
 * Implemented on [Databricks Python SDK](https://github.com/databricks/databricks-sdk-py).
     * Uses [Databricks Unified Authentication](https://docs.databricks.com/aws/en/dev-tools/auth/unified-auth)
+
+---
 
 ## Compatibility
 
@@ -37,6 +41,8 @@ and supports copying and streaming between them.
     * Azure Databricks
     * Databricks on Google Cloud
 
+---
+
 ## Project status
 
 The current status of this library is **early beta**. Its API and behavior are subject to change during further
@@ -45,6 +51,8 @@ development and testing.
 * The current version relies on the undocumented multipart upload API for Unity
   Catalog Volume file write, which Databricks does not officially support and may change without notice.
 * For more details about the current limitations, see the [Limitations](#limitations) section below.
+
+---
 
 ## Getting started
 
@@ -83,6 +91,9 @@ fs = fsspec.filesystem("dbfs")  # DatabricksFileSystem
 
 For more details on how to use the fsspec file system objects,
 see [fsspec's documentation](https://filesystem-spec.readthedocs.io/en/latest/usage.html).
+
+For detailed usage — common operations, POSIX paths, backend-specific behaviour and configuration parameters,
+see [USAGE.md](USAGE.md).
 
 ### Supported file paths
 
@@ -123,6 +134,8 @@ fs.ls("/data/path")  # Access legacy DBFS files
 
 For more details about `dbfs:/` and POSIX path support in Databricks, see
 [the official documentation](https://docs.databricks.com/aws/en/files/).
+
+---
 
 ## Authentication
 
@@ -196,11 +209,11 @@ Note: a `DatabricksFileSystem` created with a `WorkspaceClient` will generally n
 `WorkspaceClient` instances are not serializable. Consider using other configuration methods if you need
 serializable filesystem objects.
 
+---
+
 ## Configuration options
 
 In addition to the authentication parameters, `fsspec-databricks` supports the following configuration options.
-
-### Options for general file system behavior
 
 | Parameter name            | Description                                                                                                                                  | Default |
 |---------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|---------|
@@ -209,18 +222,9 @@ In addition to the authentication parameters, `fsspec-databricks` supports the f
 | use_local_fs_in_workspace | Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.                    | `True`  |
 | verbose_debug_log         | Whether to enable verbose debug logging for file system operations.                                                                          | `False` |
 
-### Options for Unity Catalog Volume file system
+For backend-specific parameters and all other options, see [USAGE.md](USAGE.md).
 
-| Parameter name                   | Description                                                                                | Default                    |
-|----------------------------------|--------------------------------------------------------------------------------------------|----------------------------|
-| volume_fs_max_read_concurrency   | The maximum number of concurrent file read operations on a Unity Catalog Volume file.      | `24`                       |
-| volume_fs_min_read_block_size    | The minimum data size to read for each read operation on a Unity Catalog Volume file.      | `1024 * 1024` (1 mb)       |
-| volume_fs_max_read_block_size    | The maximum data size to read for each read operation on a Unity Catalog Volume file.      | `4 * 1024 * 1024` (4 mb)   |
-| volume_fs_max_write_concurrency  | The maximum number of concurrent file write operations on a Unity Catalog Volume file.     | `24`                       |
-| volume_fs_min_write_block_size   | The minimum data size to write for each write operation on a Unity Catalog Volume file.    | `5 * 1024 * 1024` (5 mb)   |
-| volume_fs_max_write_block_size   | The maximum data size to write for each write operation on a Unity Catalog Volume file.    | `16 * 1024 * 1024` (16 mb) |
-| volume_min_multipart_upload_size | The minimum file size to use multipart upload for uploading files to Unity Catalog Volume. | `5 * 1024 * 1024` (5 mb)   |
-| volume_fs_connection_pool_size   | The maximum number of connections in the aiohttp connection pool for Unity Catalog Volume file I/O. | `100`             |
+---
 
 ## Differences from the original `DatabricksFileSystem` in `fsspec`
 
@@ -237,6 +241,8 @@ and it continues to use the `dbfs:/` URL scheme for both legacy DBFS and the oth
 `fsspec-databricks` primarily aims to support new file systems (workspace files and Unity Catalog volumes)
 and enable seamless access to them using the same `dbfs:/` URL scheme supported in Databricks workspaces.
 
+---
+
 ## Limitations
 
 The following features are not yet implemented or have not been tested yet.
@@ -245,6 +251,8 @@ The following features are not yet implemented or have not been tested yet.
 * Legacy DBFS support (not tested)
 
 We are actively developing and testing the library, and we welcome contributions and feedback from the community.
+
+---
 
 ## License
 
