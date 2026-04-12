@@ -39,7 +39,8 @@ In addition to the authentication parameters, `fsspec-databricks` supports the f
 | use_local_fs_in_workspace | Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.                    | `True`  |
 | verbose_debug_log         | Whether to enable verbose debug logging for file system operations.                                                                          | `False` |
 
-For backend-specific parameters, see the [Unity Catalog Volume files](#unity-catalog-volume-files) section below.
+For Unity Catalog Volume-specific parameters, see the [Configuration parameters](#configuration-parameters) section
+under Unity Catalog Volume files below.
 
 ---
 
@@ -213,8 +214,10 @@ falls back to presigned URLs issued by the Databricks REST API.
 
 ### Configuration parameters
 
-These parameters can be passed to `DatabricksFileSystem` (prefixed with `volume_fs_`) or directly
-to `VolumeFileSystem`:
+#### File system level
+
+These parameters configure the defaults for all file operations on the file system instance.
+They can be passed to `DatabricksFileSystem` (prefixed with `volume_fs_`) or directly to `VolumeFileSystem`:
 
 | `DatabricksFileSystem` parameter   | `VolumeFileSystem` parameter | Description                                                                          | Default |
 |------------------------------------|------------------------------|--------------------------------------------------------------------------------------|---------|
@@ -227,13 +230,39 @@ to `VolumeFileSystem`:
 | `volume_min_multipart_upload_size` | `min_multipart_upload_size`  | File size threshold above which multipart upload is used instead of a single PUT.    | `5 MB`  |
 | `volume_fs_connection_pool_size`   | `connection_pool_size`       | Maximum number of connections in the aiohttp connection pool (`TCPConnector` limit). | `100`   |
 
-Example — tuning for large sequential reads:
+Example: reducing concurrency and connection pool size when running remotely over a low-bandwidth or high-latency
+network:
 
 ```python
 fs = DatabricksFileSystem(
-    volume_fs_max_read_concurrency=32,
-    volume_fs_max_read_block_size=8 * 1024 * 1024,  # 8 MB blocks
+    volume_fs_max_read_concurrency=4,
+    volume_fs_max_write_concurrency=4,
+    volume_fs_connection_pool_size=10,
 )
+```
+
+#### Per-file level
+
+The following parameters can be passed to `fs.open()` to override the file system defaults for a
+single file operation:
+
+| Parameter         | Applies to  | Description                                                                                                             |
+|-------------------|-------------|-------------------------------------------------------------------------------------------------------------------------|
+| `max_concurrency` | read, write | Maximum number of concurrent requests. Overrides `max_read_concurrency` or `max_write_concurrency`.                     |
+| `min_block_size`  | read, write | Minimum block size. Overrides `min_read_block_size` or `min_write_block_size`. Must be a multiple of 256 KB for writes. |
+| `max_block_size`  | read, write | Maximum block size. Overrides `max_read_block_size` or `max_write_block_size`. Must be a multiple of 256 KB for writes. |
+| `block_size`      | read, write | Fixed block size. Disables adaptive sizing and sets both min and max to this value.                                     |
+
+Example: reading a single large file with larger blocks:
+
+```python
+with fs.open(
+        "dbfs:/Volumes/my_catalog/my_schema/my_volume/data/large.parquet",
+        "rb",
+        max_concurrency=32,
+        max_block_size=16 * 1024 * 1024,  # 16 MB blocks
+) as f:
+    data = f.read()
 ```
 
 ### Supported modes
