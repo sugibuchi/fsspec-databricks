@@ -256,20 +256,11 @@ class VolumeFileSystem(DBFS):
     @property
     def _session(self) -> ClientSession:
         """aiohttp client session."""
-        with self.__lock:
-            if self.__session is None:
-
-                async def create():
-                    if self.verbose_debug_log:
-                        self.log.debug("Creating aiohttp ClientSession in event loop.")
-                    return ClientSession(
-                        connector=TCPConnector(limit=self.connection_pool_size)
-                    )
-
-                self.__session = asyncio.run_coroutine_threadsafe(
-                    create(), self._loop
-                ).result()
-                self.log.debug("aiohttp ClientSession is created in event loop.")
+        if self.__session is None:
+            self.__session = ClientSession(
+                connector=TCPConnector(limit=self.connection_pool_size)
+            )
+            self.log.debug("aiohttp ClientSession created.")
         return self.__session
 
     def close(self):
