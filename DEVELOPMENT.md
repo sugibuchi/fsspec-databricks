@@ -193,11 +193,13 @@ A `WorkspaceClient` given as `client` is kept, and is not picklable. Other ways 
 
 ### Routing
 
-`DatabricksFileSystem._get_backend(path)` gives the backend of a path, with `path.fs_type`:
+`DatabricksFileSystem._resolve(path)` gives the file system for a path, and the path to pass to it:
 
-- the local file system, when running in a workspace with `use_local_fs_in_workspace`;
-- else the Volume, Workspace or legacy DBFS backend;
+- the local file system and the local path, when running in a workspace with `use_local_fs_in_workspace`;
+- else the Volume, Workspace or legacy DBFS backend of `path.fs_type`, and the path unchanged;
 - `FileNotFoundError` for legacy DBFS paths when the workspace disables legacy DBFS.
+
+Every method calls `_resolve`. With the local file system, `ls` and `info` map the names returned back to DBFS paths.
 
 The workspace setting `disable_legacy_dbfs` is read once. When legacy DBFS is disabled, `ls("/")` and `info("/")`
 answer without a backend: the root holds `/Volumes` and `/Workspace`.
@@ -234,6 +236,7 @@ is expected. Subclasses call them first, then make the API call.
 - `fs_type` gives a path's backend.
 - `parse_volume_path` gives the catalog, schema, volume and path in the volume. Missing parts are `None`.
 - `parse_workspace_path` and `parse_dbfs_path` give the path in their API.
+- `to_local_path` and `from_local_path` convert to and from local paths on Databricks compute.
 
 ### Errors
 
@@ -319,7 +322,10 @@ The two kinds of upload differ:
 - **Resumable**: one part at a time, with `Content-Range`. A `308` answer gives the bytes received, and the rest is
   sent again.
 
-If a part fails, `close()` aborts the upload and raises an `OSError`. Part sizes must be multiples of 256 KB.
+If a part fails, `close()` aborts the upload and raises an `OSError`. Azure Databricks refuses aborts of multipart
+uploads with a 400 answer, and the abort is then skipped.
+
+Part sizes must be multiples of 256 KB.
 
 ### Workspace files
 
@@ -361,8 +367,15 @@ A failed range task stops the file: later reads and writes raise, with the task'
 
 ### Local file system
 
-`DatabricksLocalFileSystem`, in `local.py`, is fsspec's `LocalFileSystem` with the `dbfs` protocol. It strips
-`dbfs:` from paths and uses them as local paths.
+`DatabricksLocalFileSystem`, in `local.py`, is fsspec's `LocalFileSystem` with the `dbfs` protocol. It gets local
+paths from `DatabricksFileSystem`.
+
+`path.to_local_path` gives a path's local path on Databricks compute:
+
+- Volume and Workspace paths are the same.
+- Legacy DBFS paths are under `legacy_dbfs_local_root`, `/dbfs` by default.
+
+`path.from_local_path` is the reverse, for the names that `ls` and `info` return.
 
 ### Logging
 

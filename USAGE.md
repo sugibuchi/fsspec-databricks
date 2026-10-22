@@ -138,8 +138,12 @@ fs.mv(
 
 ## Inside a Databricks workspace
 
-On a Databricks cluster or notebook, file operations use the local file system by default. `/Volumes/...` and
-`/Workspace/...` are the local mounts Databricks provides.
+On a Databricks cluster or notebook, file operations use the local file system by default:
+
+- `/Volumes/...` and `/Workspace/...` are the same local paths.
+- Legacy DBFS paths are under `/dbfs`, e.g. `dbfs:/data/file` is `/dbfs/data/file`.
+
+Paths returned, e.g. by `ls`, are the same as outside Databricks.
 
 To use the Databricks APIs there too:
 

@@ -59,6 +59,36 @@ def test_dbx_fs_config_params():
         assert fs._config_params["custom_headers"] == {"X-Test": "1"}
 
 
+def test_dbx_fs_local_legacy_dbfs(tmp_path):
+    """In a workspace, legacy DBFS paths are under the local mount point, and paths returned are DBFS paths."""
+    with DatabricksFileSystem() as fs:
+        fs._running_in_workspace = True
+        fs._legacy_dbfs_enabled = True
+        fs.legacy_dbfs_local_root = tmp_path.as_posix()
+
+        fs.makedirs("dbfs:/data")
+        assert (tmp_path / "data").is_dir()
+
+        with fs.open("dbfs:/data/a.txt", "wb") as f:
+            f.write(b"hello")
+        assert (tmp_path / "data" / "a.txt").read_bytes() == b"hello"
+
+        assert fs.exists("dbfs:/data/a.txt")
+        assert fs.ls("dbfs:/data", detail=False) == ["/data/a.txt"]
+        assert [i["name"] for i in fs.ls("/data")] == ["/data/a.txt"]
+        assert fs.info("/data/a.txt")["name"] == "/data/a.txt"
+        assert fs.find("dbfs:/data") == ["/data/a.txt"]
+
+        with fs.open(fs.ls("/data", detail=False)[0], "rb") as f:
+            assert f.read() == b"hello"
+
+        fs.cp_file("dbfs:/data/a.txt", "dbfs:/data/b.txt")
+        assert (tmp_path / "data" / "b.txt").read_bytes() == b"hello"
+
+        fs.rm("dbfs:/data/a.txt")
+        assert not (tmp_path / "data" / "a.txt").exists()
+
+
 def test_dbx_fs_init(client: WorkspaceClient):
     with DatabricksFileSystem() as fs:
         assert (

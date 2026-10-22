@@ -45,6 +45,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 
 - `DatabricksFileSystem` routes each call to a backend by path. It holds no file system logic of its own, except for
   the root folder and transfers between backends.
+- Its methods get the backend and the path to pass with `_resolve(path)`. Inside a workspace, that path is a local
+  path, and names returned are mapped back with `from_local_path`.
 - Base class methods in `base.py` only check preconditions. Subclasses call `super()` first, then the API.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
