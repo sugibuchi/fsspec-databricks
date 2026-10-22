@@ -255,12 +255,40 @@ class VolumeFileSystem(DBFS):
 
     @property
     def _session(self) -> ClientSession:
-        """aiohttp client session."""
-        if self.__session is None:
-            self.__session = ClientSession(
+        """aiohttp client session.
+
+        `TCPConnector` requires a running event loop, so the session is created in the IO event loop.
+        """
+        loop = self._loop
+
+        def create() -> ClientSession:
+            return ClientSession(
                 connector=TCPConnector(limit=self.connection_pool_size)
             )
-            self.log.debug("aiohttp ClientSession created.")
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            # Already in the IO event loop. Create the session directly, as waiting for
+            # a coroutine scheduled in the same loop (or for the lock) would deadlock.
+            if self.__session is None:
+                self.__session = create()
+                self.log.debug("aiohttp ClientSession created.")
+            return self.__session
+
+        with self.__lock:
+            if self.__session is None:
+
+                async def acreate() -> ClientSession:
+                    return create()
+
+                self.__session = asyncio.run_coroutine_threadsafe(
+                    acreate(), loop
+                ).result()
+                self.log.debug("aiohttp ClientSession created.")
         return self.__session
 
     def close(self):
