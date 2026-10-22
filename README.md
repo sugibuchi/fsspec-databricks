@@ -33,7 +33,7 @@ and supports copying and streaming between them.
 ## Compatibility
 
 * Python 3.10 to 3.14
-* `databricks-sdk`: 0.99.0 or later
+* `databricks-sdk`: 0.156.0 or later
 * `fsspec`: 2024.6.0 or later
 * `aiohttp`: 3.12.0 or later
 * Databricks workspace: Tested on the following environments at the moment.
