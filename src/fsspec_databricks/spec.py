@@ -5,7 +5,7 @@ import shutil
 
 from databricks.sdk import AuthorizationDetail, CredentialsStrategy, WorkspaceClient
 from databricks.sdk.config import Config
-from databricks.sdk.service.workspace import ExportFormat, ImportFormat, Language
+from databricks.sdk.service.workspace import Language
 from fsspec.spec import AbstractFileSystem
 
 from .base import AbstractDatabricksFileSystem, root_dir_info
@@ -14,7 +14,7 @@ from .error import file_exists_error, file_not_found_error
 from .local import DatabricksLocalFileSystem
 from .path import FileSystemType, fs_type, scheme, volumes_root, workspace_root
 from .volume import VolumeFileSystem, volumes_root_info
-from .workspace import WorkspaceFileSystem, workspace_root_info
+from .workspace import NotebookFormat, WorkspaceFileSystem, workspace_root_info
 
 
 class DatabricksFileSystem(AbstractDatabricksFileSystem):
@@ -467,8 +467,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         self,
         path,
         mode="rb",
-        export_format: ExportFormat | str | None = None,
-        import_format: ImportFormat | str | None = None,
+        notebook_format: NotebookFormat | None = None,
         language: Language | str | None = None,
         max_concurrency: int | None = None,
         min_block_size: int | None = None,
@@ -488,11 +487,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             The path to the file in the Unity Catalog Volume file system.
         mode : str, optional
             The file mode like `rb`, `w`.
-        export_format : ExportFormat, optional
-            The format to use when exporting the file from the workspace. Applicable only to Workspace files.
-        import_format : ImportFormat, optional
-            The format to use when importing the file to the workspace. Applicable only to Workspace files.
-        language : Language, optional
+        notebook_format : NotebookFormat, optional
+            The format to use when reading or writing a notebook. Applicable only to Workspace notebooks.
+        language : Language, str, optional
             Language of the notebook to read or write. Applicable only to Workspace files.
         max_concurrency : int, optional
             The maximum number of concurrent file operations. Applicable only to volume files.
@@ -521,8 +518,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         return self._get_backend(path).open(
             path=path,
             mode=mode,
-            export_format=export_format,
-            import_format=import_format,
+            notebook_format=notebook_format,
             language=language,
             max_concurrency=max_concurrency,
             max_block_size=max_block_size,
