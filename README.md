@@ -92,7 +92,8 @@ to Workspace files only in workspaces with legacy DBFS disabled. See
 
 **Early beta.** The API and behaviour may change.
 
-* Writing Volume files uses Databricks' multipart upload API, which is undocumented and may change without notice.
+* Writing Volume files uses the Files API's multipart upload. The Databricks REST reference does not document it, but
+  the official Databricks SDK for Python uses it, as an experimental feature.
 * Databricks on AWS is not tested.
 * Legacy DBFS is not tested.
 

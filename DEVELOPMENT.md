@@ -217,7 +217,8 @@ A `WorkspaceClient` given as `client` is kept, and is not picklable. Other ways 
 
 ### Known limits
 
-- **Multipart upload uses an undocumented API.** Databricks may change it without notice.
+- **Multipart upload is not in the REST reference.** The Databricks SDK for Python uses the same endpoints, as an
+  experimental feature, in `databricks/sdk/mixins/files.py`. Compare with it when the API changes.
 - **Workspace files are at most 10 MB.** The Workspace API's limit.
 - **No append or update modes on Volumes.** `ab` and `r+b` are refused.
 - **No listing cache.** Each call reaches the workspace.

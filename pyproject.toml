@@ -73,6 +73,15 @@ source = [
 source = "vcs"
 raw-options = { 'version_scheme' = 'post-release' }
 
+[tool.hatch.build.targets.sdist]
+# Files for development only
+exclude = [
+    ".github",
+    ".pre-commit-config.yaml",
+    "CLAUDE.md",
+    "uv.lock",
+]
+
 [tool.ruff]
 exclude = [
     ".tox",
