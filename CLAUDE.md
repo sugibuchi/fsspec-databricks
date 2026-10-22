@@ -67,7 +67,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   and `config_params`.
 - File systems must stay picklable. A new attribute holding a client, a loop, a thread or a session is dropped in
   `__getstate__` and reset in `__setstate__`.
-- Multipart upload uses an undocumented Databricks API. Keep its fallback to resumable upload working.
+- Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
+  `mixins/files.py` uses the same: follow it. Keep the fallback to resumable upload working.
 - Volume write block sizes are multiples of 256 KB.
 - Workspace files are cached whole in memory, up to the API's 10 MB.
 - Chatty debug logs go under `if self.verbose_debug_log:`.
