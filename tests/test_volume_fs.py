@@ -3,7 +3,7 @@ import errno
 import inspect
 import logging
 import pickle
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from random import randbytes
 from unittest.mock import patch
@@ -227,7 +227,7 @@ def test_volume_fs_info(
     assert info["size"] == len(data)
     assert info["type"] == "file"
     assert info["created"] is None
-    assert datetime.now(tz=timezone.utc) - info["modified"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - info["modified"] < timedelta(minutes=1)
     assert info["islink"] is False
     assert info["content-type"] == "application/octet-stream"
     assert fs.created(dbfs_url(data_path)) == info["created"]
@@ -269,24 +269,24 @@ def test_volume_fs_info(
     assert info["name"] == f"/Volumes/{catalog}"
     assert info["size"] is None
     assert info["type"] == "directory"
-    assert info["created"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
-    assert info["modified"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
     assert info["islink"] is False
 
     info = fs.info(f"/Volumes/{catalog}/{schema}")
     assert info["name"] == f"/Volumes/{catalog}/{schema}"
     assert info["size"] is None
     assert info["type"] == "directory"
-    assert info["created"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
-    assert info["modified"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
     assert info["islink"] is False
 
     info = fs.info(f"/Volumes/{catalog}/{schema}/{volume}")
     assert info["name"] == f"/Volumes/{catalog}/{schema}/{volume}"
     assert info["size"] is None
     assert info["type"] == "directory"
-    assert info["created"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
-    assert info["modified"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
     assert info["islink"] is False
 
 
@@ -326,7 +326,7 @@ def test_volume_fs_ls(
     assert items[0]["size"] == len(data)
     assert items[0]["type"] == "file"
     assert items[0]["created"] is None
-    assert datetime.now(tz=timezone.utc) - items[0]["modified"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - items[0]["modified"] < timedelta(minutes=1)
     assert items[0]["islink"] is False
     assert datetime_eq(fs.created(dbfs_url(data_path)), items[0]["created"])
     assert datetime_eq(fs.modified(dbfs_url(data_path)), items[0]["modified"])
@@ -371,8 +371,8 @@ def test_volume_fs_ls(
     assert info["name"] == f"/Volumes/{catalog}"
     assert info["size"] is None
     assert info["type"] == "directory"
-    assert info["created"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
-    assert info["modified"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
     assert info["islink"] is False
 
     assert f"/Volumes/{catalog}" in fs.ls("/Volumes", detail=False)
@@ -384,8 +384,8 @@ def test_volume_fs_ls(
     assert info["name"] == f"/Volumes/{catalog}/{schema}"
     assert info["size"] is None
     assert info["type"] == "directory"
-    assert info["created"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
-    assert info["modified"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
     assert info["islink"] is False
 
     assert f"/Volumes/{catalog}/{schema}" in fs.ls(f"/Volumes/{catalog}", detail=False)
@@ -399,8 +399,8 @@ def test_volume_fs_ls(
     assert info["name"] == f"/Volumes/{catalog}/{schema}/{volume}"
     assert info["size"] is None
     assert info["type"] == "directory"
-    assert info["created"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
-    assert info["modified"] > datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
     assert info["islink"] is False
 
     assert f"/Volumes/{catalog}/{schema}/{volume}" in fs.ls(

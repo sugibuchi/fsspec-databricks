@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from io import BufferedReader, BufferedWriter, BytesIO, UnsupportedOperation
 from random import randbytes
 from time import perf_counter
@@ -635,7 +635,7 @@ def test_abstract_async_readable_file_read_parquet(
 
 
 def expire_time() -> str:
-    return (datetime.now(tz=timezone.utc) + timedelta(minutes=10)).isoformat()
+    return (datetime.now(tz=UTC) + timedelta(minutes=10)).isoformat()
 
 
 class DummyWritableFile(AbstractAsyncWritableFile):
