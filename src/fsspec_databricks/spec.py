@@ -382,12 +382,20 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     @property
     def legacy_dbfs_enabled(self) -> bool:
-        """Whether access to the legacy DBFS file system is enabled."""
+        """Whether access to the legacy DBFS file system is enabled.
+
+        With the local file system, it is enabled when its local mount exists, without calling the API.
+        """
         if self._legacy_dbfs_enabled is None:
-            disabled = self.client.workspace_settings_v2.get_public_workspace_setting(
-                "disable_legacy_dbfs"
-            ).effective_boolean_val.value
-            self._legacy_dbfs_enabled = not disabled
+            if self._uses_local_fs:
+                self._legacy_dbfs_enabled = os.path.isdir(self.legacy_dbfs_local_root)
+            else:
+                disabled = (
+                    self.client.workspace_settings_v2.get_public_workspace_setting(
+                        "disable_legacy_dbfs"
+                    ).effective_boolean_val.value
+                )
+                self._legacy_dbfs_enabled = not disabled
 
         return self._legacy_dbfs_enabled
 

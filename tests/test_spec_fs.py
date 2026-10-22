@@ -1,6 +1,7 @@
 import inspect
 import pickle
 from random import randbytes
+from unittest.mock import PropertyMock, patch
 
 import fsspec
 import pytest
@@ -87,6 +88,34 @@ def test_dbx_fs_local_legacy_dbfs(tmp_path):
 
         fs.rm("dbfs:/data/a.txt")
         assert not (tmp_path / "data" / "a.txt").exists()
+
+
+def test_dbx_fs_local_root(tmp_path):
+    """In a workspace, the root is listed without calling the Databricks API."""
+    no_api = patch.object(
+        DatabricksFileSystem,
+        "client",
+        new_callable=PropertyMock,
+        side_effect=AssertionError("API called"),
+    )
+
+    # Without the legacy DBFS mount: the Volumes and Workspace roots
+    with no_api, DatabricksFileSystem() as fs:
+        fs._running_in_workspace = True
+        fs.legacy_dbfs_local_root = (tmp_path / "missing").as_posix()
+
+        assert not fs.legacy_dbfs_enabled
+        assert fs.ls("/", detail=False) == ["/Volumes", "/Workspace"]
+        assert fs.info("dbfs:/")["type"] == "directory"
+
+    # With the legacy DBFS mount: its contents, as DBFS paths
+    (tmp_path / "data").mkdir()
+    with no_api, DatabricksFileSystem() as fs:
+        fs._running_in_workspace = True
+        fs.legacy_dbfs_local_root = tmp_path.as_posix()
+
+        assert fs.legacy_dbfs_enabled
+        assert fs.ls("/", detail=False) == ["/data"]
 
 
 def test_dbx_fs_init(client: WorkspaceClient):
