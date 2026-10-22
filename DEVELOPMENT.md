@@ -125,16 +125,40 @@ ruff, run with `uvx`, is the exception: CI runs its latest version, in a job wit
 Each GitHub environment is a Databricks workspace. Create at least `default`, and `azure`, `aws` or `gcp` as needed.
 The tests authenticate as a service principal with read-write access to the work directories.
 
-| Secret                     | Value                                         |
-|----------------------------|-----------------------------------------------|
-| `DATABRICKS_HOST`          | The workspace's URL                           |
-| `DATABRICKS_CLIENT_ID`     | The service principal's client ID             |
-| `DATABRICKS_CLIENT_SECRET` | The service principal's client secret         |
+Every environment has these:
 
-| Variable                                | Value                                         |
-|-----------------------------------------|-----------------------------------------------|
-| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | The POSIX path of the Volume work directory    |
-| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | The POSIX path of the Workspace work directory |
+| Name                                               | Value                                          |
+|----------------------------------------------------|------------------------------------------------|
+| `DATABRICKS_HOST` (secret)                         | The workspace's URL                            |
+| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)    | The POSIX path of the Volume work directory    |
+| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable) | The POSIX path of the Workspace work directory |
+
+The variable `DATABRICKS_AUTH_TYPE` chooses how the tests authenticate:
+
+| `DATABRICKS_AUTH_TYPE` | Authentication                                        | Also needs                                                       |
+|------------------------|-------------------------------------------------------|------------------------------------------------------------------|
+| Not set                | The service principal's client secret                 | `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (secrets)  |
+| `github-oidc`          | Databricks federation policy                          | `DATABRICKS_CLIENT_ID` (secret), `DATABRICKS_TOKEN_AUDIENCE`     |
+| `github-oidc-azure`    | Federated credential of a Microsoft Entra ID app      | `ARM_CLIENT_ID`, the app's ID                                    |
+
+Prefer federation: it needs no stored secret. GitHub's OIDC token identifies each environment by the subject
+`repo:sugibuchi/fsspec-databricks:environment:<name>`. The federation's trust must name that subject and the issuer
+`https://token.actions.githubusercontent.com`.
+
+- **`github-oidc`**: a federation policy on the service principal, in the Databricks account console. Its audience is
+  `DATABRICKS_TOKEN_AUDIENCE`, e.g. the account ID.
+- **`github-oidc-azure`**: a federated credential on the Entra ID app, with the audience `api://AzureADTokenExchange`.
+  The app is the workspace's service principal. This needs no access to the account console.
+
+With federation, the client secret is not passed to the tests, even if the environment still has one.
+
+The environments are:
+
+| Environment | Workspace                        | Authentication      |
+|-------------|----------------------------------|---------------------|
+| `default`   | Databricks Free Edition          | Client secret       |
+| `azure`     | Azure Databricks                 | `github-oidc-azure` |
+| `gcp`       | Databricks on Google Cloud       | `github-oidc`       |
 
 At the repository level:
 
