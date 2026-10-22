@@ -83,6 +83,10 @@ exclude = [
 ]
 line-length = 88
 
+[tool.ruff.format]
+# Keep hand-written code examples in the documentation as they are.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = [
     "ASYNC",
@@ -113,6 +117,7 @@ ignore = [
     "PLR0912",
     "PLR0913",
     "PLR0915",
+    "PLR0917",
     "PLR2004",
     "SIM117",
 ]
