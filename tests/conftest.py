@@ -112,6 +112,7 @@ def dummy_api_context(dummy_api):
 
         context.check_signed_url = False
         context.upload_mode = "multipart"
+        context.abort_supported = True
 
 
 @pytest.fixture(scope="session")
