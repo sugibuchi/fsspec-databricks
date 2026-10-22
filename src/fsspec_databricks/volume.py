@@ -557,7 +557,9 @@ class VolumeFileSystem(DBFS):
                 base_url=base_url,
                 auth=auth,
                 loop=self._loop,
-                max_concurrency=max_concurrency or self.max_write_concurrency,
+                max_concurrency=max_concurrency
+                if max_concurrency is not None
+                else self.max_write_concurrency,
                 min_block_size=min_block_size,
                 max_block_size=max_block_size,
                 min_multipart_upload_size=self.min_multipart_upload_size,
