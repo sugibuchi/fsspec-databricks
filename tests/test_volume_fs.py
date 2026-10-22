@@ -1,3 +1,4 @@
+import asyncio
 import errno
 import inspect
 import logging
@@ -148,6 +149,37 @@ def test_volume_fs_serialization():
     assert isinstance(fs2, VolumeFileSystem)
     assert fs is not fs2
     assert fs._loop is not fs2._loop
+
+
+def test_volume_fs_session():
+    with VolumeFileSystem() as fs:
+        # Created from a thread without a running event loop
+        session = fs._session
+        assert not session.closed
+        assert session is fs._session
+
+        async def get_session():
+            return fs._session
+
+        # Accessed from the IO event loop
+        assert (
+            asyncio.run_coroutine_threadsafe(get_session(), fs._loop).result(timeout=5)
+            is session
+        )
+
+
+def test_volume_fs_session_in_event_loop():
+    with VolumeFileSystem() as fs:
+
+        async def get_session():
+            return fs._session
+
+        # Created from the IO event loop without deadlock
+        session = asyncio.run_coroutine_threadsafe(get_session(), fs._loop).result(
+            timeout=5
+        )
+        assert not session.closed
+        assert session is fs._session
 
 
 def test_volume_fs_workspace_id(client: WorkspaceClient):
