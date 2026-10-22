@@ -12,7 +12,15 @@ from .base import AbstractDatabricksFileSystem, root_dir_info
 from .dbfs import DBFS
 from .error import file_exists_error, file_not_found_error
 from .local import DatabricksLocalFileSystem
-from .path import FileSystemType, fs_type, scheme, volumes_root, workspace_root
+from .path import (
+    FileSystemType,
+    from_local_path,
+    fs_type,
+    scheme,
+    to_local_path,
+    volumes_root,
+    workspace_root,
+)
 from .volume import VolumeFileSystem, volumes_root_info
 from .workspace import NotebookFormat, WorkspaceFileSystem, workspace_root_info
 
@@ -48,6 +56,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     use_local_fs_in_workspace: bool = True
     """Whether to access files from the local file system rather than the remote Databricks API when running within a Databricks workspace. Defaults to True."""
+
+    legacy_dbfs_local_root: str = "/dbfs"
+    """The local path where Databricks mounts the legacy DBFS when running within a Databricks workspace."""
 
     cross_fs_copy_block_size: int = 1024 * 1024
     """The block size to use when copying files between different file systems (e.g. from Workspace to Volume). """
@@ -380,19 +391,35 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
         return self._legacy_dbfs_enabled
 
-    def _get_backend(self, path: str) -> AbstractFileSystem:
-        """Determine the appropriate file system for the path."""
+    @property
+    def _uses_local_fs(self) -> bool:
+        """Whether files are accessed from the local file system."""
+        return self.running_in_workspace and self.use_local_fs_in_workspace
+
+    def _resolve(self, path: str) -> tuple[AbstractFileSystem, str]:
+        """Return the file system for the path, and the path to pass to it."""
+        if self._uses_local_fs:
+            return self._local_fs, to_local_path(path, self.legacy_dbfs_local_root)
+
         t = fs_type(path)
-        if self.running_in_workspace and self.use_local_fs_in_workspace:
-            return self._local_fs
         if t == FileSystemType.Workspace:
-            return self._workspace_fs
+            return self._workspace_fs, path
         elif t == FileSystemType.Volume:
-            return self._volume_fs
+            return self._volume_fs, path
         elif t == FileSystemType.Legacy and self.legacy_dbfs_enabled:
-            return self._legacy_fs
+            return self._legacy_fs, path
         else:
             raise file_not_found_error(path)
+
+    def _from_local_info(self, info: dict) -> dict:
+        """Map the name in a local file's info back to its POSIX path in Databricks."""
+        if self._uses_local_fs:
+            return {
+                **info,
+                "name": from_local_path(info["name"], self.legacy_dbfs_local_root),
+            }
+        else:
+            return info
 
     ### File/directory information
     def ls(self, path, detail=True, **kwargs):
@@ -402,28 +429,41 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 if detail
                 else [volumes_root, workspace_root]
             )
+
+        fs, p = self._resolve(path)
+        items = fs.ls(p, detail=detail, **kwargs)
+        if not self._uses_local_fs:
+            return items
+        elif detail:
+            return [self._from_local_info(i) for i in items]
         else:
-            return self._get_backend(path).ls(path, detail=detail, **kwargs)
+            return [from_local_path(i, self.legacy_dbfs_local_root) for i in items]
 
     def info(self, path, **kwargs):
         if not self.legacy_dbfs_enabled and self._strip_protocol(path) == "/":
             return root_dir_info
 
-        return self._get_backend(path).info(path, **kwargs)
+        fs, p = self._resolve(path)
+        return self._from_local_info(fs.info(p, **kwargs))
 
     def exists(self, path, **kwargs) -> bool:
-        return self._get_backend(path).exists(path, **kwargs)
+        fs, p = self._resolve(path)
+        return fs.exists(p, **kwargs)
 
     def created(self, path):
-        return self._get_backend(path).created(path)
+        fs, p = self._resolve(path)
+        return fs.created(p)
 
     def modified(self, path):
-        return self._get_backend(path).modified(path)
+        fs, p = self._resolve(path)
+        return fs.modified(p)
 
     ### File/directory operations
     def cp_file(self, path1, path2, **kwargs):
         if fs_type(path1) == fs_type(path2):
-            self._get_backend(path1).cp_file(path1, path2, **kwargs)
+            fs, p1 = self._resolve(path1)
+            _, p2 = self._resolve(path2)
+            fs.cp_file(p1, p2, **kwargs)
         else:
             source_info = self.info(path1)
             if source_info["type"] == "directory":
@@ -437,15 +477,19 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                     self.mkdirs(path2)
                     return
 
-            with self._get_backend(path1).open(path1, "rb") as src:
-                with self._get_backend(path2).open(path2, "wb") as dst:
+            src_fs, src_path = self._resolve(path1)
+            dst_fs, dst_path = self._resolve(path2)
+            with src_fs.open(src_path, "rb") as src:
+                with dst_fs.open(dst_path, "wb") as dst:
                     shutil.copyfileobj(src, dst, length=self.cross_fs_copy_block_size)
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
         if fs_type(path1) == fs_type(path2):
-            self._get_backend(path1).mv(
-                path1,
-                path2,
+            fs, p1 = self._resolve(path1)
+            _, p2 = self._resolve(path2)
+            fs.mv(
+                p1,
+                p2,
                 recursive=recursive,
                 maxdepth=maxdepth,
                 **kwargs,
@@ -460,19 +504,24 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             )
 
     def _rm(self, path):
-        self._get_backend(path)._rm(path)
+        fs, p = self._resolve(path)
+        fs._rm(p)
 
     def rm(self, path, recursive=False, maxdepth=None):
-        self._get_backend(path).rm(path, recursive=recursive, maxdepth=maxdepth)
+        fs, p = self._resolve(path)
+        fs.rm(p, recursive=recursive, maxdepth=maxdepth)
 
     def mkdir(self, path, create_parents=True, **kwargs):
-        self._get_backend(path).mkdir(path, create_parents, **kwargs)
+        fs, p = self._resolve(path)
+        fs.mkdir(p, create_parents, **kwargs)
 
     def makedirs(self, path, exist_ok=False):
-        self._get_backend(path).makedirs(path, exist_ok)
+        fs, p = self._resolve(path)
+        fs.makedirs(p, exist_ok)
 
     def rmdir(self, path):
-        self._get_backend(path).rmdir(path)
+        fs, p = self._resolve(path)
+        fs.rmdir(p)
 
     ## File I/O
     def open(
@@ -527,8 +576,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         **kwargs
             Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
         """
-        return self._get_backend(path).open(
-            path=path,
+        fs, p = self._resolve(path)
+        return fs.open(
+            path=p,
             mode=mode,
             notebook_format=notebook_format,
             language=language,

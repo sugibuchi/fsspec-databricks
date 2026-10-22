@@ -1125,8 +1125,10 @@ class VolumeWritableFile(AbstractAsyncWritableFile):
         if self._upload_mode == "multipart":
             try:
                 path, headers, params = await self._get_multipart_upload_abort_url()
-            except BadRequest:
-                return  # Azure Databricks does not support abort of multipart upload
+            except ClientResponseError as e:
+                if e.status == 400:
+                    return  # Azure Databricks does not support abort of multipart upload
+                raise
         else:
             path = self._resumable_upload_url
             headers = self._resumable_upload_headers

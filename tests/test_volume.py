@@ -1,5 +1,6 @@
 from io import BytesIO
 from random import randbytes
+from unittest.mock import patch
 
 import pandas as pd
 import pyarrow as pa
@@ -180,6 +181,38 @@ def test_volume_file_resumable_write(
             use_presigned_url=False,
         ) as f:
             f.write(data)
+
+
+@pytest.mark.parametrize("abort_supported", [True, False])
+def test_volume_file_multipart_write_abort(
+    dummy_api,
+    dummy_api_context,
+    client_event_loop,
+    aiohttp_session,
+    abort_supported,
+):
+    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+    dummy_api_context.abort_supported = abort_supported
+
+    with patch.object(
+        VolumeWritableFile, "_upload_part", side_effect=RuntimeError("Dummy")
+    ):
+        with pytest.raises(OSError) as exc_info:
+            with VolumeWritableFile(
+                path=path,
+                session=aiohttp_session,
+                base_url=dummy_api,
+                auth=_dummy_auth,
+                loop=client_event_loop,
+            ) as f:
+                f.write(randbytes(20 * 1000 * 1000))
+
+    # The upload's failure is raised, not the abort's
+    assert "Multipart upload failed" in str(exc_info.value)
+    assert path not in dummy_api_context.files
+
+    if abort_supported:
+        assert dummy_api_context.multipart_upload_sessions == {}
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])

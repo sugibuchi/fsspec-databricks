@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 class DummyAPIContext:
     upload_mode: Literal["multipart", "resumable"] = "multipart"
     check_signed_url: bool = False
+    abort_supported: bool = True
 
     files: dict[str, bytes] = field(default_factory=dict)
 
@@ -457,7 +458,18 @@ async def create_resumable_upload_url(request: Request):
 
 
 @app.post("/api/2.0/fs/create-abort-upload-url")
-async def create_abort_upload_url(request: Request):
+async def create_abort_upload_url(
+    request: Request,
+    context: Annotated[DummyAPIContext, Depends(dummy_context)],
+):
+    if not context.abort_supported:
+        # As Azure Databricks, which does not support abort of multipart upload
+        raise http_exception(
+            "BAD_REQUEST",
+            "Abort of multipart upload is not supported",
+            400,
+        )
+
     body = await request.json()
     try:
         path = body["path"]

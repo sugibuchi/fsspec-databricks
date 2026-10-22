@@ -104,6 +104,30 @@ def fs_type(path: str) -> FileSystemType:
         )
 
 
+def to_local_path(path: str, legacy_dbfs_root: str) -> str:
+    """Return the local path of a DBFS URL or POSIX path on Databricks compute.
+
+    Unity Catalog Volume and Workspace paths are the same locally. Legacy DBFS paths are under `legacy_dbfs_root`,
+    where Databricks mounts the legacy DBFS, e.g. `dbfs:/data/file` is `/dbfs/data/file`.
+    """
+    stripped = strip_scheme(path)
+    if fs_type(stripped) == FileSystemType.Legacy:
+        return legacy_dbfs_root.rstrip("/") + stripped.rstrip("/")
+    else:
+        return stripped
+
+
+def from_local_path(path: str, legacy_dbfs_root: str) -> str:
+    """Return the POSIX path of a local path on Databricks compute: the reverse of `to_local_path`."""
+    root = legacy_dbfs_root.rstrip("/")
+    if path == root:
+        return dbfs_root
+    elif path.startswith(f"{root}/"):
+        return path[len(root) :]
+    else:
+        return path
+
+
 def parse_volume_path(
     path: str,
 ) -> tuple[str | None, str | None, str | None, str | None, str]:
@@ -178,12 +202,14 @@ def parse_dbfs_path(path: str) -> str:
 __all__ = [
     "FileSystemType",
     "dbfs_root",
+    "from_local_path",
     "fs_type",
     "parse_dbfs_path",
     "parse_volume_path",
     "parse_workspace_path",
     "scheme",
     "strip_scheme",
+    "to_local_path",
     "unstrip_scheme",
     "volumes_root",
     "workspace_root",
