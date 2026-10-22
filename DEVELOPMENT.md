@@ -1,71 +1,370 @@
-# Setup for development and testing
+# Development
 
-Some tests in this library require access to actual Databricks workspaces to verify its file system operations
-in the real Databricks environment. You need to configure access to a Databricks workspace and create work
-directories within it before running the tests.
+## Layout
 
----
+| Path                                | Contents                                                                         |
+|-------------------------------------|----------------------------------------------------------------------------------|
+| `src/fsspec_databricks/__init__.py` | The public API: `DatabricksFileSystem` and `use()`.                              |
+| `src/fsspec_databricks/spec.py`     | `DatabricksFileSystem`, which routes each call to a backend.                     |
+| `src/fsspec_databricks/base.py`     | `AbstractDatabricksFileSystem`, the backends' base class.                        |
+| `src/fsspec_databricks/volume.py`   | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.                 |
+| `src/fsspec_databricks/workspace.py` | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object.      |
+| `src/fsspec_databricks/dbfs.py`     | `DBFS`, the legacy DBFS.                                                         |
+| `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, the local file system used inside a workspace.      |
+| `src/fsspec_databricks/file.py`     | The file objects' base classes: concurrent ranges, and whole-file caches.        |
+| `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
+| `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
+| `src/fsspec_databricks/utils.py`    | Timestamps and enums.                                                            |
+| `tests/`                            | The tests, a file per module, and the fake Files API.                            |
 
-## Work directories in Databricks workspace
+The runtime dependencies are fsspec, databricks-sdk and aiohttp.
 
-You need to create work directories in your Databricks workspace and Unity Catalog to use for the tests and
-set the **POSIX paths** (without the `dbfs:/` scheme) of the test directories in the following environment variables.
+All Python commands go through [uv](https://docs.astral.sh/uv/).
 
-| Location             | Environment variable name               | Default                                                      |
+## Setup
+
+```bash
+uv sync
+```
+
+Most tests run against a real Databricks workspace. They need its credentials and two work directories in it.
+
+### Work directories
+
+Create a folder in a Unity Catalog Volume and one in the Workspace files. Set their **POSIX paths**, without `dbfs:/`,
+in these environment variables:
+
+| Location             | Environment variable                    | Default                                                      |
 |----------------------|-----------------------------------------|--------------------------------------------------------------|
 | Unity Catalog Volume | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | `/Volumes/fsspec_databricks_test/fsspec_dbx_test/test/local` |
 | Workspace files      | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | `/fsspec-databricks-test/local`                              |
 
----
+The tests delete everything in these folders at the start of each session.
 
-## Local development
+### Credentials
 
-Configure Databricks Unified authentication locally, and set environment variable
-`FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` and `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` to specify the
-location of work directories to use.
+Configure [Databricks Unified Authentication](https://docs.databricks.com/aws/en/dev-tools/auth/unified-auth), e.g. a
+default profile or `DATABRICKS_*` environment variables.
 
-You can set authentication parameters and the environment variables above in a `.env` file
-in the project root directory. The test suite loads it automatically via `python-dotenv`.
+The tests load a `.env` file in the repository folder, through python-dotenv. It can hold the credentials and the two
+variables above.
 
-Run the tests with:
+## Tests
 
 ```bash
-uv run pytest
+uv run pytest                                   # all tests
+uvx ruff check .                                # lint
+uvx ruff format --check .                       # formatting
+uvx pre-commit run --all-files                  # the hooks
 ```
 
----
+| File                       | Tests of                                          | Workspace |
+|----------------------------|---------------------------------------------------|-----------|
+| `test_spec_fs.py`          | `DatabricksFileSystem`                            | Mostly    |
+| `test_base_fs.py`          | `AbstractDatabricksFileSystem`                    | Yes       |
+| `test_volume_fs.py`        | `VolumeFileSystem`                                | Mostly    |
+| `test_volume.py`           | The Volume file objects                           | No        |
+| `test_workspace_fs.py`     | `WorkspaceFileSystem`                             | Yes       |
+| `test_file.py`             | The file objects' base classes                    | No        |
+| `test_path.py`             | `path.py`                                         | No        |
+| `test_utils.py`            | `utils.py`                                        | No        |
 
-## GitHub Actions
+Without credentials, run the files that need no workspace, and the tests of the others that take no workspace fixture.
 
-You need a Databricks service principal that has read-write access to the work directories.
+The fixtures, in `tests/conftest.py`:
+
+- `client`: a `WorkspaceClient` with the default authentication;
+- `volume_test_root` and `workspace_test_root`: the work directories, emptied;
+- `dummy_api` and `dummy_api_context`: the fake Files API, and its state;
+- `client_event_loop` and `aiohttp_session`: an event loop in a thread, and a session on it;
+- `dummy_table_parquet`: Parquet bytes of a generated table.
+
+`tests/dummy_api.py` is a FastAPI app of the Files API's endpoints, served by Hypercorn on a free local port. It
+covers downloads, single uploads, multipart and resumable uploads, presigned URLs and aborts.
+`dummy_api_context.upload_mode` chooses between multipart and resumable uploads.
+
+`tests/utils.py` has the helpers that test files share.
+
+## CI
+
+The workflows are in `.github/workflows/`:
+
+| Workflow          | Runs on               | Does                                                                     |
+|-------------------|-----------------------|--------------------------------------------------------------------------|
+| `on_push.yaml`    | Pushes                | `check.yaml`, then `test.yaml` for each Python version and workspace.    |
+| `check.yaml`      | Called                | ruff check and ruff format check, with the latest ruff.                  |
+| `test.yaml`       | Called, or by hand    | pytest in one GitHub environment, optionally with coverage to Codecov.  |
+| `on_release.yaml` | Published releases    | `publish.yaml` to PyPI.                                                  |
+| `publish.yaml`    | Called                | `uv build` and `uv publish`.                                             |
+
+`on_push.yaml` runs these test jobs:
+
+- Python 3.14 on the `default` environment, with coverage on `main`;
+- on `main`, the other supported Python versions on `default`;
+- Python 3.14 on `azure`, `aws` and `gcp`, each when the `TEST_ENVIRONMENTS` variable names it.
+
+Each run's work directories are `<root>/<branch>/<Python version>` under the environment's roots.
 
 ### Environments
 
-The workflows
-use [GitHub Actions environments](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment)
-to scope secrets and variables per Databricks deployment. You must create at least a `default` environment
-(used for the default Databricks workspace (e.g. Databricks Free Edition)). To run tests against additional cloud
-deployments, create `azure`, `aws`, and/or `gcp` environments as needed.
+Each GitHub environment is a Databricks workspace. Create at least `default`, and `azure`, `aws` or `gcp` as needed.
+The tests authenticate as a service principal with read-write access to the work directories.
 
-Each environment must have the following secrets and variables configured:
+| Secret                     | Value                                         |
+|----------------------------|-----------------------------------------------|
+| `DATABRICKS_HOST`          | The workspace's URL                           |
+| `DATABRICKS_CLIENT_ID`     | The service principal's client ID             |
+| `DATABRICKS_CLIENT_SECRET` | The service principal's client secret         |
 
-| Secret name                | Description                                                              |
-|----------------------------|--------------------------------------------------------------------------|
-| `DATABRICKS_HOST`          | The URL of the Databricks workspace                                      |
-| `DATABRICKS_CLIENT_ID`     | The client ID of the Databricks service principal to use for testing     |
-| `DATABRICKS_CLIENT_SECRET` | The client secret of the Databricks service principal to use for testing |
+| Variable                                | Value                                         |
+|-----------------------------------------|-----------------------------------------------|
+| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | The POSIX path of the Volume work directory    |
+| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | The POSIX path of the Workspace work directory |
 
-| Variable name                           | Description                                                                       |
-|-----------------------------------------|-----------------------------------------------------------------------------------|
-| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | The POSIX path of the work directory in Unity Catalog Volume to use for testing.  |
-| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | The POSIX path of the directory in Databricks Workspace files to use for testing. |
+At the repository level:
 
-### Repository-level secrets and variables
+| Name                          | Value                                                                    |
+|-------------------------------|--------------------------------------------------------------------------|
+| `CODECOV_TOKEN` (secret)      | The repository's upload token for [Codecov](https://about.codecov.io/)   |
+| `TEST_ENVIRONMENTS` (variable) | The environments tested on each push, e.g. `azure gcp`                  |
 
-| Secret name     | Description                                                          |
-|-----------------|----------------------------------------------------------------------|
-| `CODECOV_TOKEN` | The repository upload token for [Codecov](https://about.codecov.io/) |
+## Releasing
 
-| Variable name       | Description                                                                                                                                                                                                   |
-|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `TEST_ENVIRONMENTS` | A string containing the cloud environments to test against on each push. If the value contains `azure`, `aws`, or `gcp`, the corresponding job will run. Example: `azure gcp` to run both Azure and GCP jobs. |
+The version comes from the git tag, through hatch-vcs.
+
+1. Create a GitHub release with a new tag `vX.Y.Z` on `main`.
+2. Publishing it runs `on_release.yaml`. It builds the package and publishes it to PyPI, in the GitHub environment
+   `pypi`.
+
+`uv publish` authenticates to PyPI with the workflow's OIDC token, through trusted publishing.
+
+## Design
+
+### One file system for all of Databricks' paths
+
+`DatabricksFileSystem` takes the paths Databricks itself takes: `dbfs:/` URLs and POSIX paths. It sends each call to
+the backend of its path, with the same rules as Databricks:
+
+| Path                                           | Backend               |
+|------------------------------------------------|-----------------------|
+| `/Volumes/<catalog>/<schema>/<volume>/...`     | `VolumeFileSystem`    |
+| `/Workspace/...`                               | `WorkspaceFileSystem` |
+| Any other                                      | `DBFS`, if enabled    |
+
+The same code then runs inside and outside Databricks.
+
+### Inside a workspace, the local file system
+
+On a Databricks cluster, `DATABRICKS_RUNTIME_VERSION` is set. `DatabricksFileSystem` then serves every path from the
+local file system, unless `use_local_fs_in_workspace=False`.
+
+### The SDK for metadata, HTTP for Volume data
+
+Listings, metadata and changes go through the Databricks SDK. Volume file contents go through the Files API directly,
+with aiohttp, so that ranges and parts run concurrently.
+
+### Standard exceptions
+
+Errors are `OSError` subclasses, as from local files: `FileNotFoundError`, `FileExistsError`, `IsADirectoryError`,
+`NotADirectoryError` and `PermissionError`. A failed transfer is an `OSError` with `errno.EIO`, caused by the original
+exception.
+
+### Picklable
+
+File systems are pickled to run in other processes, e.g. by Dask. Clients, event loops, threads and sessions are left
+out, and made again on first use.
+
+A `WorkspaceClient` given as `client` is kept, and is not picklable. Other ways of authenticating are.
+
+### Known limits
+
+- **Multipart upload uses an undocumented API.** Databricks may change it without notice.
+- **Workspace files are at most 10 MB.** The Workspace API's limit.
+- **No append or update modes on Volumes.** `ab` and `r+b` are refused.
+- **No listing cache.** Each call reaches the workspace.
+
+## Architecture
+
+- **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use.
+- **The backends** subclass `AbstractDatabricksFileSystem`, in `base.py`. Each wraps one Databricks API.
+- **The file objects**, in `file.py`, are `RawIOBase`s. Volumes read and write ranges concurrently. Workspace files are
+  cached whole.
+- **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
+
+### Routing
+
+`DatabricksFileSystem._get_backend(path)` gives the backend of a path, with `path.fs_type`:
+
+- the local file system, when running in a workspace with `use_local_fs_in_workspace`;
+- else the Volume, Workspace or legacy DBFS backend;
+- `FileNotFoundError` for legacy DBFS paths when the workspace disables legacy DBFS.
+
+The workspace setting `disable_legacy_dbfs` is read once. When legacy DBFS is disabled, `ls("/")` and `info("/")`
+answer without a backend: the root holds `/Volumes` and `/Workspace`.
+
+The backends are created on first use, with the file system's client, config and options. `close()` closes them.
+
+Transfers between backends:
+
+- `cp_file` streams the file from one backend's file object into the other's, in blocks of
+  `cross_fs_copy_block_size`. A folder is created, not copied.
+- `mv` uses fsspec's default, a copy then a delete.
+
+Within one backend, both go to the backend.
+
+### The base class
+
+`AbstractDatabricksFileSystem` holds what every backend shares:
+
+- the Databricks SDK `Config` and `WorkspaceClient`, made on first use from `client`, `config` or `config_params`;
+- `close()`, also called at exit and on garbage collection;
+- pickling without the client and config;
+- the `dbfs` protocol: `_strip_protocol` and `unstrip_protocol` use `path.py`.
+
+Its `mkdir`, `makedirs`, `rmdir` and `_rm` only check preconditions, such as a missing parent or a file where a folder
+is expected. Subclasses call them first, then make the API call.
+
+`open` passes text mode on, and writes text with `"\n"` newlines by default.
+
+### Paths
+
+`path.py` matches paths with three regular expressions: `dbfs:/` URLs, Workspace paths and Volume paths.
+
+- `strip_scheme` and `unstrip_scheme` convert between `dbfs:/` URLs and POSIX paths.
+- `fs_type` gives a path's backend.
+- `parse_volume_path` gives the catalog, schema, volume and path in the volume. Missing parts are `None`.
+- `parse_workspace_path` and `parse_dbfs_path` give the path in their API.
+
+### Errors
+
+`error_mapping(path)` is a context manager around SDK calls. It maps the SDK's exceptions:
+
+| SDK exception                           | Raised                              |
+|-----------------------------------------|-------------------------------------|
+| `NotFound`                              | `FileNotFoundError`                 |
+| `AlreadyExists`, `ResourceAlreadyExists`| `FileExistsError`                   |
+| `Unauthenticated`, `PermissionDenied`   | `PermissionError` with `EACCES`     |
+
+Other exceptions pass through. The helpers `file_not_found_error` and the like make `OSError`s with the path and the
+system's message.
+
+### Legacy DBFS
+
+`DBFS`, in `dbfs.py`, uses the SDK's `WorkspaceClient.dbfs`. Copies, moves and recursive deletes use the API's own,
+when no glob pattern is involved. Files are opened with the SDK's `dbfs.open`.
+
+### Volumes
+
+`VolumeFileSystem`, in `volume.py`, subclasses `DBFS`, as the DBFS API also lists Volume folders.
+
+The APIs called depend on the depth of the path:
+
+| Path                                   | `info`                                                    | `ls`            |
+|----------------------------------------|-----------------------------------------------------------|-----------------|
+| `/Volumes`                             | None: a fixed folder                                      | `catalogs.list` |
+| `/Volumes/<catalog>`                   | `catalogs.get`                                            | `schemas.list`  |
+| `/Volumes/<catalog>/<schema>`          | `schemas.get`                                             | `volumes.list`  |
+| `/Volumes/<catalog>/<schema>/<volume>` | `volumes.read`                                            | `dbfs.list`     |
+| Deeper                                 | `files.get_directory_metadata`, else `files.get_metadata` | `dbfs.list`     |
+
+`include_browse` is passed to the Unity Catalog APIs.
+
+#### The IO event loop
+
+Each `VolumeFileSystem` runs an asyncio event loop in a daemon thread, `dbfs-io-thread`, started on first use. It
+holds one aiohttp `ClientSession`, whose `TCPConnector` allows `connection_pool_size` connections.
+
+- The session is created in the loop, as `TCPConnector` needs a running loop. From the loop itself, it is created
+  directly.
+- `close()` closes the session in the loop, stops the loop and joins the thread.
+- Requests are authenticated by an aiohttp middleware, with the SDK `Config`'s headers.
+
+#### Storage proxy or presigned URLs
+
+On first open, the file system probes the Databricks storage proxy, `storage-proxy.databricks.com`, with the workspace
+ID:
+
+- If it answers, all requests go to it.
+- Otherwise, requests go to the workspace's host. Data moves through presigned URLs from the Files API.
+
+Files smaller than `min_presigned_url_size`, 1 MB, are read from the Files API directly. Presigned URLs for reads are
+renewed after 30 minutes.
+
+#### Reading
+
+`VolumeReadableFile` subclasses `AbstractAsyncReadableFile`. A read schedules range requests, each a task in the IO
+loop:
+
+- At most `max_concurrency` run at once.
+- `read()` of the whole file splits the rest of the file evenly across them, within the block size limits.
+- Smaller reads grow the block size with the bytes read in a row. After `n` bytes read in a row, the next `n` are
+  fetched ahead.
+- A seek outside the fetched ranges cancels them, and resets the bytes read in a row.
+
+`_compute_block_size` gives the block size: the smallest power-of-2 multiple of the minimum that covers the target with
+`max_concurrency` blocks, capped at the maximum.
+
+#### Writing
+
+`VolumeWritableFile` subclasses `AbstractAsyncWritableFile`. Writes are buffered:
+
+1. Data is buffered until it reaches `min_multipart_upload_size`. A file closed before then is uploaded by one `PUT`.
+2. Then the upload is initiated, and the server chooses multipart or resumable upload.
+3. Full blocks are uploaded as the buffer fills. After `n` bytes written, block sizes aim at `n` more.
+4. `close()` uploads the rest, waits for the parts, and completes the upload.
+
+The two kinds of upload differ:
+
+- **Multipart**: parts upload concurrently, then the upload completes with their ETags.
+- **Resumable**: one part at a time, with `Content-Range`. A `308` answer gives the bytes received, and the rest is
+  sent again.
+
+If a part fails, `close()` aborts the upload and raises an `OSError`. Part sizes must be multiples of 256 KB.
+
+### Workspace files
+
+`WorkspaceFileSystem`, in `workspace.py`, uses the SDK's `WorkspaceClient.workspace`.
+
+`WorkspaceFile` is a `MemoryCachedFile`:
+
+- Opening for reading or appending downloads the whole file into memory.
+- Closing or `flush(upload=True)` uploads it whole, if changed.
+- Files are at most 10 MB.
+
+Notebooks are objects of type `NOTEBOOK`. `notebook_format` gives their export and import format, `SOURCE` by default.
+
+- An existing notebook keeps its language.
+- A new notebook needs `language`.
+- Other files use `AUTO` export and `RAW` import, and refuse `notebook_format`.
+
+`cp_file` downloads and uploads, keeping notebooks as notebooks. `rm` uses the API's recursive delete when no glob
+pattern is involved.
+
+### File objects
+
+`file.py` has two families of file objects:
+
+| Class                         | Does                                                                          |
+|-------------------------------|-------------------------------------------------------------------------------|
+| `AbstractAsyncFile`           | Runs coroutines in an event loop of another thread, and waits for them.       |
+| `FileRangeTaskSupport`        | Byte-range tasks, at most `max_concurrency` at once, cancelled on close.      |
+| `AbstractAsyncReadableFile`   | Reading with range tasks, prefetching and seeking.                            |
+| `AbstractAsyncWritableFile`   | Buffered writing, single uploads, and multipart uploads with part tasks.      |
+| `AbstractCachedFile`          | A whole remote file cached locally, downloaded on open and uploaded on close. |
+| `MemoryCachedFile`            | The cache in memory, with a required `max_size`.                              |
+| `FileCachedFile`              | The cache in a temporary file.                                                |
+
+Synchronous methods of async files raise `RuntimeError` when called from their own event loop. Use the `async`
+methods there.
+
+A failed range task stops the file: later reads and writes raise, with the task's exception as the cause.
+
+### Local file system
+
+`DatabricksLocalFileSystem`, in `local.py`, is fsspec's `LocalFileSystem` with the `dbfs` protocol. It strips
+`dbfs:` from paths and uses them as local paths.
+
+### Logging
+
+Each module has a logger of its name. Debug logs on every read, write and task are written only with
+`verbose_debug_log`.

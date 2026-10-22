@@ -1,81 +1,81 @@
 # Authentication
 
-`fsspec-databricks` uses Databricks Unified Authentication provided by Databricks Python SDK.
-
-You can find information about supported authentication parameters and environment variables in
-the [Databricks Python SDK documentation](https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html).
+`fsspec-databricks` uses Databricks Unified Authentication, through the Databricks Python SDK. Its parameters and
+environment variables are in the
+[Databricks Python SDK documentation](https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html).
 
 ---
 
-## Default authentication
+## Default
 
-If Databricks Unified Authentication is configured, `fsspec-databricks` will pick up credentials from the default
-profile. For more, see the above Databricks SDK docs.
+With Databricks Unified Authentication configured, e.g. a default profile, no parameter is needed:
 
 ```python
 from fsspec_databricks import DatabricksFileSystem
 
 fs = DatabricksFileSystem()
-
-with fs.open("dbfs:/Volumes/...") as f:
-    ...
 ```
 
 ---
 
-## Via constructor parameters
+## Constructor parameters
 
-You can programmatically configure authentication by passing parameters to `DatabricksFileSystem` constructor.
+`DatabricksFileSystem` takes the parameters of the SDK's `WorkspaceClient`:
 
 ```python
-# Authentication with PAT
+# Personal access token
 fs = DatabricksFileSystem(host=host_url, token=access_token)
 
-# Use different profile
+# Another profile
 fs = DatabricksFileSystem(profile="production")
 ```
 
 ---
 
-## Via environment variables
-
-Or, you can configure authentication via environment variables.
+## Environment variables
 
 ```bash
-# Shell
 export DATABRICKS_CONFIG_PROFILE=production
 ```
 
 ```python
-# Then in Python
-fs = DatabricksFileSystem()  # will use the "production" profile
+fs = DatabricksFileSystem()  # uses the "production" profile
 ```
 
 ---
 
-## By `fsspec` configuration
+## fsspec configuration
 
-You can use
-the [fsspec's configuration model](https://filesystem-spec.readthedocs.io/en/latest/features.html#configuration) to
-configure and persist authentication parameters.
+[fsspec's configuration](https://filesystem-spec.readthedocs.io/en/latest/features.html#configuration) sets default
+parameters for the `dbfs` protocol:
+
+```python
+import fsspec
+
+fsspec.config.conf["dbfs"] = {"profile": "production"}
+
+fs = DatabricksFileSystem()  # uses the "production" profile
+```
+
+Or with environment variables named `FSSPEC_DBFS_<PARAMETER>`, read when fsspec is imported:
+
+```bash
+export FSSPEC_DBFS_PROFILE=production
+```
 
 ---
 
-## With `WorkspaceClient`
+## `WorkspaceClient`
 
-You can create `DatabricksFileSystem` by explicitly setting Databricks SDK's `WorkspaceClient` object.
-The created `DatabricksFileSystem` instance will use the authentication configured in the provided `WorkspaceClient`
-object.
+`DatabricksFileSystem` can use a `WorkspaceClient` of yours, with its authentication:
 
 ```python
 from databricks.sdk import WorkspaceClient
 
 client = WorkspaceClient(...)
-...
 
 fs = DatabricksFileSystem(client=client)
 ```
 
-Note: a `DatabricksFileSystem` created with a `WorkspaceClient` will generally not be serializable, because
-`WorkspaceClient` instances are not serializable. Consider using other configuration methods if you need
-serializable filesystem objects.
+A file system created with a `WorkspaceClient` is generally not picklable, as `WorkspaceClient` objects are not. Use
+another way to authenticate where file systems are pickled, e.g. with Dask.
