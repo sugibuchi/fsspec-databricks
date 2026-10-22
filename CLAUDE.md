@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 All Python goes through uv: never call `python` or `pip` directly.
 
 ```bash
-uv sync                                         # the package, editable, with the dev dependencies
+uv sync                                         # the package, editable, with the dev dependencies (uv.lock)
+uv lock                                         # update uv.lock after changing dependencies, and commit it
 uv run pytest                                   # all tests: most need a Databricks workspace (see below)
 uv run pytest tests/test_path.py -k volume      # one file / matching tests
 uv run pytest --cov                             # with coverage of src/
@@ -24,6 +25,15 @@ CI, in `.github/workflows/on_push.yaml`, runs on pushes:
 - pytest on Azure, AWS or GCP workspaces named in the `TEST_ENVIRONMENTS` variable.
 
 Releases are published GitHub releases. DEVELOPMENT.md describes them.
+
+The test jobs hold Databricks credentials. Keep their supply chain fixed:
+
+- `uv.lock` is committed, and CI installs with `uv sync --locked`. After changing dependencies, run `uv lock` and
+  commit `uv.lock`.
+- Actions are pinned to commit SHAs, with the version in a comment, e.g. `@<sha> # v7.0.1`. Dependabot updates both.
+- `astral-sh/setup-uv` publishes no major-version tags: pin a full version's SHA.
+- Never add a `pull_request_target` trigger, or give secrets to `pull_request` runs from forks.
+- Each workflow declares `permissions:`, with only what it needs.
 
 ## Tests and layout
 

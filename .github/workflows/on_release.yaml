@@ -5,6 +5,9 @@ on:
     types:
       - published
 
+permissions:
+  contents: read
+
 concurrency:
   group: "on-release-${{ github.ref_name }}"
   cancel-in-progress: true

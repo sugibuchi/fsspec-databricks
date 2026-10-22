@@ -82,9 +82,6 @@ ENV/
 # vi*
 *.swp
 
-# UV
-uv.lock
-
 build/
 downstream/*
 
