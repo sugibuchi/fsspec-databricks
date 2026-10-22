@@ -2,7 +2,7 @@ import errno
 import inspect
 import logging
 import pickle
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from random import randbytes
 from time import sleep
 
@@ -153,8 +153,8 @@ def test_workspace_fs_info(
     assert info["name"] == stripped_dbfs_url(data_path)
     assert info["size"] == len(data)
     assert info["type"] == "file"
-    assert datetime.now(tz=timezone.utc) - info["created"] < timedelta(minutes=1)
-    assert datetime.now(tz=timezone.utc) - info["modified"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - info["created"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - info["modified"] < timedelta(minutes=1)
     assert info["islink"] is False
     assert info["object_type"] == "FILE"
     assert info["language"] is None
@@ -225,8 +225,8 @@ def test_workspace_fs_ls(
     assert items[0]["name"] == stripped_dbfs_url(f"{test_dir}/1_data.bin")
     assert items[0]["size"] == len(data)
     assert items[0]["type"] == "file"
-    assert datetime.now(tz=timezone.utc) - items[0]["created"] < timedelta(minutes=1)
-    assert datetime.now(tz=timezone.utc) - items[0]["modified"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - items[0]["created"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - items[0]["modified"] < timedelta(minutes=1)
     assert items[0]["islink"] is False
     assert items[0]["object_type"] == "FILE"
     assert items[0]["language"] is None
@@ -236,8 +236,8 @@ def test_workspace_fs_ls(
     assert items[1]["name"] == stripped_dbfs_url(f"{test_dir}/2_notebook")
     assert items[1]["size"] is None
     assert items[1]["type"] == "file"
-    assert datetime.now(tz=timezone.utc) - items[1]["created"] < timedelta(minutes=1)
-    assert datetime.now(tz=timezone.utc) - items[1]["modified"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - items[1]["created"] < timedelta(minutes=1)
+    assert datetime.now(tz=UTC) - items[1]["modified"] < timedelta(minutes=1)
     assert items[1]["islink"] is False
     assert items[1]["object_type"] == "NOTEBOOK"
     assert items[1]["language"] == "PYTHON"

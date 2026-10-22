@@ -13,7 +13,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 keywords = [
     "fsspec",
@@ -28,7 +28,6 @@ classifiers = [
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -38,7 +37,7 @@ classifiers = [
 
 dependencies = [
     "fsspec",
-    "databricks-sdk>0.99",
+    "databricks-sdk>=0.156.0",
     "aiohttp>3.12",
 ]
 

@@ -1,3 +1,4 @@
+import inspect
 import pickle
 from random import randbytes
 
@@ -35,6 +36,27 @@ def test_use():
 
     fs = fsspec.filesystem("dbfs")
     assert isinstance(fs, DatabricksFileSystem)
+
+
+def test_dbx_fs_accepts_workspace_client_params():
+    """`DatabricksFileSystem` accepts all parameters of `WorkspaceClient` in the installed SDK."""
+    ws_params = set(inspect.signature(WorkspaceClient.__init__).parameters)
+    fs_params = set(inspect.signature(DatabricksFileSystem.__init__).parameters)
+
+    assert ws_params - fs_params == set()
+
+
+def test_dbx_fs_config_params():
+    with DatabricksFileSystem(
+        host="https://example.cloud.databricks.com",
+        group_id="group-1",
+        workspace_id=1234567890,
+        custom_headers={"X-Test": "1"},
+    ) as fs:
+        assert fs._config_params["host"] == "https://example.cloud.databricks.com"
+        assert fs._config_params["group_id"] == "group-1"
+        assert fs._config_params["workspace_id"] == 1234567890
+        assert fs._config_params["custom_headers"] == {"X-Test": "1"}
 
 
 def test_dbx_fs_init(client: WorkspaceClient):

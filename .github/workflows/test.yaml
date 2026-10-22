@@ -81,7 +81,7 @@ jobs:
         run: |
           test_path="${{ github.ref_name }}/${{ inputs.python-version }}"
 
-          has_error=no          
+          has_error=no
           if [[ "${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}" == "" ]]; then
             echo "GitHub Actions variable FSSPEC_DATABRICKS_VOLUME_TEST_ROOT must be set."
             has_error=yes

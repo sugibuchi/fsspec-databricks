@@ -1,4 +1,4 @@
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 from enum import Enum
 
 import pytest
@@ -49,7 +49,7 @@ def test_to_datetime_rfc2822d():
         dt.minute,
         dt.second,
     ) == (2021, 2, 3, 4, 5, 6)
-    assert dt.tzinfo == timezone.utc
+    assert dt.tzinfo == UTC
 
 
 class Fruit(Enum):

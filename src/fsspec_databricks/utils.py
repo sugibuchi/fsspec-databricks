@@ -1,5 +1,5 @@
 import email.utils
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, TypeVar
 
@@ -11,9 +11,9 @@ def to_datetime(timestamp: float | str | None, is_ms: bool = True) -> datetime |
         return None
     elif isinstance(timestamp, (float, int)):
         if is_ms:
-            return datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+            return datetime.fromtimestamp(timestamp / 1000, tz=UTC)
         else:
-            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            return datetime.fromtimestamp(timestamp, tz=UTC)
     elif isinstance(timestamp, str):
         # RFC 822 timestamp like "Wed, 02 Oct 2002 08:00:00 EST
         return email.utils.parsedate_to_datetime(timestamp)
@@ -23,7 +23,7 @@ def to_datetime(timestamp: float | str | None, is_ms: bool = True) -> datetime |
 
 def to_rfc3339(dt: datetime) -> str:
     """Convert a datetime object to an RFC 3339 formatted string."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 ENUM = TypeVar("ENUM", bound=Enum)

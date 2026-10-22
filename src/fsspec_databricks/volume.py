@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
 from threading import Event, RLock, Thread
 from typing import Any, Literal
@@ -712,9 +712,9 @@ class VolumeReadableFile(AbstractAsyncReadableFile):
         async with self._lock:
             if (
                 self._presigned_url is None
-                or datetime.now(tz=timezone.utc) > self._presigned_url_refresh_time
+                or datetime.now(tz=UTC) > self._presigned_url_refresh_time
             ):
-                now = datetime.now(tz=timezone.utc)
+                now = datetime.now(tz=UTC)
                 expire_time = now + self._presigned_url_expiration_duration
                 refresh_time = now + self._presigned_url_refresh_after
 
@@ -857,7 +857,7 @@ class VolumeWritableFile(AbstractAsyncWritableFile):
         )
 
     def _url_expire_time(self) -> str:
-        return to_rfc3339(datetime.now(tz=timezone.utc) + self.url_expiration_duration)
+        return to_rfc3339(datetime.now(tz=UTC) + self.url_expiration_duration)
 
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(

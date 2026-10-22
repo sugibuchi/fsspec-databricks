@@ -13,7 +13,7 @@ import uuid
 from base64 import b64encode
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from time import sleep
 from typing import Annotated, Literal
 
@@ -96,7 +96,7 @@ def dummy_context() -> DummyAPIContext:
 
 
 def _now_rfc7231():
-    return datetime.now(tz=timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    return datetime.now(tz=UTC).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 
 _range_pat = re.compile(r"bytes=(?P<first_pos>\d+)-(?P<last_pos>\d+)")
@@ -489,7 +489,7 @@ def _find_free_port(start_port=8000, end_port=9000) -> str:
             try:
                 s.bind(("127.0.0.1", port))
                 return f"127.0.0.1:{port}"
-            except OSError:  # noqa: PERF203
+            except OSError:
                 pass
         raise RuntimeError("No free port found in the specified range")
 

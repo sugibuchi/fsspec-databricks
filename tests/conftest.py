@@ -173,7 +173,7 @@ def volume_test_root(client):
     for i in client.files.list_directory_contents(directory_path=fullpath):
         try:
             client.dbfs.delete(i.path, recursive=True)
-        except NotFound:  # Strange but NotFound sometimes thrown on Databricks on GCP  # noqa: PERF203
+        except NotFound:  # Strange but NotFound sometimes thrown on Databricks on GCP
             if i.is_directory:
                 client.files.delete_directory(i.path)
             else:

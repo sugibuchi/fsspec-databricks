@@ -64,6 +64,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         token: str | None = None,
         profile: str | None = None,
         config_file: str | None = None,
+        group_id: str | None = None,
         azure_workspace_resource_id: str | None = None,
         azure_client_secret: str | None = None,
         azure_client_id: str | None = None,
@@ -73,6 +74,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         cluster_id: str | None = None,
         google_credentials: str | None = None,
         google_service_account: str | None = None,
+        workspace_id: int | None = None,
         debug_truncate_bytes: int | None = None,
         debug_headers: bool | None = None,
         product="unknown",
@@ -83,6 +85,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         config: Config | None = None,
         scopes: list[str] | None = None,
         authorization_details: list[AuthorizationDetail] | None = None,
+        custom_headers: dict | None = None,
         # Additional parameters
         client: WorkspaceClient | None = None,
         ## Options for Unity Catalog Volume file system
@@ -138,6 +141,12 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
         config_file
             See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
+        group_id
+            The ID of the account group to authenticate as. See the Databricks SDK `Config` class.
+        workspace_id
+            The ID of the workspace to connect. Required on unified hosts serving multiple workspaces. See the Databricks SDK `Config` class.
+        custom_headers
+            Custom HTTP headers to add to every request sent by the Databricks SDK.
         debug_headers
             See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
         debug_truncate_bytes
@@ -179,6 +188,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             "token": token,
             "profile": profile,
             "config_file": config_file,
+            "group_id": group_id,
             "azure_workspace_resource_id": azure_workspace_resource_id,
             "azure_client_secret": azure_client_secret,
             "azure_client_id": azure_client_id,
@@ -188,6 +198,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             "cluster_id": cluster_id,
             "google_credentials": google_credentials,
             "google_service_account": google_service_account,
+            "workspace_id": workspace_id,
             "credentials_strategy": credentials_strategy,
             "credentials_provider": credentials_provider,
             "debug_truncate_bytes": debug_truncate_bytes,
@@ -201,6 +212,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 if authorization_details
                 else None
             ),
+            "custom_headers": custom_headers,
         }
 
         super().__init__(
