@@ -105,6 +105,21 @@ The workflows are in `.github/workflows/`:
 
 Each run's work directories are `<root>/<branch>/<Python version>` under the environment's roots.
 
+### Supply chain
+
+The test jobs hold the workspaces' credentials, so what they run is fixed:
+
+- `uv.lock` is committed, with every package's hash. CI installs with `uv sync --locked`, which fails if the lock is
+  out of date.
+- Actions are pinned to commit SHAs. setup-uv installs only uv versions whose checksums it knows (`latest-known`).
+- Dependabot updates `uv.lock` and the Actions' SHAs weekly.
+- Workflows run only on pushes and releases, never on pull requests from forks.
+- Each workflow's token can only read the repository. Publishing adds `id-token: write`, for PyPI's trusted
+  publishing.
+- The release build uses no cache.
+
+ruff, run with `uvx`, is the exception: CI runs its latest version, in a job without secrets.
+
 ### Environments
 
 Each GitHub environment is a Databricks workspace. Create at least `default`, and `azure`, `aws` or `gcp` as needed.
