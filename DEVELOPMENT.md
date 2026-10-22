@@ -201,8 +201,13 @@ A `WorkspaceClient` given as `client` is kept, and is not picklable. Other ways 
 
 Every method calls `_resolve`. With the local file system, `ls` and `info` map the names returned back to DBFS paths.
 
-The workspace setting `disable_legacy_dbfs` is read once. When legacy DBFS is disabled, `ls("/")` and `info("/")`
-answer without a backend: the root holds `/Volumes` and `/Workspace`.
+Whether legacy DBFS is enabled is checked once:
+
+- with the local file system, by whether `legacy_dbfs_local_root` exists;
+- otherwise, from the workspace setting `disable_legacy_dbfs`.
+
+When legacy DBFS is disabled, `ls("/")` and `info("/")` answer without a backend: the root holds `/Volumes` and
+`/Workspace`.
 
 The backends are created on first use, with the file system's client, config and options. `close()` closes them.
 

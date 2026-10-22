@@ -183,6 +183,24 @@ def test_volume_file_resumable_write(
             f.write(data)
 
 
+@pytest.mark.parametrize("file_class", [VolumeReadableFile, VolumeWritableFile])
+def test_volume_file_invalid_max_concurrency(
+    dummy_api, client_event_loop, aiohttp_session, file_class
+):
+    kwargs = {"size": 1} if file_class is VolumeReadableFile else {}
+
+    with pytest.raises(ValueError):
+        file_class(
+            path="/Volumes/catalog_a/schema/b/volume_c/path/to/file",
+            session=aiohttp_session,
+            base_url=dummy_api,
+            auth=_dummy_auth,
+            loop=client_event_loop,
+            max_concurrency=0,
+            **kwargs,
+        )
+
+
 @pytest.mark.parametrize("abort_supported", [True, False])
 def test_volume_file_multipart_write_abort(
     dummy_api,

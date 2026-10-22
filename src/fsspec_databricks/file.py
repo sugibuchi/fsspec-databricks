@@ -108,7 +108,11 @@ class AbstractAsyncFile(AbstractFile):
 
     def close(self):
         if not self.closed:
-            self._run_and_wait(self.aclose)
+            if getattr(self, "_loop", None) is None:
+                # The initialization failed before the event loop was set
+                RawIOBase.close(self)
+            else:
+                self._run_and_wait(self.aclose)
 
     async def __aenter__(self):
         return self
@@ -159,6 +163,10 @@ class FileRangeTaskSupport(AbstractAsyncFile):
         max_concurrency: int | None = None,
         verbose_debug_log: bool | None = None,
     ):
+        # Checked before anything is set up, so that the half-initialized file is closed without its event loop
+        if max_concurrency is not None and max_concurrency <= 0:
+            raise ValueError("max_concurrency must be a positive integer")
+
         super().__init__(
             path=path,
             loop=loop,
@@ -166,7 +174,11 @@ class FileRangeTaskSupport(AbstractAsyncFile):
         )
 
         self._semaphore: asyncio.Semaphore
-        self.max_concurrency = max_concurrency or self.default_max_concurrency
+        self.max_concurrency = (
+            max_concurrency
+            if max_concurrency is not None
+            else self.default_max_concurrency
+        )
 
         self._tasks: deque[_FileRangeTask] = deque()
 

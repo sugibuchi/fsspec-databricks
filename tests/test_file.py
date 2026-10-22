@@ -91,6 +91,14 @@ async def test_file_range_task_support_run_init():
     ) as file:
         assert file.max_concurrency == 2
 
+    for invalid in [0, -1]:
+        with pytest.raises(ValueError):
+            FileRangeTaskSupport(
+                path="/path/to/file",
+                loop=asyncio.get_event_loop(),
+                max_concurrency=invalid,
+            )
+
 
 @pytest.mark.asyncio
 async def test_file_range_task_support_schedule_task():
