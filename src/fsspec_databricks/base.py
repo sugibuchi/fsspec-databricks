@@ -213,15 +213,17 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
             "Making directory: path=%s, create_parents=%s", path, create_parents
         )
 
-        try:
-            info = self.info(self._parent(path))
-            if info["type"] != "directory":
-                raise not_a_directory_error(self._parent(path))
-        except FileNotFoundError:
-            if create_parents:
-                return
-            else:
-                raise
+        parent = self._parent(path)
+        if not self.isdir(parent):
+            # Tell a missing parent from a file
+            try:
+                self.info(parent)
+            except FileNotFoundError:
+                if create_parents:
+                    return
+                else:
+                    raise
+            raise not_a_directory_error(parent)
 
         if self.exists(path):
             raise file_exists_error(path)
@@ -248,8 +250,9 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
         # Actual operations must be implemented by subclasses
         self.log.debug("Deleting directory: path=%s", path)
 
-        info = self.info(path)
-        if info["type"] != "directory":
+        if not self.isdir(path):
+            # Raises FileNotFoundError if the path is missing
+            self.info(path)
             raise not_a_directory_error(path)
 
     def open(

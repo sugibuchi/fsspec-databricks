@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import errno
 import inspect
 import logging
@@ -6,7 +7,7 @@ import pickle
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from random import randbytes
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from databricks.sdk import WorkspaceClient
@@ -180,6 +181,78 @@ def test_volume_fs_session_in_event_loop():
         )
         assert not session.closed
         assert session is fs._session
+
+
+class _CountingFilesAPI:
+    """A fake of `WorkspaceClient.files` for metadata, recording the calls."""
+
+    def __init__(self, files: list[str], directories: list[str]):
+        self.files = files
+        self.directories = directories
+        self.calls: list[tuple[str, str]] = []
+
+    def get_metadata(self, path):
+        self.calls.append(("file", path))
+        if path not in self.files:
+            raise NotFound(f"Not found: {path}")
+        return GetMetadataResponse(
+            content_length=123,
+            content_type="application/octet-stream",
+            last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
+        )
+
+    def get_directory_metadata(self, path):
+        self.calls.append(("directory", path))
+        if path not in self.directories:
+            raise NotFound(f"Not found: {path}")
+
+
+def test_volume_fs_metadata_calls():
+    """Each check of a file or a directory makes as few API calls as possible."""
+    file = "/Volumes/c/s/v/dir/file.bin"
+    directory = "/Volumes/c/s/v/dir"
+    missing = "/Volumes/c/s/v/dir/missing"
+
+    files_api = _CountingFilesAPI(files=[file], directories=[directory])
+    client = MagicMock()
+    client.files = files_api
+
+    def calls_of(func):
+        files_api.calls.clear()
+        with contextlib.suppress(OSError):
+            func()
+        return list(files_api.calls)
+
+    with VolumeFileSystem(client=client) as fs:
+        # Files: one call
+        assert calls_of(lambda: fs.info(file)) == [("file", file)]
+        assert fs.info(file)["type"] == "file"
+        assert calls_of(lambda: fs.isfile(file)) == [("file", file)]
+        assert fs.isfile(file)
+        assert not fs.isfile(directory)
+
+        # Directories: one call to isdir, two to info
+        assert calls_of(lambda: fs.isdir(directory)) == [("directory", directory)]
+        assert fs.isdir(directory)
+        assert not fs.isdir(file)
+        assert calls_of(lambda: fs.info(directory)) == [
+            ("file", directory),
+            ("directory", directory),
+        ]
+        assert fs.info(directory)["type"] == "directory"
+
+        # Missing paths
+        with pytest.raises(FileNotFoundError):
+            fs.info(missing)
+
+        # Opening a directory for writing: one call
+        with pytest.raises(IsADirectoryError):
+            fs.open(directory, "wb")
+        assert calls_of(lambda: fs.open(directory, "wb")) == [("directory", directory)]
+
+        # Volumes, schemas and catalogs are directories, and never files
+        assert calls_of(lambda: fs.isfile("/Volumes/c/s/v")) == []
+        assert not fs.isfile("/Volumes/c/s/v")
 
 
 def test_volume_fs_workspace_id(client: WorkspaceClient):

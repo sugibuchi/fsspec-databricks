@@ -319,9 +319,21 @@ The APIs called depend on the depth of the path:
 | `/Volumes/<catalog>`                   | `catalogs.get`                                            | `schemas.list`  |
 | `/Volumes/<catalog>/<schema>`          | `schemas.get`                                             | `volumes.list`  |
 | `/Volumes/<catalog>/<schema>/<volume>` | `volumes.read`                                            | `dbfs.list`     |
-| Deeper                                 | `files.get_directory_metadata`, else `files.get_metadata` | `dbfs.list`     |
+| Deeper                                 | `files.get_metadata`, else `files.get_directory_metadata` | `dbfs.list`     |
 
 `include_browse` is passed to the Unity Catalog APIs.
+
+Each metadata call is a round trip, so the checks inside a volume make as few as they can:
+
+| Check                                         | Calls                                           |
+|-----------------------------------------------|-------------------------------------------------|
+| `info` of a file, so also `size` and reading  | 1: `files.get_metadata`                         |
+| `info` of a directory                         | 2: `files.get_metadata`, then the directory's   |
+| `isdir`, so also `mkdir` and `rmdir`          | 1: `files.get_directory_metadata`               |
+| `isfile`                                      | 1: `files.get_metadata`                         |
+| Opening for writing                           | 1: `isdir`, to refuse directories               |
+
+`DatabricksFileSystem` passes `isdir` and `isfile` to the backends. `test_volume_fs_metadata_calls` counts the calls.
 
 #### The IO event loop
 

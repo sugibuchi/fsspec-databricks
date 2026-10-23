@@ -458,6 +458,26 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         fs, p = self._resolve(path)
         return fs.exists(p, **kwargs)
 
+    def isdir(self, path) -> bool:
+        if self._strip_protocol(path) == "/":
+            return True
+
+        try:
+            fs, p = self._resolve(path)
+        except FileNotFoundError:
+            return False
+        return fs.isdir(p)
+
+    def isfile(self, path) -> bool:
+        if self._strip_protocol(path) == "/":
+            return False
+
+        try:
+            fs, p = self._resolve(path)
+        except FileNotFoundError:
+            return False
+        return fs.isfile(p)
+
     def created(self, path):
         fs, p = self._resolve(path)
         return fs.created(p)

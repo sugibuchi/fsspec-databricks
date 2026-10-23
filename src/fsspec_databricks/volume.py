@@ -20,7 +20,7 @@ from aiohttp import (
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.client_types import HostType
 from databricks.sdk.config import Config
-from databricks.sdk.errors import BadRequest, DatabricksError
+from databricks.sdk.errors import BadRequest, NotFound
 from databricks.sdk.service.catalog import CatalogInfo, SchemaInfo, VolumeInfo
 from databricks.sdk.service.files import DirectoryEntry, GetMetadataResponse
 
@@ -403,19 +403,61 @@ class VolumeFileSystem(DBFS):
                     detail=True,
                 )
             else:
+                # Files first: they are asked about more often than directories
                 try:
-                    self.client.files.get_directory_metadata(full_path)
-                    return {
-                        "name": full_path.rstrip("/"),
-                        "size": None,
-                        "type": "directory",
-                        "created": None,
-                        "modified": None,
-                        "islink": False,
-                    }
-                except DatabricksError:
-                    metadata = self.client.files.get_metadata(full_path)
-                    return _map_info(metadata, detail=True, path=full_path)
+                    return self._file_info(full_path)
+                except NotFound:
+                    return self._directory_info(full_path)
+
+    def _file_info(self, full_path: str) -> dict[str, Any]:
+        """Info of a file in a volume, with one API call. Raises `NotFound` for other paths."""
+        metadata = self.client.files.get_metadata(full_path)
+        return _map_info(metadata, detail=True, path=full_path)
+
+    def _directory_info(self, full_path: str) -> dict[str, Any]:
+        """Info of a directory in a volume, with one API call. Raises `NotFound` for other paths."""
+        self.client.files.get_directory_metadata(full_path)
+        return {
+            "name": full_path.rstrip("/"),
+            "size": None,
+            "type": "directory",
+            "created": None,
+            "modified": None,
+            "islink": False,
+        }
+
+    def isdir(self, path):
+        try:
+            _, _, _, path_in_volume, full_path = parse_volume_path(path)
+        except ValueError:
+            return super().isdir(path)
+
+        if path_in_volume is None or path_in_volume == "/":
+            # The volumes root, catalogs, schemas and volumes
+            return super().isdir(path)
+
+        try:
+            with error_mapping(path):
+                self._directory_info(full_path)
+                return True
+        except OSError:
+            return False
+
+    def isfile(self, path):
+        try:
+            _, _, _, path_in_volume, full_path = parse_volume_path(path)
+        except ValueError:
+            return False
+
+        if path_in_volume is None or path_in_volume == "/":
+            return False
+
+        try:
+            with error_mapping(path):
+                self._file_info(full_path)
+                return True
+        except Exception:
+            return False
 
     def ls(self, path, detail=True, include_browse: bool | None = None, **kwargs):
         self.log.debug(
@@ -472,6 +514,28 @@ class VolumeFileSystem(DBFS):
                 else:
                     raise
 
+    def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
+        """Check that the path can be opened in the mode, and return its info if needed."""
+        if "r" not in mode and "x" not in mode:
+            # Writing only needs to refuse directories
+            if self.isdir(path):
+                raise is_a_directory_error(path)
+            return None
+
+        try:
+            info = self.info(path)
+        except FileNotFoundError:
+            info = None
+
+        if info is not None and info["type"] == "directory":
+            raise is_a_directory_error(path)
+        if "r" in mode and info is None:
+            raise file_not_found_error(path)
+        if "x" in mode and info is not None:
+            raise file_exists_error(path)
+
+        return info
+
     def _open(
         self,
         path,
@@ -487,18 +551,7 @@ class VolumeFileSystem(DBFS):
         if "a" in mode or "+" in mode:
             raise UnsupportedOperation("Append and read/write modes are not supported.")
 
-        try:
-            info = self.info(path)
-            if info["type"] == "directory":
-                raise is_a_directory_error(path)
-        except FileNotFoundError:
-            info = None
-
-        if "r" in mode and info is None:
-            raise file_not_found_error(path)
-
-        if "x" in mode and info is not None:
-            raise file_exists_error(path)
+        info = self._check_open_target(path, mode)
 
         auth = _workspace_authenticator(self.config)
 
