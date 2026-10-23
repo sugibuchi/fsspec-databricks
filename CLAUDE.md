@@ -109,6 +109,7 @@ Write docs so that people can review them. That covers this file, DEVELOPMENT.md
 - USAGE.md has the user-facing details: operations, each backend's behaviour, and the options.
 - AUTHENTICATION.md covers the ways to configure authentication.
 - DEVELOPMENT.md has setup, tests, CI, releasing, the design choices and the architecture.
+- SECURITY.md says how to report vulnerabilities, and what is in scope.
 
 Update the docs when behaviour, parameters or options change. Keep user docs short and compact: what users do, not how
 it works or why.
