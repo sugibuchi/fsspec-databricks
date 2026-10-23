@@ -293,23 +293,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             self.__local_fs = None
             super().close()
 
-    def __getstate__(self):
-        state = super().__getstate__()
-        del state["_DatabricksFileSystem__local_fs"]
-        del state["_DatabricksFileSystem__workspace_fs"]
-        del state["_DatabricksFileSystem__volume_fs"]
-        del state["_DatabricksFileSystem__legacy_fs"]
-        del state["_running_in_workspace"]
-        return state
-
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self.__workspace_fs = None
-        self.__volume_fs = None
-        self.__legacy_fs = None
-        self.__local_fs = None
-        self._running_in_workspace = None
-
     @property
     def _volume_fs(self) -> VolumeFileSystem:
         """Get or create the UnityCatalogVolumeFileSystem instance."""

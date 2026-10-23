@@ -152,6 +152,24 @@ def test_volume_fs_serialization():
     assert fs._loop is not fs2._loop
 
 
+def test_volume_fs_pickled_as_arguments():
+    fs = VolumeFileSystem(
+        config_params={"host": "https://example.cloud.databricks.com", "token": "x"},
+        max_read_concurrency=3,
+    )
+    loop = fs._loop
+
+    fs2 = pickle.loads(pickle.dumps(fs))
+    try:
+        # fsspec rebuilds the file system from its constructor arguments
+        assert fs2.storage_options == fs.storage_options
+        assert fs2.max_read_concurrency == 3
+        assert fs2._loop is not loop
+    finally:
+        fs.close()
+        fs2.close()
+
+
 def test_volume_fs_session():
     with VolumeFileSystem() as fs:
         # Created from a thread without a running event loop

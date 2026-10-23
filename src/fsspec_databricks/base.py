@@ -90,17 +90,6 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
         _register_cleanup(self)
         self.log.debug("Opened: %s", self)
 
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        del state["_AbstractDatabricksFileSystem__client"]
-        del state["_AbstractDatabricksFileSystem__config"]
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.__client = None
-        self.__config = None
-
     def close(self):
         """Close the file system and release any resources."""
         if not self.closed:

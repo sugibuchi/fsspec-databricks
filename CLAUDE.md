@@ -65,8 +65,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - `DatabricksFileSystem.__init__` takes every parameter of the SDK's `WorkspaceClient`, in its order.
   `test_dbx_fs_accepts_workspace_client_params` fails when the SDK adds one: add it to the signature, the docstring
   and `config_params`.
-- File systems must stay picklable. A new attribute holding a client, a loop, a thread or a session is dropped in
-  `__getstate__` and reset in `__setstate__`.
+- File systems must stay picklable. fsspec pickles them as their constructor arguments, so every argument must be
+  picklable. Runtime attributes are never pickled.
 - Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
   `mixins/files.py` uses the same: follow it. Keep the fallback to resumable upload working.
 - Volume write block sizes are multiples of 256 KB.
