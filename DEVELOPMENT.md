@@ -177,6 +177,12 @@ The version comes from the git tag, through hatch-vcs.
 
 `uv publish` authenticates to PyPI with the workflow's OIDC token, through trusted publishing.
 
+Repository rules protect the release path:
+
+- The ruleset "Release tags" lets only repository admins create, move or delete `v*` tags.
+- The `pypi` environment deploys only from `v*` tags.
+- The ruleset "Default branch" blocks force-pushes to `main` and its deletion.
+
 ## Design
 
 ### One file system for all of Databricks' paths
