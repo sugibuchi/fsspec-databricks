@@ -216,10 +216,14 @@ exception.
 
 ### Picklable
 
-File systems are pickled to run in other processes, e.g. by Dask. Clients, event loops, threads and sessions are left
-out, and made again on first use.
+File systems are pickled to run in other processes, e.g. by Dask. fsspec pickles a file system as its constructor
+arguments, and unpickling calls the constructor again:
 
-A `WorkspaceClient` given as `client` is kept, and is not picklable. Other ways of authenticating are.
+- clients, event loops, threads and sessions are not pickled, and are made again on first use;
+- attributes set after construction are lost;
+- every constructor argument must be picklable.
+
+A `WorkspaceClient` given as `client` is not picklable. Other ways of authenticating are.
 
 ### Known limits
 
@@ -271,7 +275,6 @@ Within one backend, both go to the backend.
 
 - the Databricks SDK `Config` and `WorkspaceClient`, made on first use from `client`, `config` or `config_params`;
 - `close()`, also called at exit and on garbage collection;
-- pickling without the client and config;
 - the `dbfs` protocol: `_strip_protocol` and `unstrip_protocol` use `path.py`.
 
 Its `mkdir`, `makedirs`, `rmdir` and `_rm` only check preconditions, such as a missing parent or a file where a folder

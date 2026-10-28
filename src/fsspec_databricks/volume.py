@@ -202,21 +202,6 @@ class VolumeFileSystem(DBFS):
         self.__lock = RLock()
         self.__session: ClientSession | None = None
 
-    def __getstate__(self):
-        state = super().__getstate__()
-        del state["_VolumeFileSystem__loop"]
-        del state["_VolumeFileSystem__io_thread"]
-        del state["_VolumeFileSystem__lock"]
-        del state["_VolumeFileSystem__session"]
-        return state
-
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self.__loop = None
-        self.__io_thread = None
-        self.__lock = RLock()
-        self.__session = None
-
     @property
     def _loop(self):
         if self.closed:
