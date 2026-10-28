@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import NotFound, ResourceDoesNotExist
-from databricks.sdk.service.files import GetMetadataResponse
+from databricks.sdk.errors import BadRequest, NotFound, ResourceDoesNotExist
+from databricks.sdk.service.files import DirectoryEntry, GetMetadataResponse
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.path import parse_volume_path
@@ -184,9 +184,9 @@ def test_volume_fs_session_in_event_loop():
 
 
 class _CountingFilesAPI:
-    """A fake of `WorkspaceClient.files` for metadata, recording the calls."""
+    """A fake of `WorkspaceClient.files` for metadata, listing and deletion, recording the calls."""
 
-    def __init__(self, files: list[str], directories: list[str]):
+    def __init__(self, files: dict[str, bytes], directories: list[str]):
         self.files = files
         self.directories = directories
         self.calls: list[tuple[str, str]] = []
@@ -196,7 +196,7 @@ class _CountingFilesAPI:
         if path not in self.files:
             raise NotFound(f"Not found: {path}")
         return GetMetadataResponse(
-            content_length=123,
+            content_length=len(self.files[path]),
             content_type="application/octet-stream",
             last_modified="Wed, 21 Oct 2026 07:28:00 GMT",
         )
@@ -206,6 +206,37 @@ class _CountingFilesAPI:
         if path not in self.directories:
             raise NotFound(f"Not found: {path}")
 
+    def _children(self, path):
+        return [
+            p for p in [*self.files, *self.directories] if p.rsplit("/", 1)[0] == path
+        ]
+
+    def list_directory_contents(self, path):
+        self.calls.append(("list", path))
+        if path not in self.directories:
+            raise NotFound(f"Not found: {path}")
+        for p in self._children(path):
+            yield DirectoryEntry(
+                path=p,
+                name=p.rsplit("/", 1)[1],
+                is_directory=p in self.directories,
+                file_size=len(self.files[p]) if p in self.files else None,
+            )
+
+    def delete(self, path):
+        self.calls.append(("delete", path))
+        if path not in self.files:
+            raise NotFound(f"Not found: {path}")
+        del self.files[path]
+
+    def delete_directory(self, path):
+        self.calls.append(("delete_directory", path))
+        if path not in self.directories:
+            raise NotFound(f"Not found: {path}")
+        if self._children(path):
+            raise BadRequest(f"Directory {path} is not empty")
+        self.directories.remove(path)
+
 
 def test_volume_fs_metadata_calls():
     """Each check of a file or a directory makes as few API calls as possible."""
@@ -213,7 +244,7 @@ def test_volume_fs_metadata_calls():
     directory = "/Volumes/c/s/v/dir"
     missing = "/Volumes/c/s/v/dir/missing"
 
-    files_api = _CountingFilesAPI(files=[file], directories=[directory])
+    files_api = _CountingFilesAPI(files={file: b"data"}, directories=[directory])
     client = MagicMock()
     client.files = files_api
 
@@ -253,6 +284,134 @@ def test_volume_fs_metadata_calls():
         # Volumes, schemas and catalogs are directories, and never files
         assert calls_of(lambda: fs.isfile("/Volumes/c/s/v")) == []
         assert not fs.isfile("/Volumes/c/s/v")
+
+        # Listing a directory: one call. A file lists as itself.
+        assert calls_of(lambda: fs.ls(directory)) == [("list", directory)]
+        assert fs.ls(directory, detail=False) == [file]
+        assert fs.ls(directory)[0]["size"] == len(b"data")
+        assert calls_of(lambda: fs.ls(file)) == [("list", file), ("file", file)]
+        assert fs.ls(file, detail=False) == [file]
+        with pytest.raises(FileNotFoundError):
+            fs.ls(missing)
+
+
+def _volume_fs_with_fake_files(
+    files: dict[str, bytes], directories: list[str]
+) -> tuple[VolumeFileSystem, _CountingFilesAPI, MagicMock]:
+    """A Volume file system on `_CountingFilesAPI`, whose files are opened as `BytesIO`."""
+    files_api = _CountingFilesAPI(files=files, directories=directories)
+    client = MagicMock()
+    client.files = files_api
+
+    class _Written(BytesIO):
+        def __init__(self, path):
+            super().__init__()
+            self.path = path
+
+        def close(self):
+            files_api.files[self.path] = self.getvalue()
+            super().close()
+
+    def fake_open(fs, path, mode="rb", **kwargs):
+        fs._check_open_target(path, mode)
+        return BytesIO(files_api.files[path]) if "r" in mode else _Written(path)
+
+    patcher = patch.object(VolumeFileSystem, "_open", fake_open)
+    patcher.start()
+    fs = VolumeFileSystem(client=client)
+    fs._fake_patcher = patcher
+    return fs, files_api, client
+
+
+@pytest.fixture
+def fake_volume_fs():
+    created = []
+
+    def create(files: dict[str, bytes], directories: list[str]):
+        fs, files_api, client = _volume_fs_with_fake_files(files, directories)
+        created.append(fs)
+        return fs, files_api, client
+
+    yield create
+
+    for fs in created:
+        fs._fake_patcher.stop()
+        fs.close()
+
+
+def test_volume_fs_cp_file_streams(fake_volume_fs):
+    """Copying a file streams it with the file objects, not the SDK's `dbfs.copy`."""
+    src = "/Volumes/c/s/v/dir/src.bin"
+    dst = "/Volumes/c/s/v/dir/dst.bin"
+    data = randbytes(12345)
+
+    fs, files_api, client = fake_volume_fs({src: data}, ["/Volumes/c/s/v/dir"])
+    fs.cp_file(src, dst)
+
+    assert files_api.files[dst] == data
+    # One metadata call each: the source is a file, the destination is no directory
+    assert files_api.calls == [("file", src), ("directory", dst)]
+    assert client.dbfs.mock_calls == []
+
+    with pytest.raises(FileNotFoundError):
+        fs.cp_file("/Volumes/c/s/v/dir/missing", dst)
+
+
+def test_volume_fs_mv_file(fake_volume_fs):
+    src = "/Volumes/c/s/v/dir/src.bin"
+    dst = "/Volumes/c/s/v/dir/dst.bin"
+    data = randbytes(12345)
+
+    fs, files_api, client = fake_volume_fs({src: data}, ["/Volumes/c/s/v/dir"])
+    fs.mv(src, dst)
+
+    assert files_api.files == {dst: data}
+    assert client.dbfs.mock_calls == []
+
+
+def test_volume_fs_rm_calls(fake_volume_fs):
+    """Deleting calls the Files API directly, children before their parents."""
+    root = "/Volumes/c/s/v/dir"
+    files = {
+        f"{root}/a.bin": b"a",
+        f"{root}/sub/b.bin": b"b",
+        f"{root}/sub/c.bin": b"c",
+    }
+    directories = [root, f"{root}/sub", f"{root}/sub/empty", f"{root}/other"]
+
+    fs, files_api, client = fake_volume_fs(dict(files), list(directories))
+
+    # A file: one metadata call and the delete
+    fs.rm(f"{root}/a.bin")
+    assert files_api.calls == [("file", f"{root}/a.bin"), ("delete", f"{root}/a.bin")]
+
+    with pytest.raises(IsADirectoryError):
+        fs.rm(f"{root}/sub")
+
+    # A directory: one listing per directory, then the deletes
+    files_api.calls.clear()
+    fs.rm(root, recursive=True)
+
+    assert files_api.files == {}
+    assert files_api.directories == []
+    assert client.dbfs.mock_calls == []
+
+    kinds = [kind for kind, _ in files_api.calls]
+    assert kinds.count("list") == 4
+    assert sorted(p for kind, p in files_api.calls if kind == "delete") == [
+        f"{root}/sub/b.bin",
+        f"{root}/sub/c.bin",
+    ]
+    deleted_directories = [
+        p for kind, p in files_api.calls if kind == "delete_directory"
+    ]
+    assert deleted_directories.index(f"{root}/sub/empty") < deleted_directories.index(
+        f"{root}/sub"
+    )
+    assert deleted_directories[-1] == root
+
+    with pytest.raises(FileNotFoundError):
+        fs.rm(root, recursive=True)
 
 
 def test_volume_fs_workspace_id(client: WorkspaceClient):
@@ -418,6 +577,9 @@ def test_volume_fs_ls(
         stripped_dbfs_url(f"{test_dir}/2_directory"),
     ]
 
+    # A file lists as itself
+    assert fs.ls(dbfs_url(data_path), detail=False) == [stripped_dbfs_url(data_path)]
+
     with pytest.raises(FileNotFoundError):
         fs.ls(dbfs_url(f"{test_dir}/nonexistent"))
 
@@ -545,6 +707,17 @@ def test_volume_fs_cp_file(
 
     assert data == copied_data
 
+    # Test copying a file larger than one block, with a multipart upload
+    large_data = randbytes(12 * 1024 * 1024)
+    client.files.upload(f"{test_dir}/3_large.bin", BytesIO(large_data))
+    fs.cp_file(
+        dbfs_url(f"{test_dir}/3_large.bin"),
+        dbfs_url(f"{test_dir}/3_large_copied.bin"),
+    )
+    assert bytes_sig(download(client, f"{test_dir}/3_large_copied.bin")) == bytes_sig(
+        large_data
+    )
+
     # Test copying a directory
     fs.cp_file(
         dbfs_url(f"{test_dir}/2_directory"),
@@ -661,7 +834,12 @@ def test_volume_fs_rm(
             "1_data.bin": data,
             "2_directory": {
                 "3_data.bin": data,
+                "4_directory": {
+                    "5_data.bin": data,
+                    "6_empty_directory": {},
+                },
             },
+            "7_data.bin": data,
         },
     )
 
@@ -676,8 +854,57 @@ def test_volume_fs_rm(
     with pytest.raises(ResourceDoesNotExist):
         client.workspace.get_status(f"{test_dir}/2_directory")
 
+    # A file, recursively
+    fs.rm(dbfs_url(f"{test_dir}/7_data.bin"), recursive=True)
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/7_data.bin")
+
     with pytest.raises(FileNotFoundError):
         fs.rm(dbfs_url(f"{test_dir}/nonexistent"))
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_fs_mv(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client, verbose_debug_log=True)
+
+    data1 = randbytes(12345)
+    data2 = randbytes(12345)
+
+    test_dir = init_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": data1,
+            "2_directory": {
+                "3_data.bin": data2,
+            },
+        },
+    )
+
+    fs.mv(dbfs_url(f"{test_dir}/1_data.bin"), dbfs_url(f"{test_dir}/1_moved.bin"))
+    assert download(client, f"{test_dir}/1_moved.bin") == data1
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/1_data.bin")
+
+    fs.mv(
+        dbfs_url(f"{test_dir}/2_directory"),
+        dbfs_url(f"{test_dir}/2_moved"),
+        recursive=True,
+    )
+    assert download(client, f"{test_dir}/2_moved/3_data.bin") == data2
+    with pytest.raises(NotFound):
+        client.files.get_directory_metadata(f"{test_dir}/2_directory")
 
 
 @pytest.mark.parametrize(

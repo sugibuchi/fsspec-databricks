@@ -1,9 +1,14 @@
 import asyncio
+import glob
 import logging
 import re
+import shutil
 import urllib.parse
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
+from os import PathLike
 from threading import Event, RLock, Thread
 from typing import Any, Literal
 
@@ -56,60 +61,48 @@ def _map_info(
     detail: bool,
     path: str | None = None,
 ) -> dict[str, Any] | str:
-    """Map Unity Catalog CatalogInfo, SchemaInfo, VolumeInfo or GetMetadataResponse to fsspec file info dict."""
-    if isinstance(info, CatalogInfo):
-        if detail:
-            return {
-                "name": f"/Volumes/{info.name}",
-                "size": None,
-                "type": "directory",
-                "created": to_datetime(info.created_at),
-                "modified": to_datetime(info.updated_at),
-                "islink": False,
-            }
+    """Map Unity Catalog CatalogInfo, SchemaInfo, VolumeInfo, DirectoryEntry or GetMetadataResponse
+    to fsspec file info dict, or to the name only if not detail."""
+    if isinstance(info, CatalogInfo | SchemaInfo | VolumeInfo):
+        if isinstance(info, CatalogInfo):
+            name = f"/Volumes/{info.name}"
+        elif isinstance(info, SchemaInfo):
+            name = f"/Volumes/{info.catalog_name}/{info.name}"
         else:
-            return f"/Volumes/{info.name}"
-    elif isinstance(info, SchemaInfo):
-        if detail:
-            return {
-                "name": f"/Volumes/{info.catalog_name}/{info.name}",
-                "size": None,
-                "type": "directory",
-                "created": to_datetime(info.created_at),
-                "modified": to_datetime(info.updated_at),
-                "islink": False,
-            }
-        else:
-            return f"/Volumes/{info.catalog_name}/{info.name}"
-    elif isinstance(info, VolumeInfo):
-        if detail:
-            return {
-                "name": f"/Volumes/{info.catalog_name}/{info.schema_name}/{info.name}",
-                "size": None,
-                "type": "directory",
-                "created": to_datetime(info.created_at),
-                "modified": to_datetime(info.updated_at),
-                "islink": False,
-            }
-        else:
-            return f"/Volumes/{info.catalog_name}/{info.schema_name}/{info.name}"
+            name = f"/Volumes/{info.catalog_name}/{info.schema_name}/{info.name}"
+        mapped = {
+            "name": name,
+            "size": None,
+            "type": "directory",
+            "created": to_datetime(info.created_at),
+            "modified": to_datetime(info.updated_at),
+            "islink": False,
+        }
     elif isinstance(info, GetMetadataResponse):
         if path is None:
             raise ValueError("Path must be provided for GetMetadataResponse mapping.")
-        if detail:
-            return {
-                "name": path.rstrip("/"),
-                "size": info.content_length,
-                "type": "file",
-                "created": None,
-                "modified": to_datetime(info.last_modified),
-                "islink": False,
-                "content-type": info.content_type,
-            }
-        else:
-            return path.rstrip("/")
+        mapped = {
+            "name": path.rstrip("/"),
+            "size": info.content_length,
+            "type": "file",
+            "created": None,
+            "modified": to_datetime(info.last_modified),
+            "islink": False,
+            "content-type": info.content_type,
+        }
+    elif isinstance(info, DirectoryEntry):
+        mapped = {
+            "name": info.path.rstrip("/"),
+            "size": info.file_size,
+            "type": "directory" if info.is_directory else "file",
+            "created": None,
+            "modified": to_datetime(info.last_modified),
+            "islink": False,
+        }
     else:
         raise ValueError(f"Unsupported info type: {info} {type(info)}")
+
+    return mapped if detail else mapped["name"]
 
 
 class VolumeFileSystem(DBFS):
@@ -148,6 +141,9 @@ class VolumeFileSystem(DBFS):
 
     _storage_proxy_probe_timeout: float = 3.0
     """The timeout in seconds for the storage proxy probe request."""
+
+    _max_delete_concurrency: int = 16
+    """The maximum number of concurrent delete requests of a recursive `rm`."""
 
     log = logging.getLogger(__name__)
 
@@ -472,7 +468,7 @@ class VolumeFileSystem(DBFS):
             return [volumes_root_info] if detail else [volumes_root]
 
         try:
-            catalog, schema, volume, _, _ = parse_volume_path(path)
+            catalog, schema, volume, _, full_path = parse_volume_path(path)
         except ValueError:
             raise file_not_found_error(path) from None
 
@@ -497,22 +493,145 @@ class VolumeFileSystem(DBFS):
                     )
                 ]
             else:
-                return super().ls(path, detail=detail)
+                try:
+                    entries = list(self.client.files.list_directory_contents(full_path))
+                except (NotFound, BadRequest):
+                    # A file lists as itself
+                    info = self._file_info(full_path)
+                    return [info if detail else info["name"]]
+                return [_map_info(e, detail=detail) for e in entries]
+
+    ### File/directory operations
+    def cp_file(self, path1, path2, **kwargs):
+        # Only logs: the base class has no precondition for copying
+        AbstractDatabricksFileSystem.cp_file(self, path1=path1, path2=path2, **kwargs)
+
+        try:
+            src = self.open(path1, "rb")
+        except IsADirectoryError:
+            self._cp_directory(path2)
+            return
+
+        # The Files API has no copy: stream the content with concurrent reads and uploads
+        with src, self.open(path2, "wb") as dst:
+            shutil.copyfileobj(src, dst, length=self.max_write_block_size)
+
+    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
+        # fsspec's copy and delete, with the methods of this class
+        AbstractDatabricksFileSystem.mv(
+            self, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs
+        )
+
+    def _rm(self, path):
+        # The precondition check is implemented in the base class.
+        AbstractDatabricksFileSystem._rm(self, path=path)
+
+        _, _, _, _, full_path = parse_volume_path(path)
+        self._delete_file(full_path)
+
+    def rm(self, path, recursive=False, maxdepth=None):
+        self.log.debug(
+            "Deleting path: path=%s, recursive=%s, maxdepth=%s",
+            path,
+            recursive,
+            maxdepth,
+        )
+
+        paths = [path] if isinstance(path, (str, PathLike)) else path
+        for p in paths:
+            if glob.has_magic(self._strip_protocol(p)):
+                for matched in self.expand_path(p):
+                    self._rm_path(matched, recursive, maxdepth)
+            else:
+                self._rm_path(p, recursive, maxdepth)
+
+    def _rm_path(self, path, recursive: bool, maxdepth: int | None) -> None:
+        """Delete a file, or a directory with its content if recursive."""
+        _, _, _, path_in_volume, full_path = parse_volume_path(path)
+        if path_in_volume is None or path_in_volume == "/":
+            # Volumes, schemas and catalogs. A list, as DBFS.rm calls self.rm for a string.
+            DBFS.rm(self, [path], recursive=recursive, maxdepth=maxdepth)
+            return
+
+        if not recursive:
+            self._rm(path)
+            return
+
+        if self.info(path)["type"] == "file":
+            self._delete_file(full_path)
+            return
+
+        files, directories = self._walk_tree(full_path, maxdepth)
+        self._run_concurrently(self._delete_file, files)
+        # Children before parents. Directories of the same depth are independent.
+        directories.append(full_path)
+        for depth in sorted({d.count("/") for d in directories}, reverse=True):
+            self._run_concurrently(
+                self._delete_directory,
+                [d for d in directories if d.count("/") == depth],
+            )
+
+    def _walk_tree(
+        self, full_path: str, maxdepth: int | None
+    ) -> tuple[list[str], list[str]]:
+        """List the files and directories under a directory, listing each depth concurrently."""
+        files: list[str] = []
+        directories: list[str] = []
+
+        def list_directory(directory: str) -> list[DirectoryEntry]:
+            with error_mapping(directory):
+                return list(self.client.files.list_directory_contents(directory))
+
+        level = [full_path]
+        depth = 0
+        while level and (maxdepth is None or depth < maxdepth):
+            depth += 1
+            next_level = []
+            with ThreadPoolExecutor(
+                max_workers=min(len(level), self._max_delete_concurrency)
+            ) as executor:
+                for entries in executor.map(list_directory, level):
+                    for e in entries:
+                        if e.is_directory:
+                            next_level.append(e.path.rstrip("/"))
+                        else:
+                            files.append(e.path)
+            directories.extend(next_level)
+            level = next_level
+
+        return files, directories
+
+    def _run_concurrently(self, func: Callable[[str], None], paths: Iterable[str]):
+        """Call the function on each path in a thread pool, and raise the first error."""
+        paths = list(paths)
+        if not paths:
+            return
+        with ThreadPoolExecutor(
+            max_workers=min(len(paths), self._max_delete_concurrency)
+        ) as executor:
+            for _ in executor.map(func, paths):
+                pass
+
+    def _delete_file(self, full_path: str) -> None:
+        with error_mapping(full_path):
+            self.client.files.delete(full_path)
+
+    def _delete_directory(self, full_path: str) -> None:
+        with error_mapping(full_path):
+            try:
+                self.client.files.delete_directory(full_path)
+            except BadRequest as e:
+                if "is not empty" in e.args[0]:
+                    raise not_empty_error(full_path) from e
+                else:
+                    raise
 
     def rmdir(self, path):
         # The precondition check is implemented in the base class.
         AbstractDatabricksFileSystem.rmdir(self, path=path)
 
         _, _, _, _, full_path = parse_volume_path(path)
-
-        with error_mapping(path):
-            try:
-                self.client.files.delete_directory(full_path)
-            except BadRequest as e:
-                if "is not empty" in e.args[0]:
-                    raise not_empty_error(path) from e
-                else:
-                    raise
+        self._delete_directory(full_path)
 
     def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
         """Check that the path can be opened in the mode, and return its info if needed."""

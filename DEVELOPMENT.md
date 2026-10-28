@@ -309,17 +309,20 @@ when no glob pattern is involved. Files are opened with the SDK's `dbfs.open`.
 
 ### Volumes
 
-`VolumeFileSystem`, in `volume.py`, subclasses `DBFS`, as the DBFS API also lists Volume folders.
+`VolumeFileSystem`, in `volume.py`, subclasses `DBFS`. It keeps the SDK's `dbfs` for `exists` and for creating
+folders. Listings, copies, moves and deletes inside a volume use the Files API and the backend's own file objects.
 
 The APIs called depend on the depth of the path:
 
-| Path                                   | `info`                                                    | `ls`            |
-|----------------------------------------|-----------------------------------------------------------|-----------------|
-| `/Volumes`                             | None: a fixed folder                                      | `catalogs.list` |
-| `/Volumes/<catalog>`                   | `catalogs.get`                                            | `schemas.list`  |
-| `/Volumes/<catalog>/<schema>`          | `schemas.get`                                             | `volumes.list`  |
-| `/Volumes/<catalog>/<schema>/<volume>` | `volumes.read`                                            | `dbfs.list`     |
-| Deeper                                 | `files.get_metadata`, else `files.get_directory_metadata` | `dbfs.list`     |
+| Path                                   | `info`                                                    | `ls`                            |
+|----------------------------------------|-----------------------------------------------------------|---------------------------------|
+| `/Volumes`                             | None: a fixed folder                                      | `catalogs.list`                 |
+| `/Volumes/<catalog>`                   | `catalogs.get`                                            | `schemas.list`                  |
+| `/Volumes/<catalog>/<schema>`          | `schemas.get`                                             | `volumes.list`                  |
+| `/Volumes/<catalog>/<schema>/<volume>` | `volumes.read`                                            | `files.list_directory_contents` |
+| Deeper                                 | `files.get_metadata`, else `files.get_directory_metadata` | `files.list_directory_contents` |
+
+`ls` of a file returns the file itself, from `files.get_metadata` after the listing fails.
 
 `include_browse` is passed to the Unity Catalog APIs.
 
@@ -332,8 +335,21 @@ Each metadata call is a round trip, so the checks inside a volume make as few as
 | `isdir`, so also `mkdir` and `rmdir`          | 1: `files.get_directory_metadata`               |
 | `isfile`                                      | 1: `files.get_metadata`                         |
 | Opening for writing                           | 1: `isdir`, to refuse directories               |
+| `ls` of a directory                           | 1: `files.list_directory_contents`              |
 
 `DatabricksFileSystem` passes `isdir` and `isfile` to the backends. `test_volume_fs_metadata_calls` counts the calls.
+
+Copies, moves and deletes inside a volume:
+
+- `cp_file` streams the file from a `VolumeReadableFile` into a `VolumeWritableFile`, as the Files API has no copy. The
+  SDK's `dbfs.copy` would hold the whole file in memory.
+- `mv` is fsspec's default: a copy, then a delete.
+- `rm` of a file checks it with `info`, then calls `files.delete`.
+- A recursive `rm` lists the tree one depth at a time, deletes the files, then the folders from the deepest. Each step
+  runs up to `_max_delete_concurrency` requests in a thread pool.
+- Paths of volumes, schemas and catalogs go to `DBFS`.
+
+`test_volume_fs_rm_calls` and `test_volume_fs_cp_file_streams` check these on a fake `WorkspaceClient.files`.
 
 #### The IO event loop
 

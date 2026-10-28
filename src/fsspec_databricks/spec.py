@@ -10,7 +10,7 @@ from fsspec.spec import AbstractFileSystem
 
 from .base import AbstractDatabricksFileSystem, root_dir_info
 from .dbfs import DBFS
-from .error import file_exists_error, file_not_found_error
+from .error import file_not_found_error
 from .local import DatabricksLocalFileSystem
 from .path import (
     FileSystemType,
@@ -495,15 +495,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         else:
             source_info = self.info(path1)
             if source_info["type"] == "directory":
-                try:
-                    dest_info = self.info(path2)
-                    if dest_info["type"] == "directory":
-                        return
-                    else:
-                        raise file_exists_error(path2)
-                except FileNotFoundError:
-                    self.mkdirs(path2)
-                    return
+                self._cp_directory(path2)
+                return
 
             src_fs, src_path = self._resolve(path1)
             dst_fs, dst_path = self._resolve(path2)

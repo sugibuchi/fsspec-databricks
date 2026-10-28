@@ -197,6 +197,16 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
     def cp_file(self, path1, path2, **kwargs):
         self.log.debug("Copying file: path1=%s, path2=%s", path1, path2)
 
+    def _cp_directory(self, path2):
+        """Copy a directory: create the destination, as directories have no content."""
+        try:
+            info = self.info(path2)
+        except FileNotFoundError:
+            self.mkdirs(path2)
+            return
+        if info["type"] != "directory":
+            raise file_exists_error(path2)
+
     def _rm(self, path):
         # Implement only the precondition check here
         # Actual operations must be implemented by subclasses

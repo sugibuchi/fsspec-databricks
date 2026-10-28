@@ -166,6 +166,12 @@ fs.ls("dbfs:/Volumes/my_catalog/my_schema/my_volume/data")
 Reads and writes run concurrent requests. Large writes use multipart upload, or resumable upload where the workspace
 requires it.
 
+Copies, moves and deletes:
+
+- A copy reads the file and writes it again, as the Files API cannot copy. It uses the options for reads and writes.
+- A move is a copy, then a delete. It replaces an existing file at the destination.
+- A recursive delete sends concurrent requests.
+
 ### Modes
 
 | Mode  | Supported | Notes                            |

@@ -8,7 +8,7 @@ from databricks.sdk.config import Config
 from databricks.sdk.service.files import FileInfo
 
 from .base import AbstractDatabricksFileSystem
-from .error import error_mapping, file_exists_error, is_a_directory_error
+from .error import error_mapping, is_a_directory_error
 from .path import parse_dbfs_path
 from .utils import to_datetime
 
@@ -80,15 +80,8 @@ class DBFS(AbstractDatabricksFileSystem):
 
         source_info = self.info(path1)
         if source_info["type"] == "directory":
-            try:
-                dest_info = self.info(path2)
-                if dest_info["type"] == "directory":
-                    return
-                else:
-                    raise file_exists_error(path2)
-            except FileNotFoundError:
-                self.mkdirs(path2)
-                return
+            self._cp_directory(path2)
+            return
 
         with error_mapping(path1):
             self.client.dbfs.copy(
