@@ -147,6 +147,9 @@ Prefer federation: it needs no stored secret. GitHub's OIDC token identifies eac
 
 - **`github-oidc`**: a federation policy on the service principal, in the Databricks account console. Its audience is
   `DATABRICKS_TOKEN_AUDIENCE`, e.g. the account ID.
+  The SDK's `github-oidc` exchanges a new token for each request, which slows the tests down.
+  So `.github/scripts/with-id-token-file.sh` keeps GitHub's token in a file and runs the tests with `file-oidc`, which
+  caches the exchanged token.
 - **`github-oidc-azure`**: a federated credential on the Entra ID app, with the audience `api://AzureADTokenExchange`.
   The app is the workspace's service principal. This needs no access to the account console.
 

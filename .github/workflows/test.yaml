@@ -119,7 +119,7 @@ jobs:
           DATABRICKS_TOKEN_AUDIENCE: ${{ vars.DATABRICKS_TOKEN_AUDIENCE }}
           ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
         run: |
-          uv run pytest
+          bash .github/scripts/with-id-token-file.sh uv run pytest
 
       - name: Run test with coverage
         if: ${{ inputs.coverage }}
@@ -133,7 +133,7 @@ jobs:
           DATABRICKS_TOKEN_AUDIENCE: ${{ vars.DATABRICKS_TOKEN_AUDIENCE }}
           ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
         run: |
-          uv run pytest --cov \
+          bash .github/scripts/with-id-token-file.sh uv run pytest --cov \
               --cov-report=term \
               --cov-report=xml:coverage.xml \
               --junitxml=junit.xml \
