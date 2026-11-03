@@ -13,6 +13,7 @@ from threading import Event, RLock, Thread
 from typing import Any, Literal
 
 from aiohttp import (
+    ClientConnectionError,
     ClientHandlerType,
     ClientMiddlewareType,
     ClientRequest,
@@ -321,12 +322,18 @@ class VolumeFileSystem(DBFS):
                         f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
                     )
                     auth = _workspace_authenticator(self.config)
-                    async with session.head(
-                        probe_url,
-                        middlewares=(auth,),
-                        timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
-                    ) as response:
-                        return response.status == 200
+                    try:
+                        async with session.head(
+                            probe_url,
+                            middlewares=(auth,),
+                            timeout=ClientTimeout(
+                                total=self._storage_proxy_probe_timeout
+                            ),
+                        ) as response:
+                            return response.status == 200
+                    except (TimeoutError, ClientConnectionError):
+                        # The proxy can be unresolvable or unreachable from this network.
+                        return False
 
                 available = asyncio.run_coroutine_threadsafe(
                     probe(self._session, self.workspace_id), self._loop
