@@ -58,6 +58,83 @@ def test_volume_file_read(
             _ = f.read()
 
 
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_volume_file_read_retries(
+    dummy_api_context, dummy_api, client_event_loop, aiohttp_session, status
+):
+    data = randbytes(1000)
+    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+
+    dummy_api_context.files[path] = data
+    dummy_api_context.get_file_errors.extend([status, status])
+
+    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+        with VolumeReadableFile(
+            path=path,
+            session=aiohttp_session,
+            base_url=dummy_api,
+            auth=_dummy_auth,
+            loop=client_event_loop,
+            size=len(data),
+        ) as f:
+            assert f.read() == data
+
+    assert not dummy_api_context.get_file_errors
+
+
+def test_volume_file_read_retries_exhausted(
+    dummy_api_context, dummy_api, client_event_loop, aiohttp_session
+):
+    data = randbytes(1000)
+    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+
+    dummy_api_context.files[path] = data
+    dummy_api_context.get_file_errors.extend([500] * 10)
+
+    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+        with VolumeReadableFile(
+            path=path,
+            session=aiohttp_session,
+            base_url=dummy_api,
+            auth=_dummy_auth,
+            loop=client_event_loop,
+            size=len(data),
+            max_concurrency=1,
+        ) as f:
+            with pytest.raises(OSError):
+                f.read()
+
+    # The first request and its retries.
+    attempts = 10 - len(dummy_api_context.get_file_errors)
+    assert attempts == VolumeReadableFile.fetch_max_retries + 1
+
+
+@pytest.mark.parametrize("status", [400, 403, 404])
+def test_volume_file_read_no_retry(
+    dummy_api_context, dummy_api, client_event_loop, aiohttp_session, status
+):
+    data = randbytes(1000)
+    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+
+    dummy_api_context.files[path] = data
+    dummy_api_context.get_file_errors.extend([status] * 2)
+
+    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+        with VolumeReadableFile(
+            path=path,
+            session=aiohttp_session,
+            base_url=dummy_api,
+            auth=_dummy_auth,
+            loop=client_event_loop,
+            size=len(data),
+            max_concurrency=1,
+        ) as f:
+            with pytest.raises(OSError):
+                f.read()
+
+    assert len(dummy_api_context.get_file_errors) == 1
+
+
 def test_volume_file_read_parquet(
     client_event_loop,
     dummy_api,

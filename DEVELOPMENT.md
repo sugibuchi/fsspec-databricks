@@ -392,6 +392,9 @@ loop:
 `_compute_block_size` gives the block size: the smallest power-of-2 multiple of the minimum that covers the target with
 `max_concurrency` blocks, capped at the maximum.
 
+A range request that gets a `429`, `500`, `502`, `503` or `504` is retried up to 3 times, with exponential backoff and
+jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" when the first one went through.
+
 #### Writing
 
 `VolumeWritableFile` subclasses `AbstractAsyncWritableFile`. Writes are buffered:

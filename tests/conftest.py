@@ -109,6 +109,7 @@ def dummy_api_context(dummy_api):
         context.files.clear()
         context.multipart_upload_sessions.clear()
         context.resumable_upload_sessions.clear()
+        context.get_file_errors.clear()
 
         context.check_signed_url = False
         context.upload_mode = "multipart"
