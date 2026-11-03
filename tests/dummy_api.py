@@ -33,6 +33,9 @@ class DummyAPIContext:
     check_signed_url: bool = False
     abort_supported: bool = True
 
+    get_file_errors: list[int] = field(default_factory=list)
+    """Statuses that the next requests to read a file get, one each."""
+
     files: dict[str, bytes] = field(default_factory=dict)
 
     multipart_upload_sessions: dict[str, dict[tuple[int, str], bytes | None]] = field(
@@ -118,6 +121,13 @@ async def get_file(
     range: Annotated[str | None, Header()] = None,
     signed: Annotated[str | None, Query()] = None,
 ):
+    if context.get_file_errors:
+        raise http_exception(
+            "INTERNAL_ERROR",
+            "Injected error",
+            context.get_file_errors.pop(0),
+        )
+
     if context.check_signed_url and signed != "true":
         raise http_exception(
             "BAD_REQUEST",

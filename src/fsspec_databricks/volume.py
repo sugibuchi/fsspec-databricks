@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
 from os import PathLike
+from random import random
 from threading import Event, RLock, Thread
 from typing import Any, Literal
 
@@ -780,6 +781,9 @@ def _workspace_authenticator(config: Config) -> ClientMiddlewareType:
     return auth
 
 
+_retryable_statuses = frozenset({429, 500, 502, 503, 504})
+
+
 class VolumeReadableFile(AbstractAsyncReadableFile):
     log = VolumeFileSystem.log
 
@@ -814,6 +818,12 @@ class VolumeReadableFile(AbstractAsyncReadableFile):
 
     presigned_url_refresh_after: int = 30  # min
     """The duration in minutes after which the presigned URL should be refreshed."""
+
+    fetch_max_retries: int = 3
+    """The maximal number of retries of a range request after a transient error."""
+
+    fetch_retry_delay: float = 1.0
+    """The base delay in seconds before the first retry of a range request. It doubles with each retry."""
 
     def __init__(
         self,
@@ -914,6 +924,26 @@ class VolumeReadableFile(AbstractAsyncReadableFile):
         return self._presigned_url, self._presigned_url_headers
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
+        delay = self.fetch_retry_delay
+        for _ in range(self.fetch_max_retries):
+            try:
+                return await self._request_range(start, end)
+            except ClientResponseError as e:
+                if e.status not in _retryable_statuses:
+                    raise
+                self.log.warning(
+                    "Retrying range request after status %d: path=%s, range=%d-%d",
+                    e.status,
+                    self.path,
+                    start,
+                    end,
+                )
+            # The jitter keeps concurrent range requests from retrying together.
+            await asyncio.sleep(delay * (1 + random()))
+            delay *= 2
+        return await self._request_range(start, end)
+
+    async def _request_range(self, start: int, end: int) -> bytes:
         if self.use_presigned_url:
             path, headers = await self._get_presigned_url()
             middlewares = ()
