@@ -1,6 +1,7 @@
+import socket
 from io import BytesIO
 from random import randbytes
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pyarrow as pa
@@ -12,7 +13,11 @@ from aiohttp import (
     ClientResponse,
 )
 
-from fsspec_databricks.volume import VolumeReadableFile, VolumeWritableFile
+from fsspec_databricks.volume import (
+    VolumeFileSystem,
+    VolumeReadableFile,
+    VolumeWritableFile,
+)
 
 from .utils import bytes_sig
 
@@ -21,6 +26,39 @@ async def _dummy_auth(
     request: ClientRequest, handler: ClientHandlerType
 ) -> ClientResponse:
     return await handler(request)
+
+
+def test_volume_fs_storage_proxy_probe_timeout():
+    client = MagicMock()
+    client.config.authenticate.return_value = {}
+    client.get_workspace_id.return_value = 1234
+
+    # Connections are accepted by the backlog, but no response ever comes.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+
+        with VolumeFileSystem(client=client) as fs:
+            fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
+            fs._storage_proxy_probe_timeout = 0.1
+
+            assert fs.storage_proxy_available is False
+
+
+def test_volume_fs_storage_proxy_probe_connection_refused():
+    client = MagicMock()
+    client.config.authenticate.return_value = {}
+    client.get_workspace_id.return_value = 1234
+
+    # Nothing listens on the port once the server is closed.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+
+    with VolumeFileSystem(client=client) as fs:
+        fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
+        # Long enough for a refused connection on Windows, which retries for seconds.
+        fs._storage_proxy_probe_timeout = 30.0
+
+        assert fs.storage_proxy_available is False
 
 
 def test_volume_file_read(
