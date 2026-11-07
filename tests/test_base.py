@@ -10,7 +10,8 @@ class DummyDatabricksFileSystem(AbstractDatabricksFileSystem):
     pass
 
 
-def test_abstract_dbx_fs_init(client: WorkspaceClient):
+def test_abstract_dbx_fs_init(dummy_client: WorkspaceClient):
+    client = dummy_client
     fs = DummyDatabricksFileSystem(config_params={"a": "b"})
 
     assert fs.config is not None

@@ -9,7 +9,9 @@ All Python goes through uv: never call `python` or `pip` directly.
 ```bash
 uv sync                                         # the package, editable, with the dev dependencies (uv.lock)
 uv lock                                         # update uv.lock after changing dependencies, and commit it
-uv run pytest                                   # all tests: most need a Databricks workspace (see below)
+uv run pytest                                   # all tests, on the dummy server: no workspace needed
+uv run pytest --api=live tests/test_dbfs.py     # the backend tests on the live workspace; --api=both for both
+uv run pytest --fs=volume,workspace             # only these backends: volume, workspace, dbfs
 uv run pytest tests/test_path.py -k volume      # one file / matching tests
 uv run pytest --cov                             # with coverage of src/
 uvx ruff check .                                # lint (ruff is not a dev dependency; config in pyproject.toml)
@@ -20,7 +22,7 @@ uvx pre-commit run --all-files                  # the hooks: ruff, whitespace, e
 CI, in `.github/workflows/on_push.yaml`, runs on pushes:
 
 - ruff check and ruff format check, with the latest ruff;
-- pytest on Python 3.14 against the default workspace, with coverage on `main`;
+- pytest with `--api=both` on Python 3.14, against the dummy server and the default workspace, with coverage on `main`;
 - on `main`, pytest on the other supported Python versions;
 - pytest on Azure, AWS or GCP workspaces named in the `TEST_ENVIRONMENTS` variable.
 
@@ -39,21 +41,17 @@ The test jobs hold Databricks credentials. Keep their supply chain fixed:
 
 DEVELOPMENT.md describes the layout, the tests and their setup. Read its Tests section before writing tests. The traps:
 
-- Most tests run against a real workspace. They need credentials and the two test root variables, from `.env` or the
-  environment.
-- The session fixtures `volume_test_root` and `workspace_test_root` delete everything in the test roots first. Never
-  point them at folders holding anything else.
-- Without credentials, run these:
-  - `tests/test_volume.py`, `tests/test_path.py`, `tests/test_utils.py`, `tests/test_workspace.py` and
-    `tests/test_dbfs.py`;
-  - `tests/test_dummy_api.py`, the tests of the dummy server itself;
-  - `tests/test_workspace_fs.py` and `tests/test_dbfs_fs.py`, whose `dummy` cases need no workspace.
-- `tests/dummy_api.py` serves the Files, Workspace and legacy DBFS APIs over HTTP, to the SDK's real
+- `uv run pytest` runs everything on the dummy server, `tests/dummy_api.py`, with no credentials. `--api=live` or
+  `--api=both` runs the backend tests on the workspace too, from `.env` or the environment.
+- `--fs` selects the backends. Each backend test has a `backend` marker, and a test spanning backends names them all.
+- Run live files one at a time: the Volumes tests take about 20 minutes.
+- The session fixtures `volume_test_root`, `workspace_test_root` and `dbfs_test_root` delete everything in the test
+  roots first. Never point them at folders holding anything else.
+- Never fake the SDK or its clients. A backend test takes `client`, which is the dummy's or the workspace's.
+- A test taking the `dummy` fixture runs on the dummy only. Count requests with `dummy.requests`, never with mocks.
+- `tests/dummy_api.py` serves the Files, Workspace, DBFS and Unity Catalog APIs over HTTP, to the SDK's real
   `WorkspaceClient`. Follow the REST reference there, and mark behaviour it leaves open as an assumption.
-- `test_workspace_fs.py` and `test_dbfs_fs.py` run each test on the dummy server, then on the real workspace. The live
-  cases skip without credentials. The DBFS ones also skip when the workspace disables legacy DBFS.
-- A test of anything a workspace serves gets a check without one where possible, on the fake API or with mocks.
-- Test helpers shared by files are in `tests/utils.py`.
+- One test file per module. Test helpers shared by files are in `tests/utils.py`: test files never import each other.
 - `tests/conftest.py` sets `cachable = False`, so each test gets new file system instances.
 
 ## Architecture
@@ -83,7 +81,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   `mixins/files.py` uses the same: follow it. Keep resumable upload working too.
 - Volume write block sizes are multiples of 256 KB.
 - Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
-- Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on a fake DBFS API.
+- Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on the dummy server.
 - Logging follows s3fs and gcsfs. Each module has `logging.getLogger(__name__)`, and the library installs no handlers.
 - Log one DEBUG line per request to Databricks, where it leaves the process: `_sdk` in `base.py`, and Volumes' HTTP
   helpers in `volume.py`. Range reads are not logged. Keep it cheap, with lazy `%` formatting.

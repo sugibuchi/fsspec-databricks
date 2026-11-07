@@ -1,8 +1,14 @@
+"""Tests of `VolumeFileSystem` and its file objects: on the dummy server, and on the live workspace."""
+
 import asyncio
+import contextlib
+import errno
+import pickle
 import socket
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from random import randbytes
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pandas as pd
 import pyarrow as pa
@@ -13,11 +19,16 @@ from aiohttp import (
     ClientRequest,
     ClientResponse,
 )
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import NotFound
+from fsspec.asyn import sync
 
+from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks._contrib.strategy.files.fsspec_transaction import (
     AdaptiveWritableTransaction,
     TransactionFile,
 )
+from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import (
     VolumeFileSystem,
     VolumeReadableFile,
@@ -25,8 +36,1037 @@ from fsspec_databricks.volume import (
     _MultipartSession,
     _ResumableSession,
 )
+from tests.utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
 
-from .utils import bytes_sig
+pytestmark = pytest.mark.backend("volume")
+
+
+def dbfs_url(path: str) -> str:
+    return f"dbfs:/{path.lstrip('/')}"
+
+
+def stripped_dbfs_url(path: str) -> str:
+    return path
+
+
+def status(client: WorkspaceClient, path: str):
+    """A file's metadata, or None for a directory."""
+    try:
+        return client.files.get_metadata(path)
+    except NotFound:
+        return client.files.get_directory_metadata(path)
+
+
+def test_volume_fs_init():
+    with VolumeFileSystem() as fs:
+        assert fs.operation_concurrency == VolumeFileSystem.operation_concurrency
+        assert fs.io_concurrency == VolumeFileSystem.io_concurrency
+
+    with VolumeFileSystem(operation_concurrency=3, io_concurrency=4) as fs:
+        assert fs.operation_concurrency == 3
+        assert fs.io_concurrency == 4
+
+
+def test_volume_fs_close():
+    fs = VolumeFileSystem()
+    session = sync(fs.loop, fs._get_session)
+
+    fs.close()
+
+    assert fs.closed
+    assert session.closed
+
+    with pytest.raises(RuntimeError):
+        _ = fs.client
+
+
+def test_volume_fs_serialization():
+    fs = VolumeFileSystem()
+    _ = sync(fs.loop, fs._get_session)
+
+    fs2 = pickle.loads(pickle.dumps(fs))
+
+    assert isinstance(fs2, VolumeFileSystem)
+    assert fs is not fs2
+    assert fs2._session is None
+
+
+def test_volume_fs_pickled_as_arguments():
+    fs = VolumeFileSystem(
+        config_params={"host": "https://example.cloud.databricks.com", "token": "x"},
+        io_concurrency=3,
+    )
+
+    fs2 = pickle.loads(pickle.dumps(fs))
+    try:
+        # fsspec rebuilds the file system from its constructor arguments
+        assert fs2.storage_options == fs.storage_options
+        assert fs2.io_concurrency == 3
+    finally:
+        fs.close()
+        fs2.close()
+
+
+def test_volume_fs_session():
+    with VolumeFileSystem() as fs:
+        # Created on fsspec's loop, and reused there
+        session = sync(fs.loop, fs._get_session)
+        assert not session.closed
+        assert sync(fs.loop, fs._get_session) is session
+
+
+def test_volume_fs_storage_proxy_probe_timeout(dummy_client):
+    # Connections are accepted by the backlog, but no response ever comes.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+
+        with VolumeFileSystem(client=dummy_client) as fs:
+            fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
+            fs._storage_proxy_probe_timeout = 0.1
+
+            assert fs.storage_proxy_available is False
+
+
+def test_volume_fs_storage_proxy_probe_connection_refused(dummy_client):
+    # Nothing listens on the port once the server is closed.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+
+    with VolumeFileSystem(client=dummy_client) as fs:
+        fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
+        # Long enough for a refused connection on Windows, which retries for seconds.
+        fs._storage_proxy_probe_timeout = 30.0
+
+        assert fs.storage_proxy_available is False
+
+
+def test_volume_fs_storage_proxy_probe_answered(dummy_client, dummy):
+    dummy.storage_proxy_available = True
+    with VolumeFileSystem(client=dummy_client) as fs:
+        assert fs.storage_proxy_available is True
+        assert fs.workspace_id == dummy.workspace_id
+
+
+### Requests, on the dummy server
+
+
+def _requests(dummy) -> list[tuple[str, str]]:
+    """The Files API requests served, as their method and path."""
+    return [
+        (r.method, r.path.removeprefix("/api/2.0/fs"))
+        for r in dummy.requests_to("/api/2.0/fs/")
+        # The storage proxy's probe, made once per file system.
+        if "/DatabricksInternal/" not in r.path
+    ]
+
+
+def _requests_of(dummy, func) -> list[tuple[str, str]]:
+    dummy.requests.clear()
+    with contextlib.suppress(OSError):
+        func()
+    return _requests(dummy)
+
+
+def test_volume_metadata_requests(client, volume_test_root, dummy):
+    """Each check of a file or a directory makes as few requests as possible."""
+    test_dir = init_volume_test_dir(
+        client, volume_test_root, items={"dir": {"file.bin": b"data"}}
+    )
+    directory = f"{test_dir}/dir"
+    file = f"{directory}/file.bin"
+    missing = f"{directory}/missing"
+    head_file = ("HEAD", f"/files{file}")
+    head_dir = ("HEAD", f"/directories{directory}")
+
+    with VolumeFileSystem(client=client) as fs:
+        # Files: one request
+        assert _requests_of(dummy, lambda: fs.info(file)) == [head_file]
+        assert fs.info(file)["type"] == "file"
+        assert _requests_of(dummy, lambda: fs.isfile(file)) == [head_file]
+        assert fs.isfile(file)
+        assert not fs.isfile(directory)
+
+        # Directories: one request to isdir, two to info
+        assert _requests_of(dummy, lambda: fs.isdir(directory)) == [head_dir]
+        assert fs.isdir(directory)
+        assert not fs.isdir(file)
+        assert _requests_of(dummy, lambda: fs.info(directory)) == [
+            ("HEAD", f"/files{directory}"),
+            head_dir,
+        ]
+        assert fs.info(directory)["type"] == "directory"
+
+        with pytest.raises(FileNotFoundError):
+            fs.info(missing)
+
+        # Opening a directory for writing: one request
+        with pytest.raises(IsADirectoryError):
+            fs.open(directory, "wb")
+        assert _requests_of(dummy, lambda: fs.open(directory, "wb")) == [head_dir]
+
+        # Volumes, schemas and catalogs are directories, and never files
+        volume = "/".join(directory.split("/")[:5])
+        assert _requests_of(dummy, lambda: fs.isfile(volume)) == []
+        assert not fs.isfile(volume)
+
+        # Listing a directory: one request. A file lists as itself.
+        assert _requests_of(dummy, lambda: fs.ls(directory)) == [
+            ("GET", f"/directories{directory}")
+        ]
+        assert fs.ls(directory, detail=False) == [file]
+        assert fs.ls(directory)[0]["size"] == len(b"data")
+        assert _requests_of(dummy, lambda: fs.ls(file)) == [
+            ("GET", f"/directories{file}"),
+            head_file,
+        ]
+        assert fs.ls(file, detail=False) == [file]
+        with pytest.raises(FileNotFoundError):
+            fs.ls(missing)
+
+
+def test_volume_cp_file_streams(client, volume_test_root, dummy):
+    """Copying a file streams it with the file objects: no copy of DBFS, one metadata request each."""
+    data = randbytes(12345)
+    test_dir = init_volume_test_dir(client, volume_test_root, items={"src.bin": data})
+    src, dst = f"{test_dir}/src.bin", f"{test_dir}/dst.bin"
+
+    with VolumeFileSystem(client=client) as fs:
+        requests = _requests_of(dummy, lambda: fs.cp_file(src, dst))
+        assert volume_download(client, dst) == data
+        # The source is a file, the destination no directory.
+        assert [r for r in requests if r[0] == "HEAD"] == [
+            ("HEAD", f"/files{src}"),
+            ("HEAD", f"/directories{dst}"),
+        ]
+        assert dummy.requests_to("/api/2.0/dbfs/") == []
+
+        with pytest.raises(FileNotFoundError):
+            fs.cp_file(f"{test_dir}/missing", dst)
+
+
+def test_volume_mv_file_streams(client, volume_test_root, dummy):
+    data = randbytes(12345)
+    test_dir = init_volume_test_dir(client, volume_test_root, items={"src.bin": data})
+
+    with VolumeFileSystem(client=client) as fs:
+        fs.mv(f"{test_dir}/src.bin", f"{test_dir}/dst.bin")
+        assert fs.ls(test_dir, detail=False) == [f"{test_dir}/dst.bin"]
+    assert volume_download(client, f"{test_dir}/dst.bin") == data
+    assert dummy.requests_to("/api/2.0/dbfs/") == []
+
+
+def test_volume_rm_requests(client, volume_test_root, dummy):
+    """Deleting calls the Files API directly, children before their parents."""
+    root = init_volume_test_dir(
+        client,
+        volume_test_root,
+        items={
+            "a.bin": b"a",
+            "sub": {"b.bin": b"b", "c.bin": b"c", "empty": {}},
+            "other": {},
+        },
+    )
+
+    with VolumeFileSystem(client=client) as fs:
+        # A file: the delete only
+        assert _requests_of(dummy, lambda: fs.rm(f"{root}/a.bin")) == [
+            ("DELETE", f"/files{root}/a.bin")
+        ]
+
+        with pytest.raises(IsADirectoryError):
+            fs.rm(f"{root}/sub")
+
+        # A directory: one listing per directory, then the deletes
+        requests = _requests_of(dummy, lambda: fs.rm(root, recursive=True))
+
+        assert not fs.exists(root)
+        assert dummy.requests_to("/api/2.0/dbfs/") == []
+        assert sorted(p for m, p in requests if m == "GET") == [
+            f"/directories{root}",
+            f"/directories{root}/other",
+            f"/directories{root}/sub",
+            f"/directories{root}/sub/empty",
+        ]
+        assert sorted(p for m, p in requests if m == "DELETE" and "/files" in p) == [
+            f"/files{root}/sub/b.bin",
+            f"/files{root}/sub/c.bin",
+        ]
+        deleted = [
+            p.removeprefix("/directories")
+            for m, p in requests
+            if m == "DELETE" and p.startswith("/directories")
+        ]
+        assert deleted.index(f"{root}/sub/empty") < deleted.index(f"{root}/sub")
+        assert deleted[-1] == root
+
+        with pytest.raises(FileNotFoundError):
+            fs.rm(root, recursive=True)
+
+
+### On both APIs
+
+
+def test_volume_workspace_id(client: WorkspaceClient):
+    with VolumeFileSystem(client=client) as fs:
+        workspace_id = fs.workspace_id
+        assert isinstance(workspace_id, int)
+
+
+def test_volume_storage_proxy_available(client: WorkspaceClient):
+    with VolumeFileSystem(client=client) as fs:
+        available = fs.storage_proxy_available
+        assert isinstance(available, bool)
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_info(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data = randbytes(12345)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "data.bin": data,
+            "directory": {},
+        },
+    )
+
+    data_path = f"{test_dir}/data.bin"
+    info = fs.info(dbfs_url(data_path))
+
+    assert info["name"] == stripped_dbfs_url(data_path)
+    assert info["size"] == len(data)
+    assert info["type"] == "file"
+    assert info["created"] is None
+    assert datetime.now(tz=UTC) - info["modified"] < timedelta(minutes=1)
+    assert info["islink"] is False
+    assert info["content-type"] == "application/octet-stream"
+    assert fs.created(dbfs_url(data_path)) == info["created"]
+    assert fs.modified(dbfs_url(data_path)) == info["modified"]
+
+    dir_path = f"{test_dir}/directory"
+    info = fs.info(dbfs_url(dir_path))
+
+    assert info["name"] == stripped_dbfs_url(dir_path)
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] is None
+    assert info["modified"] is None
+    assert info["islink"] is False
+    assert "content-type" not in info
+
+    with pytest.raises(FileNotFoundError):
+        fs.info(dbfs_url(f"{test_dir}/nonexistent"))
+
+    catalog, schema, volume, _, _ = parse_volume_path(test_dir)
+
+    info = fs.info("/")
+    assert info["name"] == "/"
+    assert info["type"] == "directory"
+    if fs_class is VolumeFileSystem:
+        # The router's root is the DBFS root where legacy DBFS is enabled, with its size and time.
+        assert info["size"] is None
+        assert info["created"] is None
+        assert info["modified"] is None
+    assert info["islink"] is False
+
+    info = fs.info("/Volumes")
+    assert info["name"] == "/Volumes"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] is None
+    assert info["modified"] is None
+    assert info["islink"] is False
+
+    info = fs.info(f"/Volumes/{catalog}")
+    assert info["name"] == f"/Volumes/{catalog}"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["islink"] is False
+
+    info = fs.info(f"/Volumes/{catalog}/{schema}")
+    assert info["name"] == f"/Volumes/{catalog}/{schema}"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["islink"] is False
+
+    info = fs.info(f"/Volumes/{catalog}/{schema}/{volume}")
+    assert info["name"] == f"/Volumes/{catalog}/{schema}/{volume}"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["islink"] is False
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_ls(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data = randbytes(12345)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": data,
+            "2_directory": {},
+        },
+    )
+
+    items: list[dict] = fs.ls(stripped_dbfs_url(test_dir), detail=True)
+
+    assert len(items) == 2
+    items.sort(key=lambda i: i["name"])
+
+    data_path = f"{test_dir}/1_data.bin"
+    assert items[0]["name"] == stripped_dbfs_url(data_path)
+    assert items[0]["size"] == len(data)
+    assert items[0]["type"] == "file"
+    assert items[0]["created"] is None
+    assert datetime.now(tz=UTC) - items[0]["modified"] < timedelta(minutes=1)
+    assert items[0]["islink"] is False
+    assert datetime_eq(fs.created(dbfs_url(data_path)), items[0]["created"])
+    assert datetime_eq(fs.modified(dbfs_url(data_path)), items[0]["modified"])
+
+    dir_path = f"{test_dir}/2_directory"
+    assert items[1]["name"] == stripped_dbfs_url(dir_path)
+    assert items[1]["size"] is None
+    assert items[1]["type"] == "directory"
+    assert items[1]["created"] is None
+    assert items[1]["modified"] is None
+    assert items[1]["islink"] is False
+    assert "content-type" not in items[1]
+
+    assert fs.ls(stripped_dbfs_url(test_dir), detail=False) == [
+        stripped_dbfs_url(f"{test_dir}/1_data.bin"),
+        stripped_dbfs_url(f"{test_dir}/2_directory"),
+    ]
+
+    # A file lists as itself
+    assert fs.ls(dbfs_url(data_path), detail=False) == [stripped_dbfs_url(data_path)]
+
+    with pytest.raises(FileNotFoundError):
+        fs.ls(dbfs_url(f"{test_dir}/nonexistent"))
+
+    catalog, schema, volume, _, _ = parse_volume_path(test_dir)
+
+    if fs_class == VolumeFileSystem:
+        items = fs.ls("/")
+        assert len(items) == 1
+
+        info = items[0]
+        assert info["name"] == "/Volumes"
+        assert info["size"] is None
+        assert info["type"] == "directory"
+        assert info["created"] is None
+        assert info["modified"] is None
+        assert info["islink"] is False
+
+        assert fs.ls("/", detail=False) == ["/Volumes"]
+
+    items = fs.ls("/Volumes")
+    assert len(items) >= 1
+
+    info: dict = next(i for i in items if i["name"] == f"/Volumes/{catalog}")
+    assert info["name"] == f"/Volumes/{catalog}"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["islink"] is False
+
+    assert f"/Volumes/{catalog}" in fs.ls("/Volumes", detail=False)
+
+    items = fs.ls(f"/Volumes/{catalog}")
+    assert len(items) >= 1
+
+    info: dict = next(i for i in items if i["name"] == f"/Volumes/{catalog}/{schema}")
+    assert info["name"] == f"/Volumes/{catalog}/{schema}"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["islink"] is False
+
+    assert f"/Volumes/{catalog}/{schema}" in fs.ls(f"/Volumes/{catalog}", detail=False)
+
+    items = fs.ls(f"/Volumes/{catalog}/{schema}")
+    assert len(items) >= 1
+
+    info: dict = next(
+        i for i in items if i["name"] == f"/Volumes/{catalog}/{schema}/{volume}"
+    )
+    assert info["name"] == f"/Volumes/{catalog}/{schema}/{volume}"
+    assert info["size"] is None
+    assert info["type"] == "directory"
+    assert info["created"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["modified"] > datetime(2020, 1, 1, tzinfo=UTC)
+    assert info["islink"] is False
+
+    assert f"/Volumes/{catalog}/{schema}/{volume}" in fs.ls(
+        f"/Volumes/{catalog}/{schema}", detail=False
+    )
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_exists(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": randbytes(12345),
+            "2_directory": {},
+        },
+    )
+
+    assert fs.exists(dbfs_url(f"{test_dir}/1_data.bin"))
+    assert fs.exists(dbfs_url(f"{test_dir}/2_directory"))
+    assert not fs.exists(dbfs_url(f"{test_dir}/nonexistent"))
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_cp_file(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data = randbytes(12345)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": data,
+            "2_directory": {},
+        },
+    )
+
+    # Test copying a file
+    fs.cp_file(
+        dbfs_url(f"{test_dir}/1_data.bin"),
+        dbfs_url(f"{test_dir}/1_data_copied.bin"),
+    )
+    copied_data = volume_download(client, f"{test_dir}/1_data_copied.bin")
+
+    assert data == copied_data
+
+    # Test copying a file larger than one block, with a multipart upload
+    large_data = randbytes(12 * 1024 * 1024)
+    client.files.upload(f"{test_dir}/3_large.bin", BytesIO(large_data))
+    fs.cp_file(
+        dbfs_url(f"{test_dir}/3_large.bin"),
+        dbfs_url(f"{test_dir}/3_large_copied.bin"),
+    )
+    assert bytes_sig(
+        volume_download(client, f"{test_dir}/3_large_copied.bin")
+    ) == bytes_sig(large_data)
+
+    # Test copying a directory
+    fs.cp_file(
+        dbfs_url(f"{test_dir}/2_directory"),
+        dbfs_url(f"{test_dir}/2_directory_copied"),
+    )
+
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/2_directory_copied")
+
+    # Test copying not existent path
+    with pytest.raises(FileNotFoundError):
+        fs.cp_file(
+            dbfs_url(f"{test_dir}/4_nonexistent"),
+            dbfs_url(f"{test_dir}/4_nonexistent_copy"),
+        )
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_copy(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data1 = randbytes(12345)
+    data2 = randbytes(12345)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "directory": {
+                "1_data.bin": data1,
+                "2_directory": {
+                    "3_data.bin": data2,
+                },
+                "4_empty_directory": {},
+            }
+        },
+    )
+
+    fs.copy(
+        dbfs_url(f"{test_dir}/directory"),
+        dbfs_url(f"{test_dir}/directory_copied"),
+        recursive=True,
+    )
+
+    items = [
+        (i.path.rstrip("/"), i.is_directory)
+        for i in client.files.list_directory_contents(test_dir)
+    ]
+    assert items == [
+        (f"{test_dir}/directory", True),
+        (f"{test_dir}/directory_copied", True),
+    ]
+
+    items = [
+        (i.path.rstrip("/"), i.is_directory)
+        for i in client.files.list_directory_contents(f"{test_dir}/directory_copied")
+    ]
+    assert items == [
+        (f"{test_dir}/directory_copied/1_data.bin", False),
+        (f"{test_dir}/directory_copied/2_directory", True),
+        (f"{test_dir}/directory_copied/4_empty_directory", True),
+    ]
+
+    items = [
+        (i.path.rstrip("/"), i.is_directory)
+        for i in client.files.list_directory_contents(
+            f"{test_dir}/directory_copied/2_directory"
+        )
+    ]
+    assert items == [
+        (f"{test_dir}/directory_copied/2_directory/3_data.bin", False),
+    ]
+
+    items = [
+        (i.path.rstrip("/"), i.is_directory)
+        for i in client.files.list_directory_contents(
+            f"{test_dir}/directory_copied/4_empty_directory"
+        )
+    ]
+    assert len(items) == 0
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_rm(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data = randbytes(12345)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": data,
+            "2_directory": {
+                "3_data.bin": data,
+                "4_directory": {
+                    "5_data.bin": data,
+                    "6_empty_directory": {},
+                },
+            },
+            "7_data.bin": data,
+        },
+    )
+
+    fs.rm(dbfs_url(f"{test_dir}/1_data.bin"))
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/1_data.bin")
+
+    with pytest.raises(IsADirectoryError):
+        fs.rm(dbfs_url(f"{test_dir}/2_directory"), recursive=False)
+
+    fs.rm(dbfs_url(f"{test_dir}/2_directory"), recursive=True)
+    with pytest.raises(NotFound):
+        client.files.get_directory_metadata(f"{test_dir}/2_directory")
+
+    # A file, recursively
+    fs.rm(dbfs_url(f"{test_dir}/7_data.bin"), recursive=True)
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/7_data.bin")
+
+    with pytest.raises(FileNotFoundError):
+        fs.rm(dbfs_url(f"{test_dir}/nonexistent"))
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_mv(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data1 = randbytes(12345)
+    data2 = randbytes(12345)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": data1,
+            "2_directory": {
+                "3_data.bin": data2,
+            },
+        },
+    )
+
+    fs.mv(dbfs_url(f"{test_dir}/1_data.bin"), dbfs_url(f"{test_dir}/1_moved.bin"))
+    assert volume_download(client, f"{test_dir}/1_moved.bin") == data1
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/1_data.bin")
+
+    fs.mv(
+        dbfs_url(f"{test_dir}/2_directory"),
+        dbfs_url(f"{test_dir}/2_moved"),
+        recursive=True,
+    )
+    assert volume_download(client, f"{test_dir}/2_moved/3_data.bin") == data2
+    with pytest.raises(NotFound):
+        client.files.get_directory_metadata(f"{test_dir}/2_directory")
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_mkdir(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    test_dir = init_volume_test_dir(client, volume_test_root, fs_class)
+
+    fs.mkdir(dbfs_url(f"{test_dir}/test_dir"))
+
+    status1 = status(client, f"{test_dir}/test_dir")
+    assert status1 is None  # directory
+
+    with pytest.raises(FileExistsError):
+        fs.mkdir(dbfs_url(f"{test_dir}/test_dir"))
+
+    with pytest.raises(FileNotFoundError):
+        fs.mkdir(dbfs_url(f"{test_dir}/parent_dir/dir"), create_parents=False)
+
+    fs.mkdir(dbfs_url(f"{test_dir}/parent_dir/dir"), create_parents=True)
+    status2 = status(client, f"{test_dir}/parent_dir/dir")
+
+    assert status2 is None  # directory
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_makedirs(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    test_dir = init_volume_test_dir(client, volume_test_root, fs_class)
+
+    fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"))
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/parent_dir/dir")
+
+    with pytest.raises(FileExistsError):
+        fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"), exist_ok=False)
+
+    fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"), exist_ok=True)
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/parent_dir/dir")
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_rmdir(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_directory": {},
+            "2_data.bin": randbytes(12345),
+            "3_nonempty_directory": {
+                "4_data.bin": randbytes(12345),
+            },
+        },
+    )
+
+    fs.rmdir(dbfs_url(f"{test_dir}/1_directory"))
+    with pytest.raises(NotFound):
+        client.files.get_directory_metadata(f"{test_dir}/1_directory")
+
+    with pytest.raises(FileNotFoundError):
+        fs.rmdir(dbfs_url(f"{test_dir}/nonexistent"))
+
+    with pytest.raises(NotADirectoryError):
+        fs.rmdir(dbfs_url(f"{test_dir}/2_data.bin"))
+
+    with pytest.raises(OSError) as exc_info:
+        fs.rmdir(dbfs_url(f"{test_dir}/3_nonempty_directory"))
+    assert exc_info.value.errno == errno.ENOTEMPTY
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_open_r(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    data = randbytes(10 * 1000 * 1000)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "1_data.bin": data,
+            "3_directory": {},
+        },
+    )
+    fs = fs_class(client=client)
+
+    for min_size, use_presigned_url in [(len(data), True), (len(data) + 1, False)]:
+        with patch.object(VolumeReadableFile, "min_presigned_url_size", min_size):
+            read_data = bytearray()
+            with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="rb") as f:
+                while chunk := f.read(1234 * 1000):
+                    read_data.extend(chunk)
+
+            assert f.use_presigned_url == use_presigned_url
+            assert bytes_sig(data) == bytes_sig(read_data)
+
+    with pytest.raises(IsADirectoryError):
+        fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="rb")
+
+    with pytest.raises(FileNotFoundError):
+        fs.open(dbfs_url(f"{test_dir}/nonexistent"), mode="rb")
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_open_w(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    fs = fs_class(client=client)
+
+    data = randbytes(54321)
+
+    test_dir = init_volume_test_dir(
+        client,
+        volume_test_root,
+        fs_class,
+        items={
+            "2_data.bin": data,
+            "3_directory": {},
+        },
+    )
+
+    small_data = randbytes(512 * 1023)
+    large_data = randbytes(10 * 1024 * 1023)
+
+    # A file no bigger than the smallest part is uploaded whole, a larger one in parts.
+    for data, in_parts in [(small_data, False), (large_data, True)]:
+        stream = BytesIO(data)
+        with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+            while chunk := stream.read(1234 * 1000):
+                f.write(chunk)
+
+        written = volume_download(client, f"{test_dir}/1_data.bin")
+        assert in_parts == (f._upload_session is not None)
+        assert bytes_sig(data) == bytes_sig(written)
+
+    # Overwrite existing file
+    with fs.open(dbfs_url(f"{test_dir}/2_data.bin"), mode="wb") as f:
+        f.write(small_data)
+
+    written = volume_download(client, f"{test_dir}/2_data.bin")
+    assert bytes_sig(small_data) == bytes_sig(written)
+
+    with pytest.raises(IsADirectoryError):
+        with fs.open(dbfs_url(f"{test_dir}/3_directory"), mode="wb") as f:
+            f.write(small_data)
+
+
+@pytest.mark.parametrize(
+    "fs_class",
+    [
+        VolumeFileSystem,
+        DatabricksFileSystem,
+    ],
+)
+def test_volume_open_w_abort(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    test_dir = init_volume_test_dir(client, volume_test_root, fs_class)
+
+    with patch.object(
+        VolumeWritableFile,
+        "_upload_part",
+        AsyncMock(side_effect=RuntimeError("Dummy")),
+    ):
+        _abort_multipart_upload = AsyncMock()
+        with patch.object(
+            VolumeWritableFile, "_abort_multipart_upload", _abort_multipart_upload
+        ):
+            with pytest.raises(OSError):
+                with fs_class(client=client) as fs:
+                    with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+                        f.write(randbytes(10 * 1024 * 1024))
+        assert _abort_multipart_upload.called
+
+
+@pytest.mark.parametrize("fs_class", [VolumeFileSystem, DatabricksFileSystem])
+def test_volume_transaction(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    test_dir = init_volume_test_dir(client, volume_test_root, fs_class)
+    fs = fs_class(client=client)
+    small_data = randbytes(512 * 1023)
+    large_data = randbytes(10 * 1024 * 1023)
+
+    # Commit completes the uploads, a small file's and a multipart one's, none before.
+    with fs.transaction:
+        for name, data in [("1_small.bin", small_data), ("2_large.bin", large_data)]:
+            with fs.open(dbfs_url(f"{test_dir}/{name}"), mode="wb") as f:
+                f.write(data)
+            with pytest.raises(NotFound):
+                client.files.get_metadata(f"{test_dir}/{name}")
+    assert bytes_sig(volume_download(client, f"{test_dir}/1_small.bin")) == bytes_sig(
+        small_data
+    )
+    assert bytes_sig(volume_download(client, f"{test_dir}/2_large.bin")) == bytes_sig(
+        large_data
+    )
+
+    # An exception aborts the uploads, leaving nothing.
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        for name, data in [("3_small.bin", small_data), ("4_large.bin", large_data)]:
+            with fs.open(dbfs_url(f"{test_dir}/{name}"), mode="wb") as f:
+                f.write(data)
+        raise ValueError("dummy")
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/3_small.bin")
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/4_large.bin")
+
+
+### File objects, on the dummy server
 
 path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
 
@@ -60,51 +1100,16 @@ def _writer(session, base_url, loop, **kwargs):
     )
 
 
-def test_volume_fs_storage_proxy_probe_timeout():
-    client = MagicMock()
-    client.config.authenticate.return_value = {}
-    client.get_workspace_id.return_value = 1234
-
-    # Connections are accepted by the backlog, but no response ever comes.
-    with socket.create_server(("127.0.0.1", 0)) as server:
-        port = server.getsockname()[1]
-
-        with VolumeFileSystem(client=client) as fs:
-            fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
-            fs._storage_proxy_probe_timeout = 0.1
-
-            assert fs.storage_proxy_available is False
-
-
-def test_volume_fs_storage_proxy_probe_connection_refused():
-    client = MagicMock()
-    client.config.authenticate.return_value = {}
-    client.get_workspace_id.return_value = 1234
-
-    # Nothing listens on the port once the server is closed.
-    with socket.create_server(("127.0.0.1", 0)) as server:
-        port = server.getsockname()[1]
-
-    with VolumeFileSystem(client=client) as fs:
-        fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
-        # Long enough for a refused connection on Windows, which retries for seconds.
-        fs._storage_proxy_probe_timeout = 30.0
-
-        assert fs.storage_proxy_available is False
-
-
-def test_volume_file_read(
-    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
-):
+def test_volume_file_read(dummy_api, dummy, client_event_loop, aiohttp_session):
     data = randbytes(20 * 1000 * 1000)
-    dummy_storage_context.vol_write(path, data)
+    dummy.vol_write(path, data)
 
     with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
         actual = f.read()
 
     assert bytes_sig(data) == bytes_sig(actual)
 
-    dummy_storage_context.presigned_urls_only = True
+    dummy.presigned_urls_only = True
 
     with pytest.raises(IOError):
         with _reader(
@@ -119,25 +1124,25 @@ def test_volume_file_read(
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
 def test_volume_file_read_retries(
-    dummy_storage_context, dummy_api, client_event_loop, aiohttp_session, status
+    dummy, dummy_api, client_event_loop, aiohttp_session, status
 ):
     data = randbytes(1000)
-    dummy_storage_context.vol_write(path, data)
-    dummy_storage_context.read_errors.extend([status, status])
+    dummy.vol_write(path, data)
+    dummy.read_errors.extend([status, status])
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
         with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
             assert f.read() == data
 
-    assert not dummy_storage_context.read_errors
+    assert not dummy.read_errors
 
 
 def test_volume_file_read_retries_exhausted(
-    dummy_storage_context, dummy_api, client_event_loop, aiohttp_session
+    dummy, dummy_api, client_event_loop, aiohttp_session
 ):
     data = randbytes(1000)
-    dummy_storage_context.vol_write(path, data)
-    dummy_storage_context.read_errors.extend([500] * 10)
+    dummy.vol_write(path, data)
+    dummy.read_errors.extend([500] * 10)
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
         with _reader(
@@ -151,17 +1156,17 @@ def test_volume_file_read_retries_exhausted(
                 f.read()
 
     # The first request and its retries.
-    attempts = 10 - len(dummy_storage_context.read_errors)
+    attempts = 10 - len(dummy.read_errors)
     assert attempts == VolumeReadableFile.fetch_max_retries + 1
 
 
 @pytest.mark.parametrize("status", [400, 403, 404])
 def test_volume_file_read_no_retry(
-    dummy_storage_context, dummy_api, client_event_loop, aiohttp_session, status
+    dummy, dummy_api, client_event_loop, aiohttp_session, status
 ):
     data = randbytes(1000)
-    dummy_storage_context.vol_write(path, data)
-    dummy_storage_context.read_errors.extend([status] * 2)
+    dummy.vol_write(path, data)
+    dummy.read_errors.extend([status] * 2)
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
         with _reader(
@@ -174,18 +1179,18 @@ def test_volume_file_read_no_retry(
             with pytest.raises(OSError):
                 f.read()
 
-    assert len(dummy_storage_context.read_errors) == 1
+    assert len(dummy.read_errors) == 1
 
 
 def test_volume_file_read_parquet(
     client_event_loop,
     dummy_api,
-    dummy_storage_context,
+    dummy,
     dummy_table,
     dummy_table_parquet,
     aiohttp_session,
 ):
-    dummy_storage_context.vol_write(path, dummy_table_parquet)
+    dummy.vol_write(path, dummy_table_parquet)
 
     with _reader(
         aiohttp_session, dummy_api, client_event_loop, len(dummy_table_parquet)
@@ -200,23 +1205,23 @@ def test_volume_file_read_parquet(
 
 
 def test_volume_file_oneshot_write(
-    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
+    dummy_api, dummy, client_event_loop, aiohttp_session
 ):
     data = randbytes(1000 * 1000)
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         f.write(data)
 
-    assert bytes_sig(data) == bytes_sig(dummy_storage_context.volume_files[path].data)
+    assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_parts_write(
-    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session, upload_mode
+    dummy_api, dummy, client_event_loop, aiohttp_session, upload_mode
 ):
     data = randbytes(20 * 1000 * 1000)
     # The one file class follows the API the server chooses.
-    dummy_storage_context.upload_mode = upload_mode
+    dummy.upload_mode = upload_mode
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         # Several writes, so that the parts grow
@@ -224,10 +1229,10 @@ def test_volume_file_parts_write(
             f.write(data[i : i + 1000 * 1000])
         assert f.sequential is (upload_mode == "resumable")
 
-    assert bytes_sig(data) == bytes_sig(dummy_storage_context.volume_files[path].data)
+    assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
 
-    dummy_storage_context.presigned_urls_only = True
-    dummy_storage_context.volume_files.clear()
+    dummy.presigned_urls_only = True
+    dummy.volume_files.clear()
 
     with pytest.raises(IOError):
         with _writer(
@@ -240,9 +1245,9 @@ def test_volume_file_parts_write(
 
 
 def test_volume_file_resumable_one_part_in_flight(
-    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
+    dummy_api, dummy, client_event_loop, aiohttp_session
 ):
-    dummy_storage_context.upload_mode = "resumable"
+    dummy.upload_mode = "resumable"
     data = randbytes(40 * 1000 * 1000)
     original = _ResumableSession.upload_part
     in_flight = 0
@@ -264,19 +1269,19 @@ def test_volume_file_resumable_one_part_in_flight(
             for i in range(0, len(data), 1000 * 1000):
                 f.write(data[i : i + 1000 * 1000])
 
-    assert bytes_sig(data) == bytes_sig(dummy_storage_context.volume_files[path].data)
+    assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
     assert most_in_flight == 1
 
 
 @pytest.mark.parametrize("use_presigned_url", [True, False])
 def test_volume_file_unexpected_initiate_reply(
     dummy_api,
-    dummy_storage_context,
+    dummy,
     client_event_loop,
     aiohttp_session,
     use_presigned_url,
 ):
-    dummy_storage_context.upload_mode = "unknown"
+    dummy.upload_mode = "unknown"
 
     with pytest.raises(OSError, match="Unexpected initiate-upload response"):
         with _writer(
@@ -287,7 +1292,7 @@ def test_volume_file_unexpected_initiate_reply(
         ) as f:
             f.write(randbytes(20 * 1000 * 1000))
 
-    assert path not in dummy_storage_context.volume_files
+    assert path not in dummy.volume_files
 
 
 @pytest.mark.parametrize("name", ["min_block_size", "max_block_size"])
@@ -321,12 +1326,12 @@ def test_volume_file_invalid_spread(
 @pytest.mark.parametrize("abort_supported", [True, False])
 def test_volume_file_multipart_write_abort(
     dummy_api,
-    dummy_storage_context,
+    dummy,
     client_event_loop,
     aiohttp_session,
     abort_supported,
 ):
-    dummy_storage_context.abort_supported = abort_supported
+    dummy.abort_supported = abort_supported
 
     with patch.object(
         VolumeWritableFile,
@@ -339,27 +1344,27 @@ def test_volume_file_multipart_write_abort(
 
     # The upload's failure is raised, not the abort's
     assert "Failed to upload a part" in str(exc_info.value)
-    assert path not in dummy_storage_context.volume_files
+    assert path not in dummy.volume_files
 
     if abort_supported:
-        assert dummy_storage_context.multipart_uploads == {}
+        assert dummy.multipart_uploads == {}
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_write_parquet(
     client_event_loop,
     dummy_api,
-    dummy_storage_context,
+    dummy,
     dummy_table,
     upload_mode,
     aiohttp_session,
 ):
-    dummy_storage_context.upload_mode = upload_mode
+    dummy.upload_mode = upload_mode
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         pq.write_table(pa.Table.from_pylist(dummy_table), f)
 
-    df = pd.read_parquet(BytesIO(dummy_storage_context.volume_files[path].data))
+    df = pd.read_parquet(BytesIO(dummy.volume_files[path].data))
 
     df.sort_values(by="id")
     assert df.shape == (256 * 1024, 3)
@@ -372,13 +1377,13 @@ def test_volume_file_write_parquet(
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_parts_write_abort_per_mode(
     dummy_api,
-    dummy_storage_context,
+    dummy,
     client_event_loop,
     aiohttp_session,
     upload_mode,
     use_presigned_url,
 ):
-    dummy_storage_context.upload_mode = upload_mode
+    dummy.upload_mode = upload_mode
     session_class = (
         _MultipartSession if upload_mode == "multipart" else _ResumableSession
     )
@@ -397,14 +1402,14 @@ def test_volume_file_parts_write_abort_per_mode(
             ) as f:
                 f.write(randbytes(20 * 1000 * 1000))
 
-    assert path not in dummy_storage_context.volume_files
+    assert path not in dummy.volume_files
     # The session the server started is aborted by its own API.
-    assert dummy_storage_context.multipart_uploads == {}
-    assert dummy_storage_context.resumable_uploads == {}
+    assert dummy.multipart_uploads == {}
+    assert dummy.resumable_uploads == {}
 
 
 def test_volume_file_abort_without_session(
-    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
+    dummy_api, dummy, client_event_loop, aiohttp_session
 ):
     with patch.object(
         VolumeWritableFile,
@@ -423,7 +1428,7 @@ def test_volume_file_abort_without_session(
 @pytest.mark.parametrize("commit", [True, False])
 def test_volume_file_transaction(
     dummy_api,
-    dummy_storage_context,
+    dummy,
     client_event_loop,
     aiohttp_session,
     upload_mode,
@@ -431,7 +1436,7 @@ def test_volume_file_transaction(
     commit,
 ):
     """In a transaction, nothing is visible before commit, and discard leaves nothing."""
-    dummy_storage_context.upload_mode = upload_mode
+    dummy.upload_mode = upload_mode
     data = randbytes(size)
     f = TransactionFile(
         AdaptiveWritableTransaction(
@@ -441,16 +1446,14 @@ def test_volume_file_transaction(
     with f:
         for i in range(0, len(data), 1000 * 1000):
             f.write(data[i : i + 1000 * 1000])
-    assert path not in dummy_storage_context.volume_files
+    assert path not in dummy.volume_files
 
     if commit:
         f.commit()
-        assert bytes_sig(data) == bytes_sig(
-            dummy_storage_context.volume_files[path].data
-        )
+        assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
     else:
         f.discard()
-        assert path not in dummy_storage_context.volume_files
-        assert dummy_storage_context.multipart_uploads == {}
+        assert path not in dummy.volume_files
+        assert dummy.multipart_uploads == {}
         if upload_mode == "multipart":
-            assert dummy_storage_context.resumable_uploads == {}
+            assert dummy.resumable_uploads == {}

@@ -359,4 +359,4 @@ with fs.open("dbfs:/mnt/my-mount/data.csv", "rb") as f:
 - `rmdir` refuses a folder that is not empty.
 - Files are read and written in order: `ab`, `r+b` and seeking are not supported.
 
-Databricks has deprecated legacy DBFS. Legacy DBFS support is tested only on a fake API.
+Databricks has deprecated legacy DBFS. Legacy DBFS support is tested mostly on a dummy server, as most workspaces disable it.

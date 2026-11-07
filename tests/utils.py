@@ -1,24 +1,16 @@
+"""Helpers shared by the test files: comparisons, and the work directories on each backend."""
+
+import contextlib
+import inspect
 import logging
 import os
-import posixpath
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
-from unittest.mock import MagicMock
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import (
-    BadRequest,
-    NotFound,
-    ResourceAlreadyExists,
-    ResourceDoesNotExist,
-)
-from databricks.sdk.service.workspace import (
-    ImportFormat,
-    Language,
-    ObjectInfo,
-    ObjectType,
-)
+from databricks.sdk.errors import NotFound
+from databricks.sdk.service.workspace import ExportFormat
 
 log = logging.getLogger(__name__)
 
@@ -38,99 +30,46 @@ def bytes_sig(data: bytes) -> tuple[int, str]:
     return len(data), h.hexdigest()
 
 
-class FakeWorkspaceAPI:
-    """An in-memory `WorkspaceClient.workspace`, answering as the Workspace API does, recording its calls."""
+### Work directories
 
-    def __init__(self):
-        self.objects: dict[str, ObjectInfo] = {
-            "/": ObjectInfo(path="/", object_type=ObjectType.DIRECTORY, object_id=0)
-        }
-        self.data: dict[str, bytes] = {}
-        self.calls: list[tuple] = []
-        self._next_id = 1
-
-    def _status(self, path: str) -> ObjectInfo:
-        if path not in self.objects:
-            raise ResourceDoesNotExist(f"Path ({path}) doesn't exist.")
-        return self.objects[path]
-
-    def _children(self, path: str) -> list[str]:
-        return sorted(
-            p for p in self.objects if p != "/" and posixpath.dirname(p) == path
-        )
-
-    def _add(self, path: str, object_type: ObjectType, language=None, size=None):
-        self.objects[path] = ObjectInfo(
-            path=path,
-            object_type=object_type,
-            language=language,
-            size=size,
-            object_id=self._next_id,
-        )
-        self._next_id += 1
-
-    def get_status(self, path):
-        self.calls.append(("get_status", path))
-        return self._status(path)
-
-    def list(self, path):
-        self.calls.append(("list", path))
-        info = self._status(path)
-        if info.object_type != ObjectType.DIRECTORY:
-            return iter([info])
-        return iter([self.objects[p] for p in self._children(path)])
-
-    def mkdirs(self, path):
-        self.calls.append(("mkdirs", path))
-        parts = path.strip("/").split("/")
-        for i in range(1, len(parts) + 1):
-            p = "/" + "/".join(parts[:i])
-            if p in self.objects:
-                if self.objects[p].object_type != ObjectType.DIRECTORY:
-                    raise ResourceAlreadyExists(f"{p} exists")
-            else:
-                self._add(p, ObjectType.DIRECTORY)
-
-    def delete(self, path, recursive=False):
-        self.calls.append(("delete", path, recursive))
-        self._status(path)
-        children = self._children(path)
-        if children and not recursive:
-            raise BadRequest(f"Folder ({path}) is not empty")
-        for p in [p for p in self.objects if p == path or p.startswith(path + "/")]:
-            del self.objects[p]
-            self.data.pop(p, None)
-
-    def download(self, path, format=None):
-        self.calls.append(("download", path, format))
-        info = self._status(path)
-        if info.object_type == ObjectType.DIRECTORY:
-            raise BadRequest(f"{path} is a directory")
-        return BytesIO(self.data[path])
-
-    def upload(self, path, content, *, format=None, language=None, overwrite=False):
-        self.calls.append(("upload", path, format, language, overwrite))
-        if hasattr(content, "read"):
-            content = content.read()
-        self._status(posixpath.dirname(path) or "/")
-        if path in self.objects and not overwrite:
-            raise ResourceAlreadyExists(f"{path} already exists")
-        if format in (None, ImportFormat.RAW, ImportFormat.AUTO):
-            self._add(path, ObjectType.FILE, size=len(content))
-        else:
-            self._add(path, ObjectType.NOTEBOOK, language=Language(language))
-        self.data[path] = bytes(content)
-
-    def calls_of(self, name: str) -> list[tuple]:
-        return [c for c in self.calls if c[0] == name]
-
-
+default_volume_test_root = "/Volumes/fsspec_databricks_test/fsspec_dbx_test/test/local"
 default_workspace_test_root = "/fsspec-databricks-test/local"
 default_dbfs_test_root = "/fsspec-databricks-test/local"
 
 
 def _test_root(variable: str, default: str) -> str:
     return "/" + os.getenv(variable, default).strip("/")
+
+
+def _test_dir(test_root: str, fs_class: type | None) -> str:
+    """A directory named after the calling test, and the file system class it tests."""
+    name = inspect.stack()[2].function
+    return (
+        f"{test_root}/{name}_{fs_class.__name__}" if fs_class else f"{test_root}/{name}"
+    )
+
+
+def _rm_volume_dir(client: WorkspaceClient, path: str) -> None:
+    """Delete a volume directory and all in it, with the Files API, which every workspace serves."""
+    for i in client.files.list_directory_contents(path):
+        if i.is_directory:
+            _rm_volume_dir(client, i.path.rstrip("/"))
+        else:
+            client.files.delete(i.path)
+    client.files.delete_directory(path)
+
+
+def prepare_volume_test_root(client: WorkspaceClient) -> str:
+    """Create the Volume work directory, or empty it."""
+    path = _test_root("FSSPEC_DATABRICKS_VOLUME_TEST_ROOT", default_volume_test_root)
+    log.info("Preparing volume test root: %s", path)
+    catalog, schema, volume = path.split("/")[2:5]
+    # The volume must exist: the tests never create one.
+    client.volumes.read(f"{catalog}.{schema}.{volume}")
+    with contextlib.suppress(NotFound):
+        _rm_volume_dir(client, path)
+    client.files.create_directory(path)
+    return path
 
 
 def prepare_workspace_test_root(client: WorkspaceClient) -> str:
@@ -166,8 +105,96 @@ def legacy_dbfs_disabled(client: WorkspaceClient) -> bool:
     ).effective_boolean_val.value
 
 
-def fake_workspace_client() -> MagicMock:
-    """A `WorkspaceClient` whose `workspace` is a `FakeWorkspaceAPI`."""
-    client = MagicMock()
-    client.workspace = FakeWorkspaceAPI()
-    return client
+def init_volume_test_dir(
+    client: WorkspaceClient,
+    test_root: str,
+    fs_class: type | None = None,
+    items: dict[str, dict | bytes] | None = None,
+) -> str:
+    """An empty volume directory named after the calling test, holding the given files and directories."""
+    test_dir = _test_dir(test_root, fs_class)
+    with contextlib.suppress(NotFound):
+        _rm_volume_dir(client, test_dir)
+    client.files.create_directory(test_dir)
+
+    def init(path: str, _items: dict[str, dict | bytes]):
+        for n, i in _items.items():
+            if isinstance(i, dict):
+                client.files.create_directory(f"{path}/{n}")
+                init(f"{path}/{n}", i)
+            else:
+                client.files.upload(f"{path}/{n}", BytesIO(i))
+
+    init(test_dir, items or {})
+    return test_dir
+
+
+def init_workspace_test_dir(
+    client: WorkspaceClient,
+    test_root: str,
+    fs_class: type | None = None,
+    items: dict[str, dict | tuple] | None = None,
+) -> str:
+    """An empty Workspace directory named after the calling test, holding the given items.
+
+    A file is a tuple of its content, import format and language.
+    """
+    test_dir = _test_dir(test_root, fs_class)
+    with contextlib.suppress(NotFound):
+        client.workspace.delete(test_dir, recursive=True)
+    client.workspace.mkdirs(test_dir)
+
+    def init(path: str, _items: dict[str, dict | tuple]):
+        for n, i in _items.items():
+            if isinstance(i, dict):
+                client.workspace.mkdirs(f"{path}/{n}")
+                init(f"{path}/{n}", i)
+            else:
+                content, fmt, language = i
+                client.workspace.upload(
+                    f"{path}/{n}", content, format=fmt, language=language
+                )
+
+    init(test_dir, items or {})
+    return test_dir
+
+
+def init_dbfs_test_dir(
+    client: WorkspaceClient,
+    test_root: str,
+    fs_class: type | None = None,
+    items: dict[str, dict | bytes] | None = None,
+) -> str:
+    """An empty DBFS directory named after the calling test, holding the given files and directories."""
+    test_dir = _test_dir(test_root, fs_class)
+    client.dbfs.delete(test_dir, recursive=True)
+    client.dbfs.mkdirs(test_dir)
+
+    def init(path: str, _items: dict[str, dict | bytes]):
+        for n, i in _items.items():
+            if isinstance(i, dict):
+                client.dbfs.mkdirs(f"{path}/{n}")
+                init(f"{path}/{n}", i)
+            else:
+                with client.dbfs.open(f"{path}/{n}", write=True) as f:
+                    f.write(i)
+
+    init(test_dir, items or {})
+    return test_dir
+
+
+def volume_download(client: WorkspaceClient, path: str) -> bytes:
+    with client.files.download(path).contents as f:
+        return f.read()
+
+
+def workspace_download(
+    client: WorkspaceClient, path: str, fmt: ExportFormat = ExportFormat.AUTO
+) -> bytes:
+    with client.workspace.download(path, format=fmt) as f:
+        return f.read()
+
+
+def dbfs_download(client: WorkspaceClient, path: str) -> bytes:
+    with client.dbfs.download(path) as f:
+        return f.read()

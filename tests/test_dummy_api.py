@@ -31,13 +31,13 @@ NOTEBOOK = b"# Databricks notebook source\nprint(1)"
 
 
 @pytest.fixture
-def w(dummy_client, dummy_storage_context):
+def w(dummy_client, dummy):
     """The SDK's client of a dummy server with empty storage."""
     return dummy_client
 
 
 @pytest.fixture
-def parts_client(dummy_api, dummy_storage_context):
+def parts_client(dummy_api, dummy):
     """A client of its own, uploading in parts from 1 MiB, so that the tests send little."""
     client = WorkspaceClient(host=dummy_api, token="dummy", auth_type="pat")
     client.files._config.files_ext_multipart_upload_min_stream_size = _MiB
@@ -88,9 +88,9 @@ def test_files_upload_download_delete(w):
         w.files.get_metadata("/Volumes/c/s")
 
 
-def test_files_download_range(w, dummy_storage_context):
+def test_files_download_range(w, dummy):
     data = randbytes(1000)
-    dummy_storage_context.vol_write(f"{V}/r.bin", data)
+    dummy.vol_write(f"{V}/r.bin", data)
 
     def get(range_):
         return w.api_client.do(
@@ -112,11 +112,11 @@ def test_files_download_range(w, dummy_storage_context):
         get("bytes=1000-")
 
 
-def test_files_presigned_download(w, dummy_storage_context):
+def test_files_presigned_download(w, dummy):
     """The SDK downloads by a presigned URL first, which works when the Files API itself refuses."""
     data = randbytes(1000)
-    dummy_storage_context.vol_write(f"{V}/p.bin", data)
-    dummy_storage_context.presigned_urls_only = True
+    dummy.vol_write(f"{V}/p.bin", data)
+    dummy.presigned_urls_only = True
     with w.files.download(f"{V}/p.bin").contents as f:
         assert f.read() == data
 
@@ -183,10 +183,10 @@ def test_files_delete_directory(w):
         w.files.delete_directory(f"{V}/d")
 
 
-def test_files_list_pages(w, dummy_storage_context):
+def test_files_list_pages(w, dummy):
     names = [f"f{i:02}" for i in range(7)]
     for n in names:
-        dummy_storage_context.vol_write(f"{V}/l/{n}", b"")
+        dummy.vol_write(f"{V}/l/{n}", b"")
 
     # The SDK follows next_page_token.
     entries = w.files.list_directory_contents(f"{V}/l", page_size=3)
@@ -204,17 +204,17 @@ def test_files_list_pages(w, dummy_storage_context):
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_files_upload_in_parts(parts_client, dummy_storage_context, upload_mode):
+def test_files_upload_in_parts(parts_client, dummy, upload_mode):
     """The SDK uploads in parts through presigned URLs, by the API that the server chooses."""
-    dummy_storage_context.upload_mode = upload_mode
+    dummy.upload_mode = upload_mode
     data = randbytes(3 * _MiB + 1000)
 
     parts_client.files.upload(
         f"{V}/m.bin", BytesIO(data), part_size=_MiB, use_parallel=False
     )
-    assert dummy_storage_context.volume_files[f"{V}/m.bin"].data == data
-    assert dummy_storage_context.multipart_uploads == {}
-    assert dummy_storage_context.resumable_uploads == {}
+    assert dummy.volume_files[f"{V}/m.bin"].data == data
+    assert dummy.multipart_uploads == {}
+    assert dummy.resumable_uploads == {}
 
     # The reference: an existing file without overwrite refuses the upload from its start.
     with pytest.raises(AlreadyExists):
@@ -223,19 +223,17 @@ def test_files_upload_in_parts(parts_client, dummy_storage_context, upload_mode)
         )
 
 
-def test_files_upload_in_parts_parallel(parts_client, dummy_storage_context):
+def test_files_upload_in_parts_parallel(parts_client, dummy):
     data = randbytes(5 * _MiB)
     parts_client.files.upload(f"{V}/p.bin", BytesIO(data), part_size=_MiB)
-    assert dummy_storage_context.volume_files[f"{V}/p.bin"].data == data
+    assert dummy.volume_files[f"{V}/p.bin"].data == data
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_files_upload_storage_proxy(
-    parts_client, dummy_api, dummy_storage_context, upload_mode
-):
+def test_files_upload_storage_proxy(parts_client, dummy_api, dummy, upload_mode):
     """Through the storage proxy, the parts go to the Files API itself, as fsspec-databricks sends them."""
-    dummy_storage_context.upload_mode = upload_mode
-    dummy_storage_context.storage_proxy_available = True
+    dummy.upload_mode = upload_mode
+    dummy.storage_proxy_available = True
     parts_client.files._config.experimental_files_ext_enable_storage_proxy = True
     parts_client.files._STORAGE_PROXY_HOSTNAME = dummy_api
     data = randbytes(3 * _MiB + 1000)
@@ -248,7 +246,7 @@ def test_files_upload_storage_proxy(
         assert f.read() == data
 
 
-def test_files_upload_sessions(w, dummy_storage_context):
+def test_files_upload_sessions(w, dummy):
     """The multipart upload API's requests, as the SDK and fsspec-databricks send them."""
     do = w.api_client.do
     url = f"/api/2.0/fs/files{V}/u.bin"
@@ -290,8 +288,8 @@ def test_files_upload_sessions(w, dummy_storage_context):
             "session_token": token,
         },
     )
-    assert dummy_storage_context.multipart_uploads == {}
-    assert f"{V}/u.bin" not in dummy_storage_context.volume_files
+    assert dummy.multipart_uploads == {}
+    assert f"{V}/u.bin" not in dummy.volume_files
 
     # Assumed: an unknown session is not found.
     with pytest.raises(NotFound):
@@ -302,7 +300,7 @@ def test_files_upload_sessions(w, dummy_storage_context):
         )
 
     # Azure Databricks refuses to abort by a presigned URL.
-    dummy_storage_context.abort_supported = False
+    dummy.abort_supported = False
     with pytest.raises(BadRequest):
         do(
             "POST",
@@ -592,17 +590,54 @@ def test_dbfs_delete(w):
     w.dbfs._dbfs_api.delete("/x/dir", recursive=True)
 
 
-def test_dbfs_disabled(w, dummy_storage_context):
+def test_dbfs_disabled(w, dummy):
     """A workspace disabling the DBFS root refuses the API, as real workspaces answer."""
     setting = w.workspace_settings_v2.get_public_workspace_setting(
         "disable_legacy_dbfs"
     )
     assert setting.effective_boolean_val.value is False
 
-    dummy_storage_context.legacy_dbfs_disabled = True
+    dummy.legacy_dbfs_disabled = True
     setting = w.workspace_settings_v2.get_public_workspace_setting(
         "disable_legacy_dbfs"
     )
     assert setting.effective_boolean_val.value is True
     with pytest.raises(PermissionDenied):
         w.dbfs.get_status("/")
+
+
+### Unity Catalog API
+
+
+def test_unity_catalog(w, dummy):
+    w.files.create_directory(f"{V}/d")
+    w.files.upload("/Volumes/c/s2/v2/f.bin", BytesIO(b"f"))
+
+    assert [c.name for c in w.catalogs.list()] == ["c"]
+    assert [s.full_name for s in w.schemas.list("c")] == ["c.s", "c.s2"]
+    assert [v.full_name for v in w.volumes.list("c", "s")] == ["c.s.v"]
+    # Assumed: every catalog, schema and volume exists.
+    assert w.catalogs.get("other").name == "other"
+    assert w.schemas.get("c.other").catalog_name == "c"
+    assert w.volumes.read("c.s.other").schema_name == "s"
+
+
+### Recorded requests
+
+
+def test_requests_recorded(w, dummy):
+    w.workspace.mkdirs("/a")
+    w.files.upload(f"{V}/r.bin", BytesIO(b"data"), overwrite=True)
+    w.dbfs.mkdirs("/x")
+
+    assert [tuple(r) for r in dummy.requests_to("/api/2.0/workspace/")] == [
+        ("POST", "/api/2.0/workspace/mkdirs")
+    ]
+    put = dummy.requests_to("/api/2.0/fs/files", "PUT")
+    assert [(r.path, r.params) for r in put] == [
+        (f"/api/2.0/fs/files{V}/r.bin", {"overwrite": "true"})
+    ]
+    assert dummy.requests_to("/api/2.0/dbfs/")[0].params == {"path": "/x"}
+
+    dummy.reset()
+    assert dummy.requests == []

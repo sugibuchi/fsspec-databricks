@@ -15,7 +15,7 @@
 | `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
 | `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
 | `src/fsspec_databricks/utils.py`    | Timestamps, enums, and what a file mode allows.                                  |
-| `tests/`                            | The tests, a file per module, and the fake Files API.                            |
+| `tests/`                            | The tests, a file per module, and the dummy API server.                          |
 
 The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies-common.
 
@@ -27,7 +27,8 @@ All Python commands go through [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
-Most tests run against a real Databricks workspace. They need its credentials and two work directories in it.
+The tests run on a local dummy server by default, with no workspace and no credentials. To run them on a real
+Databricks workspace too, set up its credentials and work directories as below.
 
 ### Work directories
 
@@ -38,6 +39,7 @@ in these environment variables:
 |----------------------|-----------------------------------------|--------------------------------------------------------------|
 | Unity Catalog Volume | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT`    | `/Volumes/fsspec_databricks_test/fsspec_dbx_test/test/local` |
 | Workspace files      | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` | `/fsspec-databricks-test/local`                              |
+| Legacy DBFS          | `FSSPEC_DATABRICKS_DBFS_TEST_ROOT`      | `/fsspec-databricks-test/local`                              |
 
 The tests delete everything in these folders at the start of each session.
 
@@ -46,52 +48,95 @@ The tests delete everything in these folders at the start of each session.
 Configure [Databricks Unified Authentication](https://docs.databricks.com/aws/en/dev-tools/auth/unified-auth), e.g. a
 default profile or `DATABRICKS_*` environment variables.
 
-The tests load a `.env` file in the repository folder, through python-dotenv. It can hold the credentials and the two
+The tests load a `.env` file in the repository folder, through python-dotenv. It can hold the credentials and the
 variables above.
 
 ## Tests
 
 ```bash
-uv run pytest                                   # all tests
+uv run pytest                                   # all tests, on the dummy server only
+uv run pytest --api=live                        # the backend tests on the live workspace
+uv run pytest --api=both                        # the backend tests on both
+uv run pytest --fs=volume,workspace             # only these backends: volume, workspace, dbfs
 uvx ruff check .                                # lint
 uvx ruff format --check .                       # formatting
 uvx pre-commit run --all-files                  # the hooks
 ```
 
-| File                       | Tests of                                          | Workspace |
-|----------------------------|---------------------------------------------------|-----------|
-| `test_spec_fs.py`          | `DatabricksFileSystem`                            | Mostly    |
-| `test_base_fs.py`          | `AbstractDatabricksFileSystem`                    | Yes       |
-| `test_volume_fs.py`        | `VolumeFileSystem`                                | Mostly    |
-| `test_volume.py`           | The Volume file objects                           | No        |
-| `test_workspace_fs.py`     | `WorkspaceFileSystem`, on the dummy and live      | Optional  |
-| `test_workspace.py`        | `WorkspaceFileSystem`, on a fake Workspace API    | No        |
-| `test_dbfs_fs.py`          | `DBFS`, on the dummy and live                     | Optional  |
-| `test_dbfs.py`             | `DBFS`, on a fake DBFS API                        | No        |
-| `test_dummy_api.py`        | The dummy server, through the SDK                 | No        |
-| `test_path.py`             | `path.py`                                         | No        |
-| `test_utils.py`            | `utils.py`                                        | No        |
+Two options of `tests/conftest.py` choose what runs:
 
-Without credentials, run the files that need no workspace, and the tests of the others that take no workspace fixture.
+- `--api` chooses where the backend tests run: `dummy`, the default, `live` or `both`.
+- `--fs` chooses the backends tested, comma-separated or repeated. By default, all three are.
+
+The options combine, e.g. `--api=live --fs=volume`. A test id names its backends and its API, e.g.
+`test_dbfs_rm[dbfs-dummy-DBFS]`.
+
+| File                | Tests of                                          |
+|---------------------|---------------------------------------------------|
+| `test_spec.py`      | `DatabricksFileSystem` and its routing            |
+| `test_base.py`      | `AbstractDatabricksFileSystem`                    |
+| `test_volume.py`    | `VolumeFileSystem` and its file objects           |
+| `test_workspace.py` | `WorkspaceFileSystem`                             |
+| `test_dbfs.py`      | `DBFS`                                            |
+| `test_dummy_api.py` | The dummy server, through the SDK                 |
+| `test_path.py`      | `path.py`                                         |
+| `test_utils.py`     | `utils.py`                                        |
+
+A backend test takes the `client` fixture, or one built on it. It runs once per API chosen:
+
+- `dummy`, on the dummy server;
+- `live`, on the real workspace, skipped without working credentials.
+
+The live DBFS tests also skip when the workspace disables legacy DBFS. Most workspaces do, so the dummy is usually how
+DBFS is tested.
+
+Some tests make sense on one side only:
+
+- A test taking the `dummy` fixture runs on the dummy server only. It switches the server's behaviour, or counts the
+  requests it served.
+- The `dummy_only` and `live_only` markers restrict the others.
+- A test is skipped when `--api` excludes its side.
+
+Each test of a backend has a `backend` marker, e.g. a module's `pytestmark = pytest.mark.backend("volume")`. A test
+spanning backends names all of them, and runs only when `--fs` selects them all. Tests of no backend always run.
+
+Tests without an API, and dummy cases, never need credentials. An autouse fixture points the default client
+configuration at the dummy server, so `WorkspaceFileSystem()` and the like never reach a workspace.
 
 The fixtures, in `tests/conftest.py`:
 
-- `client`: a `WorkspaceClient` with the default authentication;
-- `volume_test_root` and `workspace_test_root`: the work directories, emptied;
-- `dummy_api`, `dummy_client` and `dummy_storage_context`: the dummy server, the SDK's client of it, and its state;
+- `client`: the `WorkspaceClient` of the API the test runs on;
+- `dbfs_client`: the same, skipped where legacy DBFS is disabled;
+- `volume_test_root`, `workspace_test_root` and `dbfs_test_root`: the work directories, emptied;
+- `dummy`: the dummy server's state and the requests it served, reset after the test;
+- `dummy_api` and `dummy_client`: the dummy server's URL, and the SDK's client of it;
 - `client_event_loop` and `aiohttp_session`: fsspec's event loop, and a session on it;
 - `dummy_table_parquet`: Parquet bytes of a generated table.
 
-`tests/dummy_api.py` is a FastAPI app served by Hypercorn on a free local port. It answers the Files API, the
-Workspace API and the legacy DBFS API, as their REST references describe. The SDK's own `WorkspaceClient` talks to
-it over HTTP, so the SDK's requests, errors and mixins run as against a workspace.
+`tests/utils.py` has the helpers that test files share, such as `init_volume_test_dir`, which fills a directory named
+after the test. Test files never import each other.
+
+### The dummy server
+
+`tests/dummy_api.py` is a FastAPI app served by Hypercorn on a free local port. It answers these APIs, as their REST
+references describe:
+
+- the Files API;
+- the Workspace API;
+- the legacy DBFS API;
+- the Unity Catalog API's reads of catalogs, schemas and volumes.
+
+The SDK's own `WorkspaceClient` talks to it over HTTP, so the SDK's requests, errors and mixins run as against a
+workspace.
 
 - The Files API covers directories, downloads with ranges, uploads whole or in parts, presigned URLs and aborts.
 - Parts go to presigned URLs, or to the Files API itself, as through the storage proxy.
-- `dummy_storage_context` holds the Volumes' files, the Workspace files and the DBFS root, separate as in Databricks.
+- `dummy` holds the Volumes' files, the Workspace files and the DBFS root, separate as in Databricks.
+- `dummy.requests` records each request served: its method, its path, and its query and body parameters without data.
+  `dummy.requests_to(prefix, method)` filters them. Tests counting requests assert on these.
 - `test_dummy_api.py` checks the server through the SDK alone, without this package.
 
-Switches of `dummy_storage_context` make the server answer as a given workspace:
+Switches of `dummy` make the server answer as a given workspace:
 
 - `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`;
 - `presigned_urls_only` refuses data transfers to the Files API itself;
@@ -99,15 +144,7 @@ Switches of `dummy_storage_context` make the server answer as a given workspace:
 - `read_errors` lists statuses that the next downloads fail with;
 - `storage_proxy_available` answers the storage proxy's probe;
 - `legacy_dbfs_disabled` answers as a workspace disabling the DBFS root.
-
-`test_workspace_fs.py` and `test_dbfs_fs.py` run each test twice, on two clients:
-
-- `dummy`, on the dummy server, with no workspace;
-- `live`, on the real workspace, skipped without credentials.
-
-The live DBFS cases also skip when the workspace disables legacy DBFS. Most workspaces do, so the dummy is usually
-how DBFS is tested. Their work directory is `FSSPEC_DATABRICKS_DBFS_TEST_ROOT`, by default
-`/fsspec-databricks-test/local`, emptied at the start.
+- `dbfs_add_block_errors` counts the next DBFS add-blocks that fail.
 
 The references leave some behaviour open. The dummy then makes an assumption, marked in a comment:
 
@@ -117,16 +154,14 @@ The references leave some behaviour open. The dummy then makes an assumption, ma
 - DBFS lists are sorted by name, Workspace lists in creation order.
 - A Workspace import refuses a missing parent folder.
 - Workspace imports and exports support `SOURCE`, `AUTO` and `RAW` only, with no directories.
-- Every volume exists, and paths outside the volumes are invalid parameters.
+- Every catalog, schema and volume exists, and paths outside the volumes are invalid parameters.
+- Unity Catalog lists name the catalogs, schemas and volumes holding files or directories.
 - A Files API upload creates the missing parent directories.
 - A file is no directory, and a directory no file: each is not found as the other.
 - A file in the way of a directory or an upload fails as an existing file, with `ALREADY_EXISTS`.
 - Volume lists are sorted by name, and their directories tell no size or time.
 - A non-empty volume directory fails with `DIRECTORY_NOT_EMPTY`, whose message says it "is not empty".
 - An unknown upload session is not found, and a resumable chunk with a gap is refused.
-
-`tests/utils.py` has the helpers that test files share, such as the fake Workspace API, `FakeWorkspaceAPI`.
-`tests/test_dbfs.py` has the fake DBFS API, `FakeDbfsAPI`.
 
 ## CI
 
@@ -438,7 +473,7 @@ Each metadata call is a round trip, so the checks inside a volume make as few as
 | Opening for writing                           | 1: `isdir`, to refuse directories               |
 | `ls` of a directory                           | 1: `files.list_directory_contents`              |
 
-`DatabricksFileSystem` passes `isdir` and `isfile` to the backends. `test_volume_fs_metadata_calls` counts the calls.
+`DatabricksFileSystem` passes `isdir` and `isfile` to the backends. `test_volume_metadata_requests` counts the requests.
 
 Copies, moves and deletes inside a volume:
 
@@ -456,7 +491,7 @@ Two limits bound the requests, each an `asyncio.Semaphore`:
 - `operation_concurrency`, the requests of the recursive operations;
 - `io_concurrency`, the range reads and part uploads of all the files opened.
 
-`test_volume_fs_rm_calls` and `test_volume_fs_cp_file_streams` check these on a fake `WorkspaceClient.files`.
+`test_volume_rm_requests` and `test_volume_cp_file_streams` check these on the dummy server's recorded requests.
 
 #### The HTTP session
 

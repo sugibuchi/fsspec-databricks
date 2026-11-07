@@ -74,8 +74,10 @@ def _text(value) -> str | None:
 
 async def _body(request: Request) -> dict:
     """A request's fields, from a JSON body or a multipart form, as the SDK sends either."""
-    content_type = request.headers.get("content-type", "")
-    body = await request.body()
+    return _fields(request.headers.get("content-type", ""), await request.body())
+
+
+def _fields(content_type: str, body: bytes) -> dict:
     if content_type.startswith("multipart/form-data"):
         boundary = re.search(r'boundary="?([^";]+)"?', content_type).group(1).encode()
         fields = {}
@@ -84,7 +86,12 @@ async def _body(request: Request) -> dict:
             name = re.search(rb'name="([^"]*)"', head).group(1).decode()
             fields[name] = data[:-2]  # The CRLF before the next boundary.
         return fields
-    return json.loads(body) if body else {}
+    try:
+        fields = json.loads(body) if body else {}
+    except ValueError:
+        # Data, such as a part of an upload.
+        return {}
+    return fields if isinstance(fields, dict) else {}
 
 
 def _absolute(path: str | None) -> str:
@@ -178,6 +185,61 @@ class DbfsEntry:
         }
 
 
+@dataclass(frozen=True)
+class Recorded:
+    """A request served: its method, its path, and its parameters from the query and the body, without data."""
+
+    method: str
+    path: str
+    params: dict
+
+    def __iter__(self):
+        return iter((self.method, self.path))
+
+
+_data_fields = {"content", "contents", "data", "file", "parts"}
+
+
+class _Recorder:
+    """ASGI middleware recording each request in the storage, then passing its body on."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        chunks, more = [], True
+        while more:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        body = b"".join(chunks)
+
+        headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
+        params = dict(urllib.parse.parse_qsl(scope["query_string"].decode()))
+        for name, value in _fields(headers.get("content-type", ""), body).items():
+            if name not in _data_fields:
+                params[name] = _text(value)
+        _storage.requests.append(
+            Recorded(scope["method"], urllib.parse.unquote(scope["path"]), params)
+        )
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return await receive()
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+app.add_middleware(_Recorder)
+
+
 _volume_pat = re.compile(r"/Volumes/[^/]+/[^/]+/[^/]+")
 
 
@@ -220,14 +282,28 @@ class DummyStorage:
     dbfs: dict[str, DbfsEntry] = field(default_factory=dict)
     dbfs_handles: dict[int, str] = field(default_factory=dict)
     legacy_dbfs_disabled: bool = False
+    dbfs_add_block_errors: int = 0
+    """The number of the next add-blocks that fail, with an internal error."""
     next_id: int = 1
 
     workspace_id: int = 1234567890
 
+    requests: list["Recorded"] = field(default_factory=list)
+    """The requests served since the last reset, in order, for tests counting them."""
+
     def __post_init__(self):
         self.reset()
 
+    def requests_to(self, prefix: str = "/api/", method: str | None = None):
+        """The requests whose path starts with the prefix, of one method or any."""
+        return [
+            r
+            for r in self.requests
+            if r.path.startswith(prefix) and method in (None, r.method)
+        ]
+
     def reset(self):
+        self.requests = []
         self.volume_files = {}
         self.volume_dirs = set()
         self.multipart_uploads = {}
@@ -241,6 +317,7 @@ class DummyStorage:
         self.dbfs = {"/": DbfsEntry(True, 0)}
         self.dbfs_handles = {}
         self.legacy_dbfs_disabled = False
+        self.dbfs_add_block_errors = 0
 
     def new_id(self) -> int:
         self.next_id += 1
@@ -848,6 +925,69 @@ async def files_create_abort_upload_url(storage: Storage, request: Request):
     }
 
 
+### Unity Catalog API
+#
+# Only what lists and describes the volumes. Assumed: every catalog, schema and volume exists, as for the Files
+# API, and the listings name those holding files or directories.
+
+_created_at = _now_ms()
+
+
+def _uc_names(storage: DummyStorage) -> set[tuple[str, str, str]]:
+    roots = {_volume_root(p) for p in [*storage.volume_files, *storage.volume_dirs]}
+    return {tuple(r.split("/")[2:5]) for r in roots if _volume_pat.match(r)}
+
+
+def _uc_info(*names: str) -> dict:
+    info = {
+        "name": names[-1],
+        "full_name": ".".join(names),
+        "created_at": _created_at,
+        "updated_at": _created_at,
+    }
+    if len(names) > 1:
+        info["catalog_name"] = names[0]
+    if len(names) > 2:
+        info["schema_name"] = names[1]
+        info["volume_type"] = "MANAGED"
+    return info
+
+
+@app.get("/api/2.1/unity-catalog/catalogs")
+async def uc_list_catalogs(storage: Storage):
+    names = sorted({n[0] for n in _uc_names(storage)})
+    return {"catalogs": [_uc_info(n) for n in names]}
+
+
+@app.get("/api/2.1/unity-catalog/catalogs/{name}")
+async def uc_get_catalog(name: str):
+    return _uc_info(name)
+
+
+@app.get("/api/2.1/unity-catalog/schemas")
+async def uc_list_schemas(storage: Storage, catalog_name: str):
+    names = sorted({n[:2] for n in _uc_names(storage) if n[0] == catalog_name})
+    return {"schemas": [_uc_info(*n) for n in names]}
+
+
+@app.get("/api/2.1/unity-catalog/schemas/{full_name}")
+async def uc_get_schema(full_name: str):
+    return _uc_info(*full_name.split("."))
+
+
+@app.get("/api/2.1/unity-catalog/volumes")
+async def uc_list_volumes(storage: Storage, catalog_name: str, schema_name: str):
+    names = sorted(
+        n for n in _uc_names(storage) if n[:2] == (catalog_name, schema_name)
+    )
+    return {"volumes": [_uc_info(*n) for n in names]}
+
+
+@app.get("/api/2.1/unity-catalog/volumes/{name}")
+async def uc_read_volume(name: str):
+    return _uc_info(*name.split("."))
+
+
 ### Workspace API
 
 # Notebook extensions by language, which an AUTO import strips, with the header of each language's source.
@@ -1113,6 +1253,9 @@ async def dbfs_add_block(storage: Storage, request: Request):
     body = await _body(request)
     path = _dbfs_handle(storage, body.get("handle"))
     block = _dbfs_block(body.get("data"))
+    if storage.dbfs_add_block_errors:
+        storage.dbfs_add_block_errors -= 1
+        raise ApiError("INTERNAL_ERROR", "Injected error", 500)
     entry = storage.dbfs.get(path)
     if entry is not None and not entry.is_dir:
         entry.data.extend(block)
@@ -1219,6 +1362,7 @@ def serve_app(loop):
 
 __all__ = [
     "DummyStorage",
+    "Recorded",
     "dummy_storage",
     "serve_app",
 ]
