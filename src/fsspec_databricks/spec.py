@@ -2,6 +2,7 @@ import atexit
 import json
 import os
 import shutil
+from typing import Any
 
 from databricks.sdk import AuthorizationDetail, CredentialsStrategy, WorkspaceClient
 from databricks.sdk.config import Config
@@ -10,7 +11,7 @@ from fsspec.spec import AbstractFileSystem
 
 from .base import AbstractDatabricksFileSystem, root_dir_info
 from .dbfs import DBFS
-from .error import file_not_found_error
+from .error import file_exists_error, file_not_found_error
 from .local import DatabricksLocalFileSystem
 from .path import (
     FileSystemType,
@@ -263,6 +264,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             self.__workspace_fs = WorkspaceFileSystem(
                 client=self.client,
                 config=self.config,
+                operation_concurrency=self._operation_concurrency,
+                io_concurrency=self._io_concurrency,
                 verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )
@@ -278,6 +281,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             self.__legacy_fs = DBFS(
                 client=self.client,
                 config=self.config,
+                operation_concurrency=self._operation_concurrency,
+                io_concurrency=self._io_concurrency,
                 verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )
@@ -348,6 +353,133 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             }
         else:
             return info
+
+    def _from_local_name(self, name: str) -> str:
+        if self._uses_local_fs:
+            return from_local_path(name, self.legacy_dbfs_local_root)
+        return name
+
+    def _from_local_found(self, found: Any, detail: bool) -> Any:
+        """Map the names found by `find` or `glob` back, as `_from_local_info` does."""
+        if not self._uses_local_fs:
+            return found
+        if detail:
+            return {
+                self._from_local_name(k): self._from_local_info(v)
+                for k, v in found.items()
+            }
+        return [self._from_local_name(n) for n in found]
+
+    def _backend(self, path: str) -> tuple[AbstractFileSystem, str] | None:
+        """The backend serving a path or glob pattern, with the path to pass to it.
+
+        None for the root, or a pattern matching there, as the root spans the backends.
+        """
+        stripped = self._strip_protocol(path)
+        magic = [i for i in (stripped.find(c) for c in "*?[") if i >= 0]
+        base = stripped[: min(magic)].rsplit("/", 1)[0] if magic else stripped
+        if base.rstrip("/") == "":
+            return None
+        fs, _ = self._resolve(base)
+        _, p = self._resolve(path)
+        return fs, p
+
+    def _same_backend(self, path1, path2) -> tuple[AbstractFileSystem, str, str] | None:
+        """The backend serving both paths, with the paths to pass to it: None if there is none."""
+        if not isinstance(path1, str) or not isinstance(path2, str):
+            return None
+        b1, b2 = self._backend(path1), self._backend(path2)
+        if b1 is None or b2 is None or b1[0] is not b2[0]:
+            return None
+        return b1[0], b1[1], b2[1]
+
+    def _cp_directory(self, path2):
+        """Copy a directory: create the destination, as directories have no content."""
+        try:
+            info = self.info(path2)
+        except FileNotFoundError:
+            self.makedirs(path2, exist_ok=True)
+            return
+        if info["type"] != "directory":
+            raise file_exists_error(path2)
+
+    ### Recursive operations, run by the backend of their path, with its strategies
+    def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
+        backend = self._backend(path)
+        if backend is None:
+            return super().find(
+                path, maxdepth=maxdepth, withdirs=withdirs, detail=detail, **kwargs
+            )
+        fs, p = backend
+        found = fs.find(
+            p, maxdepth=maxdepth, withdirs=withdirs, detail=detail, **kwargs
+        )
+        return self._from_local_found(found, detail)
+
+    def glob(self, path, maxdepth=None, **kwargs):
+        backend = self._backend(path)
+        if backend is None:
+            return super().glob(path, maxdepth=maxdepth, **kwargs)
+        fs, p = backend
+        found = fs.glob(p, maxdepth=maxdepth, **kwargs)
+        return self._from_local_found(found, kwargs.get("detail", False))
+
+    def du(self, path, total=True, maxdepth=None, withdirs=False, **kwargs):
+        backend = self._backend(path)
+        if backend is None:
+            return super().du(
+                path, total=total, maxdepth=maxdepth, withdirs=withdirs, **kwargs
+            )
+        fs, p = backend
+        sizes = fs.du(p, total=total, maxdepth=maxdepth, withdirs=withdirs, **kwargs)
+        if total:
+            return sizes
+        return {self._from_local_name(k): v for k, v in sizes.items()}
+
+    def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
+        backend = self._backend(path)
+        if backend is None:
+            yield from super().walk(
+                path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
+            )
+            return
+        fs, p = backend
+        mapped = self._uses_local_fs and kwargs.get("detail")
+        for root, dirs, files in fs.walk(
+            p, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
+        ):
+            if mapped:
+                yield (
+                    self._from_local_name(root),
+                    {k: self._from_local_info(v) for k, v in dirs.items()},
+                    {k: self._from_local_info(v) for k, v in files.items()},
+                )
+            else:
+                yield self._from_local_name(root), dirs, files
+
+    def copy(
+        self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs
+    ):
+        same = self._same_backend(path1, path2)
+        if same is None:
+            # Between backends: each file is streamed by `cp_file`.
+            return super().copy(
+                path1,
+                path2,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                on_error=on_error,
+                **kwargs,
+            )
+        fs, p1, p2 = same
+        return fs.copy(
+            p1,
+            p2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            on_error=on_error,
+            **kwargs,
+        )
 
     ### File/directory information
     def ls(self, path, detail=True, **kwargs):
@@ -425,9 +557,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                     shutil.copyfileobj(src, dst, length=_cross_fs_copy_chunk_size)
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
-        if fs_type(path1) == fs_type(path2):
-            fs, p1 = self._resolve(path1)
-            _, p2 = self._resolve(path2)
+        same = self._same_backend(path1, path2)
+        if same is not None:
+            fs, p1, p2 = same
             fs.mv(
                 p1,
                 p2,
@@ -449,7 +581,15 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         fs.rm_file(p)
 
     def rm(self, path, recursive=False, maxdepth=None):
-        fs, p = self._resolve(path)
+        if not isinstance(path, str):
+            for p in path:
+                self.rm(p, recursive=recursive, maxdepth=maxdepth)
+            return
+        backend = self._backend(path)
+        if backend is None:
+            super().rm(path, recursive=recursive, maxdepth=maxdepth)
+            return
+        fs, p = backend
         fs.rm(p, recursive=recursive, maxdepth=maxdepth)
 
     def mkdir(self, path, create_parents=True, **kwargs):

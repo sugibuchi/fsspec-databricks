@@ -7,8 +7,10 @@ import fsspec
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat
+from fsspec_alt_strategies_common.monitor import Monitor, monitoring
 
 from fsspec_databricks import DatabricksFileSystem, use
+from tests.test_dbfs import FakeDbfsAPI
 from tests.test_volume_fs import (
     dbfs_url as volume_dbfs_url,
 )
@@ -27,6 +29,7 @@ from tests.test_workspace_fs import (
 from tests.test_workspace_fs import (
     init_test_dir as init_workspace_test_dir,
 )
+from tests.utils import fake_workspace_client
 
 
 def test_use():
@@ -116,6 +119,73 @@ def test_dbx_fs_local_root(tmp_path):
 
         assert fs.legacy_dbfs_enabled
         assert fs.ls("/", detail=False) == ["/data"]
+
+
+class _Calls(Monitor):
+    """Records the calls whose operations it is told of."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def started(self, call, state, op):
+        self.calls.append((call.fs, call.method, call.path))
+
+
+@pytest.fixture
+def routed_fs():
+    """A `DatabricksFileSystem` on the fake Workspace and DBFS APIs, outside a workspace."""
+    client = fake_workspace_client()
+    client.workspace.mkdirs("/t/dir/sub")
+    client.workspace.upload("/t/dir/a.bin", b"a", format=ImportFormat.RAW)
+    client.workspace.upload("/t/dir/sub/b.bin", b"bb", format=ImportFormat.RAW)
+    client.dbfs = FakeDbfsAPI()
+    with DatabricksFileSystem(client=client) as fs:
+        fs._running_in_workspace = False
+        fs._legacy_dbfs_enabled = True
+        yield fs
+
+
+def test_dbx_fs_routes_recursive_operations(routed_fs):
+    """Recursive operations run in the backend of their path, with its strategies, which monitors see."""
+    fs = routed_fs
+    monitor = _Calls()
+    with monitoring(monitor):
+        assert fs.find("dbfs:/Workspace/t/dir") == [
+            "/Workspace/t/dir/a.bin",
+            "/Workspace/t/dir/sub/b.bin",
+        ]
+        assert fs.glob("/Workspace/t/dir/*.bin") == ["/Workspace/t/dir/a.bin"]
+        assert fs.du("/Workspace/t/dir") == 3
+        fs.copy("/Workspace/t/dir", "/Workspace/t/copy", recursive=True)
+
+    backend = fs._workspace_fs
+    assert monitor.calls == [
+        (backend, "find", "dbfs:/Workspace/t/dir"),
+        (backend, "glob", "/Workspace/t/dir/*.bin"),
+        (backend, "du", "/Workspace/t/dir"),
+        (backend, "copy", "/Workspace/t/dir"),
+    ]
+    assert fs.find("/Workspace/t/copy") == [
+        "/Workspace/t/copy/a.bin",
+        "/Workspace/t/copy/sub/b.bin",
+    ]
+    assert [root for root, _, _ in fs.walk("/Workspace/t/dir")] == [
+        "/Workspace/t/dir",
+        "/Workspace/t/dir/sub",
+    ]
+
+
+def test_dbx_fs_copies_between_backends(routed_fs):
+    """A copy between backends streams each file through the backends' file objects."""
+    fs = routed_fs
+    fs.copy("/Workspace/t/dir", "/backup", recursive=True)
+
+    assert fs.find("/backup") == ["/backup/a.bin", "/backup/sub/b.bin"]
+    assert fs.cat_file("/backup/sub/b.bin") == b"bb"
+
+    fs.mv("/backup/a.bin", "/Workspace/t/a.bin")
+    assert not fs.exists("/backup/a.bin")
+    assert fs.cat_file("/Workspace/t/a.bin") == b"a"
 
 
 def test_dbx_fs_init(client: WorkspaceClient):
