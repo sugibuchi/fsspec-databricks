@@ -11,13 +11,14 @@
 | `src/fsspec_databricks/workspace.py` | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object.      |
 | `src/fsspec_databricks/dbfs.py`     | `DBFS`, the legacy DBFS.                                                         |
 | `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, the local file system used inside a workspace.      |
-| `src/fsspec_databricks/file.py`     | The file objects' base classes: concurrent ranges, and whole-file caches.        |
+| `src/fsspec_databricks/file.py`     | The whole-file cached file objects of Workspace files.                           |
+| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the tree strategies and file objects of Volumes. |
 | `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
 | `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
 | `src/fsspec_databricks/utils.py`    | Timestamps and enums.                                                            |
 | `tests/`                            | The tests, a file per module, and the fake Files API.                            |
 
-The runtime dependencies are fsspec, databricks-sdk and aiohttp.
+The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies-common.
 
 All Python commands go through [uv](https://docs.astral.sh/uv/).
 
@@ -65,7 +66,7 @@ uvx pre-commit run --all-files                  # the hooks
 | `test_volume_fs.py`        | `VolumeFileSystem`                                | Mostly    |
 | `test_volume.py`           | The Volume file objects                           | No        |
 | `test_workspace_fs.py`     | `WorkspaceFileSystem`                             | Yes       |
-| `test_file.py`             | The file objects' base classes                    | No        |
+| `test_file.py`             | The cached file objects                           | No        |
 | `test_path.py`             | `path.py`                                         | No        |
 | `test_utils.py`            | `utils.py`                                        | No        |
 
@@ -76,7 +77,7 @@ The fixtures, in `tests/conftest.py`:
 - `client`: a `WorkspaceClient` with the default authentication;
 - `volume_test_root` and `workspace_test_root`: the work directories, emptied;
 - `dummy_api` and `dummy_api_context`: the fake Files API, and its state;
-- `client_event_loop` and `aiohttp_session`: an event loop in a thread, and a session on it;
+- `client_event_loop` and `aiohttp_session`: fsspec's event loop, and a session on it;
 - `dummy_table_parquet`: Parquet bytes of a generated table.
 
 `tests/dummy_api.py` is a FastAPI app of the Files API's endpoints, served by Hypercorn on a free local port. It
@@ -239,9 +240,10 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 ## Architecture
 
 - **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use.
-- **The backends** subclass `AbstractDatabricksFileSystem`, in `base.py`. Each wraps one Databricks API.
-- **The file objects**, in `file.py`, are `RawIOBase`s. Volumes read and write ranges concurrently. Workspace files are
-  cached whole.
+- **The backends** wrap one Databricks API each. Workspace and DBFS subclass `AbstractDatabricksFileSystem`, in
+  `base.py`. Volumes subclass the async `TreeFileSystem` of fsspec-alt-strategies.
+- **The file objects** are `RawIOBase`s. Volume files, in `volume.py`, read and write ranges concurrently. Workspace
+  files, with `file.py`'s classes, are cached whole.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
 
 ### Routing
@@ -266,15 +268,16 @@ The backends are created on first use, with the file system's client, config and
 
 Transfers between backends:
 
-- `cp_file` streams the file from one backend's file object into the other's, in blocks of
-  `cross_fs_copy_block_size`. A folder is created, not copied.
+- `cp_file` streams the file from one backend's file object into the other's, 8 MB at a time. A folder is created,
+  not copied.
 - `mv` uses fsspec's default, a copy then a delete.
 
 Within one backend, both go to the backend.
 
 ### The base class
 
-`AbstractDatabricksFileSystem` holds what every backend shares:
+`AbstractDatabricksFileSystem` holds what the Workspace and DBFS backends share. Its mixin `DatabricksClientSupport`
+holds the client handling, which Volumes share too:
 
 - the Databricks SDK `Config` and `WorkspaceClient`, made on first use from `client`, `config` or `config_params`;
 - `close()`, also called at exit and on garbage collection;
@@ -315,8 +318,13 @@ when no glob pattern is involved. Files are opened with the SDK's `dbfs.open`.
 
 ### Volumes
 
-`VolumeFileSystem`, in `volume.py`, subclasses `DBFS`. It keeps the SDK's `dbfs` for `exists` and for creating
-folders. Listings, copies, moves and deletes inside a volume use the Files API and the backend's own file objects.
+`VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `TreeFileSystem`, from the copy of
+fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`, `_rm_file`, `_rmdir`, `_makedirs` and
+`_cp_file`. The recursive operations are the library's tree strategies: `find`, `walk`, `du`, `glob`, and recursive
+`rm`, `copy` and `mv`.
+
+fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
+those. The SDK's calls block, so they run in threads with `asyncio.to_thread`.
 
 The APIs called depend on the depth of the path:
 
@@ -338,7 +346,7 @@ Each metadata call is a round trip, so the checks inside a volume make as few as
 |-----------------------------------------------|-------------------------------------------------|
 | `info` of a file, so also `size` and reading  | 1: `files.get_metadata`                         |
 | `info` of a directory                         | 2: `files.get_metadata`, then the directory's   |
-| `isdir`, so also `mkdir` and `rmdir`          | 1: `files.get_directory_metadata`               |
+| `isdir`                                       | 1: `files.get_directory_metadata`               |
 | `isfile`                                      | 1: `files.get_metadata`                         |
 | Opening for writing                           | 1: `isdir`, to refuse directories               |
 | `ls` of a directory                           | 1: `files.list_directory_contents`              |
@@ -347,24 +355,28 @@ Each metadata call is a round trip, so the checks inside a volume make as few as
 
 Copies, moves and deletes inside a volume:
 
-- `cp_file` streams the file from a `VolumeReadableFile` into a `VolumeWritableFile`, as the Files API has no copy. The
-  SDK's `dbfs.copy` would hold the whole file in memory.
-- `mv` is fsspec's default: a copy, then a delete.
-- `rm` of a file checks it with `info`, then calls `files.delete`.
-- A recursive `rm` lists the tree one depth at a time, deletes the files, then the folders from the deepest. Each step
-  runs up to `_max_delete_concurrency` requests in a thread pool.
-- Paths of volumes, schemas and catalogs go to `DBFS`.
+- `cp_file` streams the file from a `VolumeReadableFile` into a `VolumeWritableFile`, as the Files API has no copy.
+- `mv` is a copy, then a delete: the Files API has no rename.
+- `rm` of a file calls `files.delete`. Only when that fails does it check for a directory.
+- A recursive `rm`, `copy` or `mv` is a tree strategy. It acts on each folder as soon as it is listed.
+- Catalogs, schemas and volumes are never deleted or created as folders.
+
+`storage_profile` is `StorageProfile()`: nothing about the storage is declared, so the strategies take the way that is
+right on any storage.
+
+Two limits bound the requests, each an `asyncio.Semaphore`:
+
+- `operation_concurrency`, the requests of the recursive operations;
+- `io_concurrency`, the range reads and part uploads of all the files opened.
 
 `test_volume_fs_rm_calls` and `test_volume_fs_cp_file_streams` check these on a fake `WorkspaceClient.files`.
 
-#### The IO event loop
+#### The HTTP session
 
-Each `VolumeFileSystem` runs an asyncio event loop in a daemon thread, `dbfs-io-thread`, started on first use. It
-holds one aiohttp `ClientSession`, whose `TCPConnector` allows `connection_pool_size` connections.
+One aiohttp `ClientSession` serves the file system. Its `TCPConnector` allows `connection_pool_size` connections.
 
-- The session is created in the loop, as `TCPConnector` needs a running loop. From the loop itself, it is created
-  directly.
-- `close()` closes the session in the loop, stops the loop and joins the thread.
+- The session is created on the loop that first uses it, as `TCPConnector` needs a running loop. It is never pickled.
+- `close()` closes the session on its loop.
 - Requests are authenticated by an aiohttp middleware, with the SDK `Config`'s headers.
 
 #### Storage proxy or presigned URLs
@@ -380,40 +392,46 @@ renewed after 30 minutes.
 
 #### Reading
 
-`VolumeReadableFile` subclasses `AbstractAsyncReadableFile`. A read schedules range requests, each a task in the IO
-loop:
-
-- At most `max_concurrency` run at once.
-- `read()` of the whole file splits the rest of the file evenly across them, within the block size limits.
-- Smaller reads grow the block size with the bytes read in a row. After `n` bytes read in a row, the next `n` are
-  fetched ahead.
-- A seek outside the fetched ranges cancels them, and resets the bytes read in a row.
-
-`_compute_block_size` gives the block size: the smallest power-of-2 multiple of the minimum that covers the target with
-`max_concurrency` blocks, capped at the maximum.
+`VolumeReadableFile` subclasses the library's `AdaptiveReadableFile`, and implements `_fetch_range` with a range
+`GET`. The base class sizes the blocks, from 1 MB to 4 MB, and fetches ahead on sequential reads.
 
 A range request that gets a `429`, `500`, `502`, `503` or `504` is retried up to 3 times, with exponential backoff and
 jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" when the first one went through.
 
 #### Writing
 
-`VolumeWritableFile` subclasses `AbstractAsyncWritableFile`. Writes are buffered:
+`VolumeWritableFile` subclasses the library's `AdaptiveWritableFile`. The base class buffers the writes:
 
-1. Data is buffered until it reaches `min_multipart_upload_size`. A file closed before then is uploaded by one `PUT`.
+1. Data is buffered until it reaches `min_multipart_size`, 5 MB. A file closed before then is uploaded by one `PUT`.
 2. Then the upload is initiated, and the server chooses multipart or resumable upload.
-3. Full blocks are uploaded as the buffer fills. After `n` bytes written, block sizes aim at `n` more.
+3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
 
 The two kinds of upload differ:
 
 - **Multipart**: parts upload concurrently, then the upload completes with their ETags.
-- **Resumable**: one part at a time, with `Content-Range`. A `308` answer gives the bytes received, and the rest is
-  sent again.
+- **Resumable**: one part at a time, with `Content-Range`. The file sets the base class's `sequential` once the server
+  chooses it. A `308` answer gives the bytes received, and the rest is sent again.
 
 If a part fails, `close()` aborts the upload and raises an `OSError`. Azure Databricks refuses aborts of multipart
 uploads with a 400 answer, and the abort is then skipped.
 
-Part sizes must be multiples of 256 KB.
+Part sizes must be multiples of 256 KB. The constructor refuses other minimum and maximum sizes.
+
+#### The copy of fsspec-alt-strategies
+
+`src/fsspec_databricks/_contrib/strategy/` is a copy of `packages/impl/src/fsspec_alt_strategies/` of
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch. It leaves out
+`flat/`. Its modules keep their license headers and relative imports, and ruff skips them.
+
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies-common`, from the same repository's
+`packages/common`.
+
+To refresh the copy:
+
+1. Copy `common/`, `files/`, `tree/`, `__init__.py` and `monitor.py` over the old ones.
+2. Run `uv lock --upgrade-package fsspec-alt-strategies-common`, so that the interface matches.
+3. Run the tests.
 
 ### Workspace files
 
@@ -436,22 +454,16 @@ pattern is involved.
 
 ### File objects
 
-`file.py` has two families of file objects:
+`file.py` has the file objects that cache a whole remote file:
 
 | Class                         | Does                                                                          |
 |-------------------------------|-------------------------------------------------------------------------------|
-| `AbstractAsyncFile`           | Runs coroutines in an event loop of another thread, and waits for them.       |
-| `FileRangeTaskSupport`        | Byte-range tasks, at most `max_concurrency` at once, cancelled on close.      |
-| `AbstractAsyncReadableFile`   | Reading with range tasks, prefetching and seeking.                            |
-| `AbstractAsyncWritableFile`   | Buffered writing, single uploads, and multipart uploads with part tasks.      |
 | `AbstractCachedFile`          | A whole remote file cached locally, downloaded on open and uploaded on close. |
 | `MemoryCachedFile`            | The cache in memory, with a required `max_size`.                              |
 | `FileCachedFile`              | The cache in a temporary file.                                                |
 
-Synchronous methods of async files raise `RuntimeError` when called from their own event loop. Use the `async`
-methods there.
-
-A failed range task stops the file: later reads and writes raise, with the task's exception as the cause.
+The Volume files subclass the library's file objects instead. Their synchronous methods raise `RuntimeError` when called
+from the event loop. Code on the loop uses `open_async()` and awaits the file's methods.
 
 ### Local file system
 

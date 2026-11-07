@@ -186,50 +186,25 @@ Copies, moves and deletes:
 
 ### Options for Volumes
 
-These set the defaults of every file opened. Pass them to `DatabricksFileSystem` with the `volume_fs_` prefix, or to
-`VolumeFileSystem` without it:
+Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 
-| `DatabricksFileSystem` parameter   | `VolumeFileSystem` parameter | Description                                               | Default |
-|------------------------------------|------------------------------|-----------------------------------------------------------|---------|
-| `volume_fs_max_read_concurrency`   | `max_read_concurrency`       | Maximum concurrent requests when reading a file.          | `24`    |
-| `volume_fs_min_read_block_size`    | `min_read_block_size`        | Minimum bytes per read request.                           | `1 MB`  |
-| `volume_fs_max_read_block_size`    | `max_read_block_size`        | Maximum bytes per read request.                           | `4 MB`  |
-| `volume_fs_max_write_concurrency`  | `max_write_concurrency`      | Maximum concurrent part uploads when writing a file.      | `24`    |
-| `volume_fs_min_write_block_size`   | `min_write_block_size`       | Minimum part size.                                        | `5 MB`  |
-| `volume_fs_max_write_block_size`   | `max_write_block_size`       | Maximum part size.                                        | `16 MB` |
-| `volume_min_multipart_upload_size` | `min_multipart_upload_size`  | Files smaller than this are uploaded in one request.      | `5 MB`  |
-| `volume_fs_connection_pool_size`   | `connection_pool_size`       | Maximum HTTP connections.                                 | `100`   |
+| Parameter               | Description                                                                          | Default |
+|-------------------------|--------------------------------------------------------------------------------------|---------|
+| `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `16`    |
+| `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `24`    |
+
+`VolumeFileSystem` also takes `connection_pool_size`, the maximum number of HTTP connections. It defaults to `100`.
+
+Files size their requests by how they are read or written. Reads fetch blocks of 1 MB to 4 MB. Writes upload files
+from 5 MB in parts of 5 MB to 16 MB.
 
 For a slow or distant network, lower the concurrency:
 
 ```python
-fs = DatabricksFileSystem(
-    volume_fs_max_read_concurrency=4,
-    volume_fs_max_write_concurrency=4,
-    volume_fs_connection_pool_size=10,
-)
+fs = DatabricksFileSystem(operation_concurrency=4, io_concurrency=4)
 ```
 
-### Options per file
-
-`fs.open()` takes these for one file:
-
-| Parameter         | Applies to  | Description                                                                         |
-|-------------------|-------------|-------------------------------------------------------------------------------------|
-| `max_concurrency` | read, write | Maximum concurrent requests.                                                        |
-| `min_block_size`  | read, write | Minimum block size. A multiple of 256 KB for writes.                                |
-| `max_block_size`  | read, write | Maximum block size. A multiple of 256 KB for writes.                                |
-| `block_size`      | read, write | A fixed block size, setting both the minimum and the maximum.                       |
-
-```python
-with fs.open(
-    "dbfs:/Volumes/my_catalog/my_schema/my_volume/data/large.parquet",
-    "rb",
-    max_concurrency=32,
-    max_block_size=16 * 1024 * 1024,  # 16 MB blocks
-) as f:
-    data = f.read()
-```
+`VolumeFileSystem` is an async fsspec file system. Its `open_async()` returns files whose methods are awaited.
 
 ---
 
