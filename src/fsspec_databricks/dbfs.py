@@ -1,3 +1,4 @@
+import functools
 import logging
 from io import UnsupportedOperation
 from typing import Any
@@ -166,39 +167,39 @@ class DBFS(DatabricksTreeFileSystem):
             await self._sdk(lambda c: c.dbfs.mkdirs(dbfs_path))
 
     ### File I/O
-    async def _open_handle(self, path: str, mode: str) -> tuple[Any, int | None]:
-        """Open the SDK's file object in a thread, and tell the size of a file read."""
+    async def _check_open(self, path: str, mode: str) -> int | None:
+        """Refuse what the SDK's files cannot open, and tell the size of a file read."""
         self.log.debug("Opening file: path=%s, mode=%s", path, mode)
 
         if "a" in mode or "+" in mode:
             raise UnsupportedOperation("Append and read/write modes are not supported.")
 
-        size = None
         if "r" in mode:
             info = await self._info(path)
             if info["type"] == "directory":
                 raise is_a_directory_error(path)
-            size = info["size"]
-        elif await self._isdir(path):
+            return info["size"]
+        if await self._isdir(path):
             raise is_a_directory_error(path)
+        return None
 
+    def _open_handle(self, path: str, mode: str) -> Any:
+        """Open the SDK's file object: a blocking call."""
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
-            handle = await self._sdk(
-                lambda c: c.dbfs.open(
-                    dbfs_path,
-                    read="r" in mode,
-                    write="r" not in mode,
-                    overwrite="x" not in mode,
-                )
+            return self.client.dbfs.open(
+                dbfs_path,
+                read="r" in mode,
+                write="r" not in mode,
+                overwrite="x" not in mode,
             )
-        return handle, size
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
             raise ValueError("Only binary mode without compression is supported")
-        handle, size = await self._open_handle(path, mode)
-        return _DbfsFileAdapter(handle, mode, size)
+        size = await self._check_open(path, mode)
+        opener = functools.partial(self._open_handle, path, mode)
+        return await SyncFileAdapter.open(opener, mode=mode, size=size)
 
     def _open(
         self,
@@ -209,8 +210,8 @@ class DBFS(DatabricksTreeFileSystem):
         cache_options=None,
         **kwargs,
     ):
-        handle, _ = sync(self.loop, self._open_handle, path, mode)
-        return handle
+        sync(self.loop, self._check_open, path, mode)
+        return self._open_handle(path, mode)
 
     def open(self, path, mode="rb", **kwargs):
         """Open a file in the legacy DBFS.
@@ -226,23 +227,6 @@ class DBFS(DatabricksTreeFileSystem):
             `notebook_format`, are ignored.
         """
         return super().open(path, mode, **kwargs)
-
-
-class _DbfsFileAdapter(SyncFileAdapter):
-    """The SDK's DBFS file object for `open_async`, with the mode and size it does not tell itself."""
-
-    def __init__(self, file, mode: str, size: int | None):
-        super().__init__(file)
-        self._mode = mode
-        self._size = size
-
-    @property
-    def mode(self) -> str:
-        return self._mode
-
-    @property
-    def size(self) -> int | None:
-        return self._size
 
 
 __all__ = [

@@ -31,8 +31,9 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
 
     Its primitives, such as ``_ls``, ``_rm_file`` and ``_mv_file``, are the
     wrapped filesystem's, awaited on its loop. So are its data methods, such
-    as ``_cat_file``, and its files. The wrapper runs on the same loop, sync or
-    not as the wrapped one is.
+    as ``_cat_file``, and its files. So is ``_rm_tree``, a recursive delete,
+    when the wrapped one has it, e.g. as a `TreeFileSystem`. The wrapper runs
+    on the same loop, sync or not as the wrapped one is.
 
     It wins on storages listing one folder per request, as `TreeFileSystem`
     does. It is not cached: each is new, and may be dropped once used.
@@ -82,6 +83,10 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
             storage_profile=storage_profile,
             **kwargs,
         )
+        # Optional, as on a TreeFileSystem: left None, rm walks every folder.
+        rm_tree = getattr(fs, "_rm_tree", None)
+        if rm_tree is not None:
+            self._rm_tree = rm_tree
 
 
 class SyncTreeWrapper(_SyncFileSystemWrapper, TreeFileSystem):

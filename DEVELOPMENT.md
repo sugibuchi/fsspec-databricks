@@ -295,7 +295,8 @@ Transfers between backends:
 
 `DatabricksTreeFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
-- `_sdk` runs an SDK call in a thread.
+- `_sdk` runs an SDK call in a thread, with the library's `_blocking`. Each backend has
+  `operation_concurrency + io_concurrency` threads of its own, and `close()` shuts them down.
 - `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
 - `operation_concurrency` and `io_concurrency` default to 16 and 8.
 - `open` writes text with `"\n"` newlines by default.
@@ -349,7 +350,7 @@ system's message.
 `rm`, `copy` and `mv`.
 
 fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
-those. The SDK's calls block, so they run in threads with `asyncio.to_thread`. The Workspace and DBFS backends work
+those. The SDK's calls block, so they run in the file system's own threads, with `_sdk`. The Workspace and DBFS backends work
 the same way.
 
 The APIs called depend on the depth of the path:

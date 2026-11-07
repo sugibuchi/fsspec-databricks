@@ -31,7 +31,8 @@ class _Placing:
 
     A path under ``prefix`` goes to the same place under ``base``. For a list,
     a path under a root of ``places`` goes there instead. A subclass sets
-    ``path1``, ``path2`` and ``info``, and calls `_placing` first.
+    ``path1``, ``path2`` and ``info``, and calls `_placing` first. ``info``
+    describes the destination too, unless `_placing` is given its own.
     """
 
     verb = "copy"
@@ -40,7 +41,17 @@ class _Placing:
     path2: str
     info: _Info
 
-    def _placing(self) -> None:
+    def _placing(
+        self, destination_info: _Info | None = None, *, same_storage: bool = True
+    ) -> None:
+        """Start placing paths.
+
+        A copy between two storages passes the destination's ``info``, and
+        ``same_storage=False``: a path may then go to the same path, or under
+        it, as that is another storage's.
+        """
+        self.destination_info = destination_info or self.info
+        self.same_storage = same_storage
         self.prefix = ""
         self.base = ""
         # For a list: where each root goes, by the root.
@@ -71,13 +82,13 @@ class _Placing:
             self.base = destination
         else:
             root = _trim(self.path1)
-            if root == destination:
+            if root == destination and self.same_storage:
                 return None
             roots = _Roots([root])
             sources = [root]
             self.prefix = root
             self.base = await self._base(root, destination)
-        for source in sources:
+        for source in sources if self.same_storage else ():
             target = self.target(source)
             if target == source and len(sources) == 1:
                 return None
@@ -123,7 +134,8 @@ class _Placing:
             into = True
         else:
             try:
-                into = (await self.info(destination))["type"] == "directory"
+                entry = await self.destination_info(destination)
+                into = entry["type"] == "directory"
             except FileNotFoundError:
                 self.missing.add(destination)
                 into = False

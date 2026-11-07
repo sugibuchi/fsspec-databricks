@@ -14,11 +14,15 @@ This module depends on nothing else in the package.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
+import io
 import os
+import weakref
 from abc import ABCMeta
+from concurrent.futures import ThreadPoolExecutor
 from glob import has_magic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import DEFAULT_CALLBACK
@@ -32,6 +36,7 @@ if TYPE_CHECKING:
     from fsspec.callbacks import Callback
 
 _MiB = 1024 * 1024
+T = TypeVar("T")
 
 
 class _AbstractFileSystemMeta(type(AsyncFileSystem), ABCMeta):  # type: ignore[misc]
@@ -87,6 +92,68 @@ class _StrategyFileSystem(
             )
         self.operation_limit = asyncio.Semaphore(operation_concurrency)
         self.io_limit = asyncio.Semaphore(io_concurrency)
+        self._executor: ThreadPoolExecutor | None = None
+
+    async def _blocking(
+        self, func: Callable[..., T], /, *args: Any, **kwargs: Any
+    ) -> T:
+        """Run a blocking call, e.g. of a storage's sync SDK, in a thread.
+
+        It is the way to back the primitives, such as ``_ls``, with an SDK
+        whose calls block: ``return await self._blocking(client.list, path)``.
+        The loop then keeps running the other requests.
+
+        The threads are the filesystem's own, not the loop's default executor,
+        which other code shares. They are made when first needed. There are
+        ``operation_concurrency + io_concurrency`` of them, as many as the two
+        limits let run at once. So a call holding a permit of either never
+        waits for a thread as well. A call made outside the limits may.
+
+        ``close()`` shuts them down, as does collecting the filesystem. Neither
+        waits for the calls running.
+
+        Cancelling the call raises `asyncio.CancelledError` in the caller at
+        once, but the thread runs on to the end of ``func``: a thread cannot be
+        stopped. A request may then still change the storage after its
+        cancellation.
+
+        Parameters
+        ----------
+        func : callable
+            The blocking function.
+        *args, **kwargs
+            Its arguments.
+
+        Returns
+        -------
+        object
+            What ``func`` returns. What it raises is raised.
+        """
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                self.operation_concurrency + self.io_concurrency,
+                thread_name_prefix=type(self).__name__,
+            )
+            # Shut down when the filesystem is collected, without keeping it
+            # alive: the callback holds the executor only.
+            weakref.finalize(
+                self, self._executor.shutdown, wait=False, cancel_futures=True
+            )
+        loop = asyncio.get_running_loop()
+        call = functools.partial(func, *args, **kwargs)
+        # The context goes with the call, as asyncio.to_thread passes it.
+        context = contextvars.copy_context()
+        return await loop.run_in_executor(self._executor, context.run, call)
+
+    def close(self) -> None:
+        """Shut down the threads of `_blocking`, without waiting for their calls.
+
+        The calls not started yet are cancelled. A call after closing makes new
+        threads.
+        """
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _unwrapped(self) -> AsyncFileSystem:
         """The filesystem a monitor is told of: this one, or the one a wrapper wraps."""
@@ -124,12 +191,14 @@ class _StrategyFileSystem(
     ) -> bytes:
         f = await self.open_async(path, "rb", **kwargs)
         async with f:
+            position = 0
             if start is not None:
-                f.seek(start if start >= 0 else max(0, f.size + start))
+                position = start if start >= 0 else max(0, f.size + start)
+                await _skip(f, position, self.transfer_size)
             if end is not None:
                 if end < 0:
                     end = f.size + end
-                return await f.read(end - f.tell())
+                return await f.read(max(0, end - position))
             return await f.read()
 
     async def _pipe_file(
@@ -176,6 +245,27 @@ class _StrategyFileSystem(
                 while chunk := local.read(self.transfer_size):
                     await f.write(chunk)
                     callback.relative_update(len(chunk))
+
+
+async def _skip(f: Any, start: int, chunk_size: int) -> None:
+    """Move a file just opened to ``start``: by seeking, or else by reading.
+
+    A storage SDK's handle may stream its data, unable to seek. Its bytes up
+    to ``start`` are then read and dropped, a chunk at a time, so that memory
+    stays bounded.
+    """
+    try:
+        if f.seekable():
+            f.seek(start)
+            return
+    except (io.UnsupportedOperation, OSError):
+        pass
+    skipped = 0
+    while skipped < start:
+        chunk = await f.read(min(chunk_size, start - skipped))
+        if not chunk:
+            return  # Past the end: the read after answers nothing.
+        skipped += len(chunk)
 
 
 def _with(func: Callable[..., Any], kwargs: dict[str, Any]) -> Callable[..., Any]:

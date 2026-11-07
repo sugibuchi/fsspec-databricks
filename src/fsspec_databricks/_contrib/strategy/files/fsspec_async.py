@@ -151,9 +151,11 @@ class SyncFileAdapter:
     - ``path``, ``mode``, ``size``, ``loc`` and ``closed`` describe the file.
 
     The awaited methods run one at a time, in the order awaited, as the file
-    is not safe to use from several threads at once. A thread cannot be
-    stopped: a cancelled call waits for its thread to end before it raises
-    CancelledError, so that the next call finds the file free.
+    is not safe to use from several threads at once. ``seek`` and ``tell``
+    raise RuntimeError while one runs: the file's own could wait for the
+    thread, blocking the event loop. A thread cannot be stopped: a cancelled
+    call waits for its thread to end before it raises CancelledError, so that
+    the next call finds the file free.
 
     The threads are those of the loop's default executor, which bounds how
     many run at a time across every adapter.
@@ -162,6 +164,11 @@ class SyncFileAdapter:
     ----------
     file : file object
         A file with Python's sync API, opened in binary mode.
+    mode : str, optional
+        The file's mode, for a file without ``mode``, e.g. an SDK's handle.
+    size : int, optional
+        The file's size, for a file without ``size``. None leaves it unknown,
+        e.g. while writing.
 
     See Also
     --------
@@ -171,14 +178,51 @@ class SyncFileAdapter:
     --------
     >>> async def open_async(self, path, mode="rb", **kwargs):
     ...     return SyncFileAdapter(self.client.open(path, mode))
+
+    A storage SDK's handle tells neither its mode nor its size, and opening it
+    may block. `open` opens it in a thread:
+
+    >>> async def open_async(self, path, mode="rb", **kwargs):
+    ...     size = (await self._info(path))["size"] if "r" in mode else None
+    ...     opener = functools.partial(self.client.open, path, mode)
+    ...     return await SyncFileAdapter.open(opener, mode=mode, size=size)
     >>> async with await fs.open_async(path) as f:
     ...     header = await f.read(8)
     """
 
-    def __init__(self, file: IO[bytes]) -> None:
+    def __init__(
+        self, file: IO[bytes], *, mode: str | None = None, size: int | None = None
+    ) -> None:
         self.file = file
+        self._mode = mode
+        self._size = size
         # Serialises the threads' calls, which the file cannot take at once.
         self._lock = asyncio.Lock()
+
+    @classmethod
+    async def open(
+        cls,
+        opener: Callable[[], IO[bytes]],
+        *,
+        mode: str | None = None,
+        size: int | None = None,
+    ) -> Self:
+        """Open a file by a blocking call, in a thread, and adapt it.
+
+        Parameters
+        ----------
+        opener : callable
+            Called with no argument, in a thread, it returns the file opened.
+        mode, size
+            As for `SyncFileAdapter`.
+
+        Returns
+        -------
+        SyncFileAdapter
+            The file opened, adapted.
+        """
+        # Nothing holds the file yet: a cancelled open leaves it to its thread.
+        return cls(await asyncio.to_thread(opener), mode=mode, size=size)
 
     def __repr__(self) -> str:
         return f"<{type(self).__name__} {self.file!r}>"
@@ -190,11 +234,14 @@ class SyncFileAdapter:
 
     @property
     def mode(self) -> str:
-        return self.file.mode
+        """The mode given, or else the file's."""
+        return self._mode if self._mode is not None else self.file.mode
 
     @property
     def size(self) -> int | None:
-        """The file's size: None if the file does not tell it."""
+        """The size given, or else the file's: None if neither tells it."""
+        if self._size is not None:
+            return self._size
         return getattr(self.file, "size", None)
 
     @property
@@ -204,7 +251,17 @@ class SyncFileAdapter:
     @property
     def loc(self) -> int:
         """The position, as fsspec's files keep it."""
-        return self.file.tell()
+        return self.tell()
+
+    def _idle(self) -> IO[bytes]:
+        """The file, once checked that no thread runs in it.
+
+        Python's buffered files lock themselves for each call: a seek in the
+        loop's thread would wait for a read in another, blocking the loop.
+        """
+        if self._lock.locked():
+            raise RuntimeError(f"A call runs in a thread on {self.path}")
+        return self.file
 
     async def _in_thread(self, func: Callable[..., Any], *args: Any) -> Any:
         """Run one of the file's blocking calls in a thread, after the others."""
@@ -232,10 +289,10 @@ class SyncFileAdapter:
         return self.file.seekable()
 
     def seek(self, loc: int, whence: int = io.SEEK_SET) -> int:
-        return self.file.seek(loc, whence)
+        return self._idle().seek(loc, whence)
 
     def tell(self) -> int:
-        return self.file.tell()
+        return self._idle().tell()
 
     async def read(self, length: int | None = -1) -> bytes:
         return await self._in_thread(self.file.read, -1 if length is None else length)

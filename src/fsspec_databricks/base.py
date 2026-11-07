@@ -1,4 +1,3 @@
-import asyncio
 import atexit
 import contextlib
 import logging
@@ -240,6 +239,8 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         """Close the file system and release any resources."""
         if not self.closed:
             self._close_client()
+            # Shuts down the threads of `_sdk`.
+            TreeFileSystem.close(self)
             self.log.debug("Closed: %s", self)
 
     def __enter__(self):
@@ -255,8 +256,11 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
             self.close()
 
     async def _sdk(self, func: Callable[[WorkspaceClient], T]) -> T:
-        """Call the blocking Databricks SDK in a thread, so that the event loop goes on."""
-        return await asyncio.to_thread(lambda: func(self.client))
+        """Call the blocking Databricks SDK in one of the file system's own threads, so that the event loop goes on.
+
+        `_blocking` bounds the threads by `operation_concurrency` and `io_concurrency`.
+        """
+        return await self._blocking(lambda: func(self.client))
 
     def created(self, path):
         return self.info(path)["created"]
