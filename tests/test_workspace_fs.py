@@ -895,3 +895,30 @@ def test_workspace_fs_open_x(
     ) as f:
         f.write(written_notebook)
     assert nb_download(client, f"{test_dir}/5_notebook") == written_notebook
+
+
+@pytest.mark.parametrize("fs_class", [WorkspaceFileSystem, DatabricksFileSystem])
+def test_workspace_fs_transaction(
+    client: WorkspaceClient,
+    fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
+    workspace_test_root: str,
+):
+    test_dir = init_test_dir(client, workspace_test_root, fs_class)
+    fs = fs_class(client=client)
+    data = randbytes(54321)
+
+    # Commit uploads the files, none before.
+    with fs.transaction:
+        with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+            f.write(data)
+        with pytest.raises(ResourceDoesNotExist):
+            client.workspace.get_status(f"{test_dir}/1_data.bin")
+    assert bytes_sig(download(client, f"{test_dir}/1_data.bin")) == bytes_sig(data)
+
+    # An exception leaves nothing.
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open(dbfs_url(f"{test_dir}/2_data.bin"), mode="wb") as f:
+            f.write(data)
+        raise ValueError("dummy")
+    with pytest.raises(ResourceDoesNotExist):
+        client.workspace.get_status(f"{test_dir}/2_data.bin")

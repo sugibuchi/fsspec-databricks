@@ -238,3 +238,26 @@ def test_dbfs_open(fs, api):
 
     assert sync(fs.loop, read) == b"new"
     assert fs.cat_file("/t/new.bin") == b"new"
+
+
+def test_dbfs_transaction(fs, api):
+    """A file written in a transaction goes to a temporary path, moved into place on commit."""
+    with fs.transaction:
+        with fs.open("/t/data.bin", "wb") as f:
+            f.write(b"replaced")
+        assert api.data["/t/data.bin"] == b"data"
+    assert api.data["/t/data.bin"] == b"replaced"
+    assert [p for p in api.data if "/." in p] == []
+
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open("/t/lost.bin", "wb") as f:
+            f.write(b"lost")
+        raise ValueError("dummy")
+    assert sorted(api.data) == ["/t/data.bin", "/t/dir/a.bin", "/t/dir/sub/b.bin"]
+
+    # Exclusive creation fails on commit: the API's move refuses the file there.
+    with pytest.raises(FileExistsError), fs.transaction:
+        with fs.open("/t/data.bin", "xb") as f:
+            f.write(b"x")
+    assert api.data["/t/data.bin"] == b"replaced"
+    assert [p for p in api.data if "/." in p] == []

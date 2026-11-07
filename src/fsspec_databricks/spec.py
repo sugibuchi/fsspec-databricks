@@ -646,7 +646,12 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
         """
         fs, p = self._resolve(path)
-        return fs.open(
+        autocommit = kwargs.pop("autocommit", not self._intrans)
+        in_transaction = not autocommit and "r" not in mode
+        if in_transaction:
+            # The backend's open queues the file in the backend's own transaction, which nothing ends.
+            backend_files = fs.transaction.files
+        f = fs.open(
             path=p,
             mode=mode,
             notebook_format=notebook_format,
@@ -655,8 +660,13 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             encoding=encoding,
             errors=errors,
             newline=newline,
+            autocommit=autocommit,
             **kwargs,
         )
+        if in_transaction:
+            # The router's transaction commits or discards it, with the files of every other backend.
+            self.transaction.files.append(backend_files.pop())
+        return f
 
 
 __all__ = [

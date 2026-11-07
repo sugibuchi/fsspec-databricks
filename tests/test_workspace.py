@@ -226,3 +226,23 @@ def test_workspace_open_async(fs):
             return await f.read()
 
     assert sync(fs.loop, read) == b"ta"
+
+
+def test_workspace_transaction(fs, client):
+    """A file written in a transaction is uploaded on commit, and never on discard."""
+    with fs.transaction:
+        with fs.open("/Workspace/t/data.bin", "ab") as f:
+            f.write(b"+more")
+        with fs.open("/Workspace/t/new.txt", "w") as f:
+            f.write("new")
+        assert client.workspace.calls_of("upload") == []
+    assert client.workspace.data["/t/data.bin"] == b"data+more"
+    assert client.workspace.data["/t/new.txt"] == b"new"
+
+    client.workspace.calls.clear()
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open("/Workspace/t/lost.bin", "wb") as f:
+            f.write(b"lost")
+        raise ValueError("dummy")
+    assert client.workspace.calls_of("upload") == []
+    assert "/t/lost.bin" not in client.workspace.data

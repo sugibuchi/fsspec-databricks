@@ -35,6 +35,10 @@ from ._contrib.strategy.files.adaptive import (
     AdaptiveWritableFile,
 )
 from ._contrib.strategy.files.fsspec_async import AsyncFileAdapter
+from ._contrib.strategy.files.fsspec_transaction import (
+    AdaptiveWritableTransaction,
+    TransactionFile,
+)
 from .base import DatabricksTreeFileSystem, root_dir_info
 from .error import (
     access_error,
@@ -558,7 +562,12 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
         cache_options=None,
         **kwargs,
     ):
-        return sync(self.loop, self._open_file, path, mode)
+        f = sync(self.loop, self._open_file, path, mode)
+        if autocommit or "r" in mode:
+            return f
+        # In a transaction, the upload is completed on commit, and aborted on discard. The last part is held too:
+        # a resumable upload completes with it, and the server chooses that API only once the upload starts.
+        return TransactionFile(AdaptiveWritableTransaction(f, hold_last_part=True))
 
     def open(self, path, mode="rb", **kwargs):
         """Open a file in a Unity Catalog Volume.

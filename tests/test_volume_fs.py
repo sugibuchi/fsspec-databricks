@@ -696,7 +696,8 @@ def test_volume_fs_cp_file(
         dbfs_url(f"{test_dir}/2_directory_copied"),
     )
 
-    assert status(client, f"{test_dir}/2_directory_copied") is None
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/2_directory_copied")
 
     # Test copying not existent path
     with pytest.raises(FileNotFoundError):
@@ -929,13 +930,15 @@ def test_volume_fs_makedirs(
     test_dir = init_test_dir(client, volume_test_root, fs_class)
 
     fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"))
-    assert status(client, f"{test_dir}/parent_dir/dir") is None
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/parent_dir/dir")
 
     with pytest.raises(FileExistsError):
         fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"), exist_ok=False)
 
     fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"), exist_ok=True)
-    assert status(client, f"{test_dir}/parent_dir/dir") is None
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/parent_dir/dir")
 
 
 @pytest.mark.parametrize(
@@ -1102,3 +1105,40 @@ def test_volume_fs_open_w_abort(
                     with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
                         f.write(randbytes(10 * 1024 * 1024))
         assert _abort_multipart_upload.called
+
+
+@pytest.mark.parametrize("fs_class", [VolumeFileSystem, DatabricksFileSystem])
+def test_volume_fs_transaction(
+    client: WorkspaceClient,
+    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
+    volume_test_root: str,
+):
+    test_dir = init_test_dir(client, volume_test_root, fs_class)
+    fs = fs_class(client=client)
+    small_data = randbytes(512 * 1023)
+    large_data = randbytes(10 * 1024 * 1023)
+
+    # Commit completes the uploads, a small file's and a multipart one's, none before.
+    with fs.transaction:
+        for name, data in [("1_small.bin", small_data), ("2_large.bin", large_data)]:
+            with fs.open(dbfs_url(f"{test_dir}/{name}"), mode="wb") as f:
+                f.write(data)
+            with pytest.raises(NotFound):
+                client.files.get_metadata(f"{test_dir}/{name}")
+    assert bytes_sig(download(client, f"{test_dir}/1_small.bin")) == bytes_sig(
+        small_data
+    )
+    assert bytes_sig(download(client, f"{test_dir}/2_large.bin")) == bytes_sig(
+        large_data
+    )
+
+    # An exception aborts the uploads, leaving nothing.
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        for name, data in [("3_small.bin", small_data), ("4_large.bin", large_data)]:
+            with fs.open(dbfs_url(f"{test_dir}/{name}"), mode="wb") as f:
+                f.write(data)
+        raise ValueError("dummy")
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/3_small.bin")
+    with pytest.raises(NotFound):
+        client.files.get_metadata(f"{test_dir}/4_large.bin")

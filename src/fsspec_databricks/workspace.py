@@ -16,6 +16,7 @@ from databricks.sdk.service.workspace import (
 from fsspec_alt_strategies_common.profile import StorageProfile
 
 from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
+from ._contrib.strategy.files.fsspec_transaction import FileTransaction, TransactionFile
 from .base import DatabricksTreeFileSystem, root_dir_info
 from .error import (
     error_mapping,
@@ -331,7 +332,10 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         language: Language | str | None = None,
         **kwargs,
     ):
-        return self._open_file(path, mode, notebook_format, language)
+        f = self._open_file(path, mode, notebook_format, language)
+        if autocommit or "r" in mode:
+            return f
+        return TransactionFile(_WorkspaceTransaction(f))
 
     def open(
         self,
@@ -511,6 +515,27 @@ class WorkspaceFile(io.BytesIO):
         # A file the garbage collector finds open was abandoned: nothing is uploaded.
         self._discarded = True
         super().__del__()
+
+
+class _WorkspaceTransaction(FileTransaction):
+    """A `WorkspaceFile` in a transaction: its buffer is uploaded on commit, as closing does, or dropped on discard."""
+
+    def __init__(self, file: WorkspaceFile):
+        super().__init__(file.path)
+        self.file = file
+
+    def start_staging(self) -> WorkspaceFile:
+        return self.file
+
+    def end_staging(self) -> None:
+        pass  # The buffer stays open, for commit to upload.
+
+    def commit(self) -> None:
+        self.file.close()
+
+    def discard(self) -> None:
+        self.file.discard()
+        self.file.close()
 
 
 def _check_size(size: int, max_size: int, path: str) -> None:

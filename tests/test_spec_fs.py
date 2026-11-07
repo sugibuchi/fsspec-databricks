@@ -188,6 +188,31 @@ def test_dbx_fs_copies_between_backends(routed_fs):
     assert fs.cat_file("/Workspace/t/a.bin") == b"a"
 
 
+def test_dbx_fs_transaction_spans_backends(routed_fs):
+    """The router's transaction commits, or discards, the files opened on every backend."""
+    fs = routed_fs
+    with fs.transaction:
+        fs.pipe_file("/Workspace/t/new.bin", b"w")
+        with fs.open("/t/new.bin", "wb") as f:
+            f.write(b"d")
+        assert not fs.exists("/Workspace/t/new.bin")
+        assert not fs.exists("/t/new.bin")
+    assert fs.cat_file("/Workspace/t/new.bin") == b"w"
+    assert fs.cat_file("/t/new.bin") == b"d"
+    # The backends' own transactions hold nothing.
+    assert not fs._workspace_fs.transaction.files
+    assert not fs._legacy_fs.transaction.files
+
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open("/Workspace/t/lost.bin", "wb") as f:
+            f.write(b"w")
+        with fs.open("/t/lost.bin", "wb") as f:
+            f.write(b"d")
+        raise ValueError("dummy")
+    assert not fs.exists("/Workspace/t/lost.bin")
+    assert fs.ls("/t", detail=False) == ["/t/new.bin"]
+
+
 def test_dbx_fs_init(client: WorkspaceClient):
     with DatabricksFileSystem() as fs:
         assert fs.use_local_fs_in_workspace

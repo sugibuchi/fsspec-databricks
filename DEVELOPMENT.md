@@ -501,6 +501,21 @@ Every backend's files are the library's file objects, or the SDK's for DBFS. The
 their synchronous methods are called from the event loop. Code on the loop uses `open_async()` and awaits the file's
 methods.
 
+### Transactions
+
+fsspec opens a file with `autocommit=False` inside `with fs.transaction:`. Each backend's `_open` then returns the
+library's `TransactionFile`, with a `FileTransaction` of `files/fsspec_transaction.py`:
+
+- Volumes use `AdaptiveWritableTransaction`, with `hold_last_part=True`. A resumable upload completes with its last
+  part, and the server chooses that API only once the upload starts.
+- Workspace files use `_WorkspaceTransaction`, in `workspace.py`. Commit closes the `WorkspaceFile`, which uploads it,
+  and discard drops it.
+- DBFS uses `TempPathTransaction`. Commit deletes the destination, then moves the temporary file, as the API's move
+  refuses an existing destination.
+
+`DatabricksFileSystem.open` passes `autocommit` to the backend. It then moves the file from the backend's own
+transaction to its own, which commits or discards the files of every backend.
+
 ### Local file system
 
 `DatabricksLocalFileSystem`, in `local.py`, is fsspec's `LocalFileSystem` with the `dbfs` protocol. It gets local

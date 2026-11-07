@@ -1,3 +1,4 @@
+import contextlib
 import functools
 import logging
 from io import UnsupportedOperation
@@ -9,6 +10,10 @@ from fsspec.asyn import sync
 from fsspec_alt_strategies_common.profile import StorageProfile
 
 from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
+from ._contrib.strategy.files.fsspec_transaction import (
+    TempPathTransaction,
+    TransactionFile,
+)
 from .base import DatabricksTreeFileSystem
 from .error import (
     error_mapping,
@@ -211,7 +216,27 @@ class DBFS(DatabricksTreeFileSystem):
         **kwargs,
     ):
         sync(self.loop, self._check_open, path, mode)
-        return self._open_handle(path, mode)
+        if autocommit or "r" in mode:
+            return self._open_handle(path, mode)
+        # In a transaction, the SDK's file writes as it goes: to a temporary path, moved into place on commit.
+        transaction = TempPathTransaction(
+            path,
+            lambda p: self._open_handle(p, "wb"),
+            functools.partial(self._commit_move, exclusive="x" in mode),
+            lambda p: sync(self.loop, self._delete, p, False),
+        )
+        return TransactionFile(transaction)
+
+    def _commit_move(self, src: str, dst: str, exclusive: bool) -> None:
+        """Move a transaction's temporary file into place.
+
+        The API's move refuses an existing destination. So the file there is deleted first, unless exclusive: two
+        requests, not atomic.
+        """
+        if not exclusive:
+            with contextlib.suppress(FileNotFoundError):
+                sync(self.loop, self._delete, dst, False)
+        sync(self.loop, self._mv_file, src, dst)
 
     def open(self, path, mode="rb", **kwargs):
         """Open a file in the legacy DBFS.

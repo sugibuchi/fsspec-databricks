@@ -14,6 +14,10 @@ from aiohttp import (
     ClientResponse,
 )
 
+from fsspec_databricks._contrib.strategy.files.fsspec_transaction import (
+    AdaptiveWritableTransaction,
+    TransactionFile,
+)
 from fsspec_databricks.volume import (
     VolumeFileSystem,
     VolumeReadableFile,
@@ -408,3 +412,39 @@ def test_volume_file_abort_without_session(
         asyncio.run_coroutine_threadsafe(
             f._abort_multipart_upload(), client_event_loop
         ).result()
+
+
+@pytest.mark.parametrize("size", [1000, 20 * 1000 * 1000])
+@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
+@pytest.mark.parametrize("commit", [True, False])
+def test_volume_file_transaction(
+    dummy_api,
+    dummy_api_context,
+    client_event_loop,
+    aiohttp_session,
+    upload_mode,
+    size,
+    commit,
+):
+    """In a transaction, nothing is visible before commit, and discard leaves nothing."""
+    dummy_api_context.upload_mode = upload_mode
+    data = randbytes(size)
+    f = TransactionFile(
+        AdaptiveWritableTransaction(
+            _writer(aiohttp_session, dummy_api, client_event_loop), hold_last_part=True
+        )
+    )
+    with f:
+        for i in range(0, len(data), 1000 * 1000):
+            f.write(data[i : i + 1000 * 1000])
+    assert path not in dummy_api_context.files
+
+    if commit:
+        f.commit()
+        assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
+    else:
+        f.discard()
+        assert path not in dummy_api_context.files
+        assert dummy_api_context.multipart_upload_sessions == {}
+        if upload_mode == "multipart":
+            assert dummy_api_context.resumable_upload_sessions == {}

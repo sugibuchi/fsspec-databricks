@@ -110,6 +110,36 @@ df.to_parquet(
 )
 ```
 
+### Transactions
+
+Files written in `with fs.transaction:` become visible when the block ends. If the block raises, they are discarded:
+
+```python
+with fs.transaction:
+    with fs.open("dbfs:/Volumes/my_catalog/my_schema/my_volume/data/a.bin", "wb") as f:
+        f.write(b"a")
+    with fs.open("dbfs:/Workspace/Users/alice@example.com/b.bin", "wb") as f:
+        f.write(b"b")
+```
+
+Transactions work on `DatabricksFileSystem`, across backends, and on each backend's own file system. Each backend
+keeps a file invisible in its own way:
+
+| Backend         | Before commit                                    | On commit                    | On discard              |
+|-----------------|--------------------------------------------------|------------------------------|-------------------------|
+| Volumes         | The parts are uploaded, but the last is held     | The upload is completed      | The upload is aborted   |
+| Workspace files | The file is held in memory                       | The file is uploaded         | Nothing is uploaded     |
+| Legacy DBFS     | The file is written to a hidden temporary path   | The file is moved into place | The file is deleted     |
+
+Limits:
+
+- The files are committed one after another. A transaction is not atomic across files or backends.
+- Only files written with `open` join the transaction. Copies, moves and deletes take effect at once.
+- On legacy DBFS, other clients may see the temporary file. Commit deletes the file it replaces, then moves the new one:
+  two requests.
+- Exclusive creation, mode `"x"`, is checked on commit on legacy DBFS, and when opening on the other backends.
+- If the process dies, Volume parts stay until the storage expires them, and DBFS temporary files stay.
+
 ### POSIX paths
 
 Paths without `dbfs:` work the same:
