@@ -24,44 +24,20 @@ from .path import (
 from .volume import VolumeFileSystem, volumes_root_info
 from .workspace import NotebookFormat, WorkspaceFileSystem, workspace_root_info
 
+_cross_fs_copy_chunk_size = 8 * 1024 * 1024
+"""The bytes copied at a time between file systems, e.g. from Workspace to Volume."""
+
 
 class DatabricksFileSystem(AbstractDatabricksFileSystem):
     """File system for accessing Databricks Workspace files, Unity Catalog Volumes, and the legacy DBFS."""
 
     protocol = scheme
 
-    volume_fs_max_read_concurrency: int = 24
-    """The maximum number of concurrent file read operations on a Unity Catalog Volume file."""
-
-    volume_fs_min_read_block_size: int = 1024 * 1024
-    """The minimum data size to read for each read operation on a Unity Catalog Volume file."""
-
-    volume_fs_max_read_block_size: int = 4 * 1024 * 1024
-    """The maximum data size to read for each read operation on a Unity Catalog Volume file."""
-
-    volume_fs_max_write_concurrency: int = 24
-    """The maximum number of concurrent file write operations on a Unity Catalog Volume file."""
-
-    volume_fs_min_write_block_size: int = 5 * 1024 * 1024
-    """The minimum data size to write for each write operation on a Unity Catalog Volume file."""
-
-    volume_fs_max_write_block_size: int = 16 * 1024 * 1024
-    """The maximum data size to write for each write operation on a Unity Catalog Volume file."""
-
-    volume_min_multipart_upload_size: int = 5 * 1024 * 1024
-    """The minimum file size to use multipart upload for uploading files to Unity Catalog Volume."""
-
-    volume_fs_connection_pool_size: int = 100
-    """The maximum number of connections in the aiohttp connection pool for the Unity Catalog Volume file system."""
-
     use_local_fs_in_workspace: bool = True
     """Whether to access files from the local file system rather than the remote Databricks API when running within a Databricks workspace. Defaults to True."""
 
     legacy_dbfs_local_root: str = "/dbfs"
     """The local path where Databricks mounts the legacy DBFS when running within a Databricks workspace."""
-
-    cross_fs_copy_block_size: int = 1024 * 1024
-    """The block size to use when copying files between different file systems (e.g. from Workspace to Volume). """
 
     def __init__(
         self,
@@ -100,14 +76,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         # Additional parameters
         client: WorkspaceClient | None = None,
         ## Options for Unity Catalog Volume file system
-        volume_fs_max_read_concurrency: int | None = None,
-        volume_fs_min_read_block_size: int | None = None,
-        volume_fs_max_read_block_size: int | None = None,
-        volume_fs_max_write_concurrency: int | None = None,
-        volume_fs_min_write_block_size: int | None = None,
-        volume_fs_max_write_block_size: int | None = None,
-        volume_min_multipart_upload_size: int | None = None,
-        volume_fs_connection_pool_size: int | None = None,
+        operation_concurrency: int | None = None,
+        io_concurrency: int | None = None,
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
         ## Logging option
@@ -166,22 +136,10 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             An optional pre-configured Databricks SDK `Config` object. If provided, it will be used for authentication.
         client
             An optional pre-configured Databricks SDK `WorkspaceClient` object. If provided, it will be used for accessing the Databricks Workspace API.
-        volume_fs_max_read_concurrency : int, optional
-            The maximum number of concurrent file read operations on a Unity Catalog Volume file.
-        volume_fs_min_read_block_size : int, optional
-            The minimum data size to read for each read operation on a Unity Catalog Volume file.
-        volume_fs_max_read_block_size : int, optional
-            The maximum data size to read for each read operation on a Unity Catalog Volume file.
-        volume_fs_max_write_concurrency : int, optional
-            The maximum number of concurrent file write operations on a Unity Catalog Volume file.
-        volume_fs_min_write_block_size : int, optional
-            The minimum data size to write for each write operation on a Unity Catalog Volume file.
-        volume_fs_max_write_block_size : int, optional
-            The maximum data size to write for each write operation on a Unity Catalog Volume file.
-        volume_min_multipart_upload_size:
-            The minimum file size to use multipart upload for uploading files to Unity Catalog Volume.
-        volume_fs_connection_pool_size : int, optional
-            The maximum number of connections in the aiohttp connection pool for the Unity Catalog Volume file system.
+        operation_concurrency : int, optional
+            The maximum number of concurrent API requests of a recursive operation on Unity Catalog Volumes.
+        io_concurrency : int, optional
+            The maximum number of concurrent range reads and part uploads of Unity Catalog Volume files.
         use_local_fs_in_workspace
             Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
         verbose_debug_log : bool, optional
@@ -236,23 +194,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
         self._storage_options = storage_options
 
-        if volume_fs_max_read_concurrency is not None:
-            self.volume_fs_max_read_concurrency = volume_fs_max_read_concurrency
-        if volume_fs_min_read_block_size is not None:
-            self.volume_fs_min_read_block_size = volume_fs_min_read_block_size
-        if volume_fs_max_read_block_size is not None:
-            self.volume_fs_max_read_block_size = volume_fs_max_read_block_size
-
-        if volume_fs_max_write_concurrency is not None:
-            self.volume_fs_max_write_concurrency = volume_fs_max_write_concurrency
-        if volume_fs_min_write_block_size is not None:
-            self.volume_fs_min_write_block_size = volume_fs_min_write_block_size
-        if volume_fs_max_write_block_size is not None:
-            self.volume_fs_max_write_block_size = volume_fs_max_write_block_size
-        if volume_min_multipart_upload_size is not None:
-            self.volume_min_multipart_upload_size = volume_min_multipart_upload_size
-        if volume_fs_connection_pool_size is not None:
-            self.volume_fs_connection_pool_size = volume_fs_connection_pool_size
+        self._operation_concurrency = operation_concurrency
+        self._io_concurrency = io_concurrency
         if use_local_fs_in_workspace is not None:
             self.use_local_fs_in_workspace = use_local_fs_in_workspace
 
@@ -303,14 +246,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             self.__volume_fs = VolumeFileSystem(
                 client=self.client,
                 config=self.config,
-                max_read_concurrency=self.volume_fs_max_read_concurrency,
-                min_read_block_size=self.volume_fs_min_read_block_size,
-                max_read_block_size=self.volume_fs_max_read_block_size,
-                max_write_concurrency=self.volume_fs_max_write_concurrency,
-                min_write_block_size=self.volume_fs_min_write_block_size,
-                max_write_block_size=self.volume_fs_max_write_block_size,
-                min_multipart_upload_size=self.volume_min_multipart_upload_size,
-                connection_pool_size=self.volume_fs_connection_pool_size,
+                operation_concurrency=self._operation_concurrency,
+                io_concurrency=self._io_concurrency,
                 verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )
@@ -485,7 +422,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             dst_fs, dst_path = self._resolve(path2)
             with src_fs.open(src_path, "rb") as src:
                 with dst_fs.open(dst_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst, length=self.cross_fs_copy_block_size)
+                    shutil.copyfileobj(src, dst, length=_cross_fs_copy_chunk_size)
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
         if fs_type(path1) == fs_type(path2):
@@ -509,7 +446,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     def _rm(self, path):
         fs, p = self._resolve(path)
-        fs._rm(p)
+        fs.rm_file(p)
 
     def rm(self, path, recursive=False, maxdepth=None):
         fs, p = self._resolve(path)
@@ -534,10 +471,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         mode="rb",
         notebook_format: NotebookFormat | None = None,
         language: Language | str | None = None,
-        max_concurrency: int | None = None,
-        min_block_size: int | None = None,
-        max_block_size: int | None = None,
-        block_size: int | None = None,
         compression: str | None = None,
         encoding: str | None = None,
         errors: str | None = None,
@@ -556,14 +489,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             The format to use when reading or writing a notebook. Applicable only to Workspace notebooks.
         language : Language, str, optional
             Language of the notebook to read or write. Applicable only to Workspace files.
-        max_concurrency : int, optional
-            The maximum number of concurrent file operations. Applicable only to volume files.
-        min_block_size : int, optional
-            The minimum data size to read or write for each file operation. Applicable only to volume files.
-        max_block_size : int, optional
-            The maximum data size to read or write for each file operation. Applicable only to volume files.
-        block_size : int, optional
-            The data size to read or write for each file operation.
         compression : str, optional
             If given, open file using compression codec. Can either be a compression
             name (a key in ``fsspec.compression.compr``) or "infer" to guess the
@@ -586,10 +511,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             mode=mode,
             notebook_format=notebook_format,
             language=language,
-            max_concurrency=max_concurrency,
-            max_block_size=max_block_size,
-            min_block_size=min_block_size,
-            block_size=block_size,
             compression=compression,
             encoding=encoding,
             errors=errors,

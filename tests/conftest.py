@@ -14,9 +14,11 @@ from aiohttp import ClientSession
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from dotenv import load_dotenv
+from fsspec.asyn import get_loop, sync
 
 from fsspec_databricks.base import AbstractDatabricksFileSystem
 from fsspec_databricks.path import parse_volume_path
+from fsspec_databricks.volume import VolumeFileSystem
 
 from .dummy_api import dummy_context, serve_app
 
@@ -28,6 +30,7 @@ def pytest_configure(config):
     logging.getLogger("databricks.sdk").setLevel(logging.INFO)
     logging.getLogger("urllib3").setLevel(logging.INFO)
     AbstractDatabricksFileSystem.cachable = False
+    VolumeFileSystem.cachable = False
 
 
 def _event_loop(thread_name: str):
@@ -76,9 +79,10 @@ def server_event_loop():
     yield from _event_loop("server-event-loop")
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def client_event_loop():
-    yield from _event_loop("client-event-loop")
+    """fsspec's event loop, which the file systems and their files run on."""
+    return get_loop()
 
 
 @pytest.fixture(scope="session")
@@ -88,16 +92,16 @@ def dummy_api(server_event_loop):
 
 @pytest.fixture(scope="function")
 def aiohttp_session(dummy_api, client_event_loop):
-    """A function-scoped aiohttp ClientSession connected to the dummy API server."""
+    """A function-scoped aiohttp ClientSession on fsspec's loop, for the dummy API server."""
 
     async def _create():
         return ClientSession()
 
-    session = asyncio.run_coroutine_threadsafe(_create(), client_event_loop).result()
+    session = sync(client_event_loop, _create)
     try:
         yield session
     finally:
-        asyncio.run_coroutine_threadsafe(session.close(), client_event_loop).result()
+        sync(client_event_loop, session.close)
 
 
 @pytest.fixture(scope="function")

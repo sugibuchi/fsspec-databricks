@@ -1,7 +1,8 @@
+import asyncio
 import socket
 from io import BytesIO
 from random import randbytes
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pyarrow as pa
@@ -21,11 +22,36 @@ from fsspec_databricks.volume import (
 
 from .utils import bytes_sig
 
+path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+
 
 async def _dummy_auth(
     request: ClientRequest, handler: ClientHandlerType
 ) -> ClientResponse:
     return await handler(request)
+
+
+def _reader(session, base_url, loop, data_size, **kwargs):
+    return VolumeReadableFile(
+        path,
+        loop,
+        data_size,
+        session=session,
+        base_url=base_url,
+        auth=_dummy_auth,
+        **kwargs,
+    )
+
+
+def _writer(session, base_url, loop, **kwargs):
+    return VolumeWritableFile(
+        path,
+        loop,
+        session=session,
+        base_url=base_url,
+        auth=_dummy_auth,
+        **kwargs,
+    )
 
 
 def test_volume_fs_storage_proxy_probe_timeout():
@@ -65,18 +91,9 @@ def test_volume_file_read(
     dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(20 * 1000 * 1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
-
     dummy_api_context.files[path] = data
 
-    with VolumeReadableFile(
-        path=path,
-        session=aiohttp_session,
-        base_url=dummy_api,
-        auth=_dummy_auth,
-        loop=client_event_loop,
-        size=len(data),
-    ) as f:
+    with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
         actual = f.read()
 
     assert bytes_sig(data) == bytes_sig(actual)
@@ -84,13 +101,11 @@ def test_volume_file_read(
     dummy_api_context.check_signed_url = True
 
     with pytest.raises(IOError):
-        with VolumeReadableFile(
-            path=path,
-            session=aiohttp_session,
-            base_url=dummy_api,
-            auth=_dummy_auth,
-            loop=client_event_loop,
-            size=len(data),
+        with _reader(
+            aiohttp_session,
+            dummy_api,
+            client_event_loop,
+            len(data),
             prefer_presigned_url=False,
         ) as f:
             _ = f.read()
@@ -101,20 +116,11 @@ def test_volume_file_read_retries(
     dummy_api_context, dummy_api, client_event_loop, aiohttp_session, status
 ):
     data = randbytes(1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
-
     dummy_api_context.files[path] = data
     dummy_api_context.get_file_errors.extend([status, status])
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
-        with VolumeReadableFile(
-            path=path,
-            session=aiohttp_session,
-            base_url=dummy_api,
-            auth=_dummy_auth,
-            loop=client_event_loop,
-            size=len(data),
-        ) as f:
+        with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
             assert f.read() == data
 
     assert not dummy_api_context.get_file_errors
@@ -124,20 +130,16 @@ def test_volume_file_read_retries_exhausted(
     dummy_api_context, dummy_api, client_event_loop, aiohttp_session
 ):
     data = randbytes(1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
-
     dummy_api_context.files[path] = data
     dummy_api_context.get_file_errors.extend([500] * 10)
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
-        with VolumeReadableFile(
-            path=path,
-            session=aiohttp_session,
-            base_url=dummy_api,
-            auth=_dummy_auth,
-            loop=client_event_loop,
-            size=len(data),
-            max_concurrency=1,
+        with _reader(
+            aiohttp_session,
+            dummy_api,
+            client_event_loop,
+            len(data),
+            concurrency_limit=asyncio.Semaphore(1),
         ) as f:
             with pytest.raises(OSError):
                 f.read()
@@ -152,20 +154,16 @@ def test_volume_file_read_no_retry(
     dummy_api_context, dummy_api, client_event_loop, aiohttp_session, status
 ):
     data = randbytes(1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
-
     dummy_api_context.files[path] = data
     dummy_api_context.get_file_errors.extend([status] * 2)
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
-        with VolumeReadableFile(
-            path=path,
-            session=aiohttp_session,
-            base_url=dummy_api,
-            auth=_dummy_auth,
-            loop=client_event_loop,
-            size=len(data),
-            max_concurrency=1,
+        with _reader(
+            aiohttp_session,
+            dummy_api,
+            client_event_loop,
+            len(data),
+            concurrency_limit=asyncio.Semaphore(1),
         ) as f:
             with pytest.raises(OSError):
                 f.read()
@@ -181,17 +179,10 @@ def test_volume_file_read_parquet(
     dummy_table_parquet,
     aiohttp_session,
 ):
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file.parquet"
-
     dummy_api_context.files[path] = dummy_table_parquet
 
-    with VolumeReadableFile(
-        path=path,
-        session=aiohttp_session,
-        base_url=dummy_api,
-        auth=_dummy_auth,
-        loop=client_event_loop,
-        size=len(dummy_table_parquet),
+    with _reader(
+        aiohttp_session, dummy_api, client_event_loop, len(dummy_table_parquet)
     ) as f:
         df = pd.read_parquet(f)
 
@@ -203,116 +194,65 @@ def test_volume_file_read_parquet(
 
 
 def test_volume_file_oneshot_write(
-    dummy_api,
-    dummy_api_context,
-    client_event_loop,
-    aiohttp_session,
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(1000 * 1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
 
-    with VolumeWritableFile(
-        path=path,
-        session=aiohttp_session,
-        base_url=dummy_api,
-        auth=_dummy_auth,
-        loop=client_event_loop,
-    ) as f:
+    with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         f.write(data)
 
-    actual = dummy_api_context.files[path]
-    assert bytes_sig(data) == bytes_sig(actual)
+    assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
 
 
-def test_volume_file_multipart_write(
-    dummy_api,
-    dummy_api_context,
-    client_event_loop,
-    aiohttp_session,
+@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
+def test_volume_file_parts_write(
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session, upload_mode
 ):
     data = randbytes(20 * 1000 * 1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
+    dummy_api_context.upload_mode = upload_mode
 
-    with VolumeWritableFile(
-        path=path,
-        session=aiohttp_session,
-        base_url=dummy_api,
-        auth=_dummy_auth,
-        loop=client_event_loop,
-    ) as f:
-        f.write(data)
+    with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+        # Several writes, so that the parts grow
+        for i in range(0, len(data), 1000 * 1000):
+            f.write(data[i : i + 1000 * 1000])
 
-    actual = dummy_api_context.files[path]
-    assert bytes_sig(data) == bytes_sig(actual)
+    assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
 
     dummy_api_context.check_signed_url = True
     dummy_api_context.files.clear()
 
     with pytest.raises(IOError):
-        with VolumeWritableFile(
-            path=path,
-            session=aiohttp_session,
-            base_url=dummy_api,
-            auth=_dummy_auth,
-            loop=client_event_loop,
-            use_presigned_url=False,
+        with _writer(
+            aiohttp_session, dummy_api, client_event_loop, use_presigned_url=False
         ) as f:
             f.write(data)
 
 
-def test_volume_file_resumable_write(
-    dummy_api,
-    dummy_api_context,
-    client_event_loop,
-    aiohttp_session,
+@pytest.mark.parametrize("name", ["min_block_size", "max_block_size"])
+def test_volume_file_part_granularity(
+    dummy_api, client_event_loop, aiohttp_session, name
 ):
-    data = randbytes(20 * 1000 * 1000)
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
-
-    dummy_api_context.upload_mode = "resumable"
-
-    with VolumeWritableFile(
-        path=path,
-        session=aiohttp_session,
-        base_url=dummy_api,
-        auth=_dummy_auth,
-        loop=client_event_loop,
-    ) as f:
-        f.write(data)
-
-    actual = dummy_api_context.files[path]
-    assert bytes_sig(data) == bytes_sig(actual)
-
-    dummy_api_context.check_signed_url = True
-    dummy_api_context.files.clear()
-
-    with pytest.raises(IOError):
-        with VolumeWritableFile(
-            path=path,
-            session=aiohttp_session,
-            base_url=dummy_api,
-            auth=_dummy_auth,
-            loop=client_event_loop,
-            use_presigned_url=False,
-        ) as f:
-            f.write(data)
+    with pytest.raises(ValueError, match="multiple of"):
+        _writer(
+            aiohttp_session, dummy_api, client_event_loop, **{name: 10 * 1024 * 1023}
+        )
 
 
 @pytest.mark.parametrize("file_class", [VolumeReadableFile, VolumeWritableFile])
-def test_volume_file_invalid_max_concurrency(
+def test_volume_file_invalid_spread(
     dummy_api, client_event_loop, aiohttp_session, file_class
 ):
-    kwargs = {"size": 1} if file_class is VolumeReadableFile else {}
+    args = (1,) if file_class is VolumeReadableFile else ()
 
     with pytest.raises(ValueError):
         file_class(
-            path="/Volumes/catalog_a/schema/b/volume_c/path/to/file",
+            path,
+            client_event_loop,
+            *args,
             session=aiohttp_session,
             base_url=dummy_api,
             auth=_dummy_auth,
-            loop=client_event_loop,
-            max_concurrency=0,
-            **kwargs,
+            spread=0,
         )
 
 
@@ -324,24 +264,17 @@ def test_volume_file_multipart_write_abort(
     aiohttp_session,
     abort_supported,
 ):
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file"
     dummy_api_context.abort_supported = abort_supported
 
     with patch.object(
-        VolumeWritableFile, "_upload_part", side_effect=RuntimeError("Dummy")
+        VolumeWritableFile, "_upload_part", AsyncMock(side_effect=RuntimeError("Dummy"))
     ):
         with pytest.raises(OSError) as exc_info:
-            with VolumeWritableFile(
-                path=path,
-                session=aiohttp_session,
-                base_url=dummy_api,
-                auth=_dummy_auth,
-                loop=client_event_loop,
-            ) as f:
+            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
                 f.write(randbytes(20 * 1000 * 1000))
 
     # The upload's failure is raised, not the abort's
-    assert "Multipart upload failed" in str(exc_info.value)
+    assert "Failed to upload a part" in str(exc_info.value)
     assert path not in dummy_api_context.files
 
     if abort_supported:
@@ -349,7 +282,7 @@ def test_volume_file_multipart_write_abort(
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_abstract_async_readable_file_write_parquet(
+def test_volume_file_write_parquet(
     client_event_loop,
     dummy_api,
     dummy_api_context,
@@ -357,16 +290,9 @@ def test_abstract_async_readable_file_write_parquet(
     upload_mode,
     aiohttp_session,
 ):
-    path = "/Volumes/catalog_a/schema/b/volume_c/path/to/file.parquet"
     dummy_api_context.upload_mode = upload_mode
 
-    with VolumeWritableFile(
-        path=path,
-        session=aiohttp_session,
-        base_url=dummy_api,
-        auth=_dummy_auth,
-        loop=client_event_loop,
-    ) as f:
+    with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         pq.write_table(pa.Table.from_pylist(dummy_table), f)
 
     df = pd.read_parquet(BytesIO(dummy_api_context.files[path]))

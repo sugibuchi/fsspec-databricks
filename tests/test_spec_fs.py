@@ -120,58 +120,15 @@ def test_dbx_fs_local_root(tmp_path):
 
 def test_dbx_fs_init(client: WorkspaceClient):
     with DatabricksFileSystem() as fs:
-        assert (
-            fs.volume_fs_max_read_concurrency
-            == DatabricksFileSystem.volume_fs_max_read_concurrency
-        )
-        assert (
-            fs.volume_fs_min_read_block_size
-            == DatabricksFileSystem.volume_fs_min_read_block_size
-        )
-        assert (
-            fs.volume_fs_max_read_block_size
-            == DatabricksFileSystem.volume_fs_max_read_block_size
-        )
-
-        assert (
-            fs.volume_fs_max_write_concurrency
-            == DatabricksFileSystem.volume_fs_max_write_concurrency
-        )
-        assert (
-            fs.volume_fs_min_write_block_size
-            == DatabricksFileSystem.volume_fs_min_write_block_size
-        )
-        assert (
-            fs.volume_fs_max_write_block_size
-            == DatabricksFileSystem.volume_fs_max_write_block_size
-        )
-
-        assert (
-            fs.volume_min_multipart_upload_size
-            == DatabricksFileSystem.volume_min_multipart_upload_size
-        )
-
         assert fs.use_local_fs_in_workspace
 
     with DatabricksFileSystem(
-        volume_fs_max_read_concurrency=1,
-        volume_fs_min_read_block_size=2 * 1024 * 1024,
-        volume_fs_max_read_block_size=3 * 1024 * 1024,
-        volume_fs_max_write_concurrency=4,
-        volume_fs_min_write_block_size=5 * 1024 * 1024,
-        volume_fs_max_write_block_size=6 * 1024 * 1024,
-        volume_min_multipart_upload_size=7 * 1024 * 1024,
+        operation_concurrency=3,
+        io_concurrency=4,
         use_local_fs_in_workspace=False,
     ) as fs:
-        assert fs.volume_fs_max_read_concurrency == 1
-        assert fs.volume_fs_min_read_block_size == 2 * 1024 * 1024
-        assert fs.volume_fs_max_read_block_size == 3 * 1024 * 1024
-
-        assert fs.volume_fs_max_write_concurrency == 4
-        assert fs.volume_fs_min_write_block_size == 5 * 1024 * 1024
-        assert fs.volume_fs_max_write_block_size == 6 * 1024 * 1024
-
-        assert fs.volume_min_multipart_upload_size == 7 * 1024 * 1024
+        assert fs._volume_fs.operation_concurrency == 3
+        assert fs._volume_fs.io_concurrency == 4
 
         assert not fs.use_local_fs_in_workspace
 

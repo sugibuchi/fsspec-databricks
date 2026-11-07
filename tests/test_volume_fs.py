@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import errno
 import inspect
@@ -7,14 +6,16 @@ import pickle
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from random import randbytes
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import BadRequest, NotFound, ResourceDoesNotExist
 from databricks.sdk.service.files import DirectoryEntry, GetMetadataResponse
+from fsspec.asyn import sync
 
 from fsspec_databricks import DatabricksFileSystem
+from fsspec_databricks._contrib.strategy.files.fsspec_async import SyncFileAdapter
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import (
     VolumeFileSystem,
@@ -95,76 +96,49 @@ def download(client: WorkspaceClient, path: str) -> bytes:
 
 def test_volume_fs_init():
     with VolumeFileSystem() as fs:
-        assert fs.max_read_concurrency == VolumeFileSystem.max_write_concurrency
-        assert fs.min_read_block_size == VolumeFileSystem.min_read_block_size
-        assert fs.max_read_block_size == VolumeFileSystem.max_read_block_size
+        assert fs.operation_concurrency == VolumeFileSystem.operation_concurrency
+        assert fs.io_concurrency == VolumeFileSystem.io_concurrency
 
-        assert fs.max_write_concurrency == VolumeFileSystem.max_write_concurrency
-        assert fs.min_write_block_size == VolumeFileSystem.min_write_block_size
-        assert fs.max_write_block_size == VolumeFileSystem.max_write_block_size
-
-        assert (
-            fs.min_multipart_upload_size == VolumeFileSystem.min_multipart_upload_size
-        )
-
-    with VolumeFileSystem(
-        max_read_concurrency=1,
-        min_read_block_size=2 * 1024 * 1024,
-        max_read_block_size=3 * 1024 * 1024,
-        max_write_concurrency=4,
-        min_write_block_size=5 * 1024 * 1024,
-        max_write_block_size=6 * 1024 * 1024,
-        min_multipart_upload_size=7 * 1024 * 1024,
-    ) as fs:
-        assert fs.max_read_concurrency == 1
-        assert fs.min_read_block_size == 2 * 1024 * 1024
-        assert fs.max_read_block_size == 3 * 1024 * 1024
-
-        assert fs.max_write_concurrency == 4
-        assert fs.min_write_block_size == 5 * 1024 * 1024
-        assert fs.max_write_block_size == 6 * 1024 * 1024
-
-        assert fs.min_multipart_upload_size == 7 * 1024 * 1024
+    with VolumeFileSystem(operation_concurrency=3, io_concurrency=4) as fs:
+        assert fs.operation_concurrency == 3
+        assert fs.io_concurrency == 4
 
 
 def test_volume_fs_close():
     fs = VolumeFileSystem(verbose_debug_log=True)
-    loop = fs._loop
+    session = sync(fs.loop, fs._get_session)
 
     fs.close()
 
     assert fs.closed
-    assert loop.is_closed()
+    assert session.closed
 
     with pytest.raises(RuntimeError):
-        _ = fs._loop
+        _ = fs.client
 
 
 def test_volume_fs_serialization():
     fs = VolumeFileSystem()
-    _ = fs._loop
+    _ = sync(fs.loop, fs._get_session)
 
-    serialized = pickle.dumps(fs)
-    fs2 = pickle.loads(serialized)
+    fs2 = pickle.loads(pickle.dumps(fs))
 
     assert isinstance(fs2, VolumeFileSystem)
     assert fs is not fs2
-    assert fs._loop is not fs2._loop
+    assert fs2._session is None
 
 
 def test_volume_fs_pickled_as_arguments():
     fs = VolumeFileSystem(
         config_params={"host": "https://example.cloud.databricks.com", "token": "x"},
-        max_read_concurrency=3,
+        io_concurrency=3,
     )
-    loop = fs._loop
 
     fs2 = pickle.loads(pickle.dumps(fs))
     try:
         # fsspec rebuilds the file system from its constructor arguments
         assert fs2.storage_options == fs.storage_options
-        assert fs2.max_read_concurrency == 3
-        assert fs2._loop is not loop
+        assert fs2.io_concurrency == 3
     finally:
         fs.close()
         fs2.close()
@@ -172,33 +146,10 @@ def test_volume_fs_pickled_as_arguments():
 
 def test_volume_fs_session():
     with VolumeFileSystem() as fs:
-        # Created from a thread without a running event loop
-        session = fs._session
+        # Created on fsspec's loop, and reused there
+        session = sync(fs.loop, fs._get_session)
         assert not session.closed
-        assert session is fs._session
-
-        async def get_session():
-            return fs._session
-
-        # Accessed from the IO event loop
-        assert (
-            asyncio.run_coroutine_threadsafe(get_session(), fs._loop).result(timeout=5)
-            is session
-        )
-
-
-def test_volume_fs_session_in_event_loop():
-    with VolumeFileSystem() as fs:
-
-        async def get_session():
-            return fs._session
-
-        # Created from the IO event loop without deadlock
-        session = asyncio.run_coroutine_threadsafe(get_session(), fs._loop).result(
-            timeout=5
-        )
-        assert not session.closed
-        assert session is fs._session
+        assert sync(fs.loop, fs._get_session) is session
 
 
 class _CountingFilesAPI:
@@ -330,11 +281,14 @@ def _volume_fs_with_fake_files(
             files_api.files[self.path] = self.getvalue()
             super().close()
 
-    def fake_open(fs, path, mode="rb", **kwargs):
-        fs._check_open_target(path, mode)
-        return BytesIO(files_api.files[path]) if "r" in mode else _Written(path)
+    async def fake_open_async(fs, path, mode="rb", **kwargs):
+        await fs._check_open_target(path, mode)
+        _, _, _, _, full_path = parse_volume_path(path)
+        return SyncFileAdapter(
+            BytesIO(files_api.files[full_path]) if "r" in mode else _Written(full_path)
+        )
 
-    patcher = patch.object(VolumeFileSystem, "_open", fake_open)
+    patcher = patch.object(VolumeFileSystem, "open_async", fake_open_async)
     patcher.start()
     fs = VolumeFileSystem(client=client)
     fs._fake_patcher = patcher
@@ -399,9 +353,9 @@ def test_volume_fs_rm_calls(fake_volume_fs):
 
     fs, files_api, client = fake_volume_fs(dict(files), list(directories))
 
-    # A file: one metadata call and the delete
+    # A file: the delete only
     fs.rm(f"{root}/a.bin")
-    assert files_api.calls == [("file", f"{root}/a.bin"), ("delete", f"{root}/a.bin")]
+    assert files_api.calls == [("delete", f"{root}/a.bin")]
 
     with pytest.raises(IsADirectoryError):
         fs.rm(f"{root}/sub")
@@ -1132,36 +1086,6 @@ def test_volume_fs_open_w(
         DatabricksFileSystem,
     ],
 )
-def test_volume_fs_open_w_invalid_block_size(
-    client: WorkspaceClient,
-    fs_class: type[VolumeFileSystem | DatabricksFileSystem],
-    volume_test_root: str,
-):
-    test_dir = init_test_dir(client, volume_test_root, fs_class)
-
-    with fs_class(client=client, verbose_debug_log=True) as fs:
-        with pytest.raises(ValueError):
-            fs.open(
-                dbfs_url(f"{test_dir}/1_data.bin"),
-                mode="wb",
-                min_block_size=10 * 1024 * 1023,
-            )
-
-        with pytest.raises(ValueError):
-            fs.open(
-                dbfs_url(f"{test_dir}/1_data.bin"),
-                mode="wb",
-                max_block_size=10 * 1024 * 1023,
-            )
-
-
-@pytest.mark.parametrize(
-    "fs_class",
-    [
-        VolumeFileSystem,
-        DatabricksFileSystem,
-    ],
-)
 def test_volume_fs_open_w_abort(
     client: WorkspaceClient,
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
@@ -1170,10 +1094,10 @@ def test_volume_fs_open_w_abort(
     test_dir = init_test_dir(client, volume_test_root, fs_class)
 
     with patch.object(
-        VolumeWritableFile, "_upload_part", side_effect=RuntimeError("Dummy")
+        VolumeWritableFile, "_upload_part", AsyncMock(side_effect=RuntimeError("Dummy"))
     ):
         with patch.object(
-            VolumeWritableFile, "_abort_multipart_upload"
+            VolumeWritableFile, "_abort_multipart_upload", AsyncMock()
         ) as _abort_multipart_upload:
             with pytest.raises(OSError):
                 with fs_class(client=client, verbose_debug_log=True) as fs:
