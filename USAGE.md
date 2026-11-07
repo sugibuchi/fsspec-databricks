@@ -32,9 +32,14 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `config`                    | A Databricks SDK `Config` to authenticate with.                                     | `None`  |
 | `client`                    | A Databricks SDK `WorkspaceClient` to call the APIs with.                           | `None`  |
 | `use_local_fs_in_workspace` | Use the local file system when running in a Databricks workspace.                   | `True`  |
+| `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | Per backend |
+| `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
 | `verbose_debug_log`         | Log every operation at debug level.                                                 | `False` |
 
-Unity Catalog Volumes have [options of their own](#options-for-volumes).
+Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
+`16` and `8`.
+
+Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
 
 ---
 
@@ -283,4 +288,8 @@ with fs.open("dbfs:/mnt/my-mount/data.csv", "rb") as f:
     data = f.read()
 ```
 
-Databricks has deprecated legacy DBFS. Legacy DBFS support is not tested.
+- A move is the API's own, one request even for a folder.
+- `rmdir` refuses a folder that is not empty.
+- Files are read and written in order: `ab`, `r+b` and seeking are not supported.
+
+Databricks has deprecated legacy DBFS. Legacy DBFS support is tested only on a fake API.

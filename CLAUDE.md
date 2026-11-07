@@ -43,8 +43,9 @@ DEVELOPMENT.md describes the layout, the tests and their setup. Read its Tests s
   environment.
 - The session fixtures `volume_test_root` and `workspace_test_root` delete everything in the test roots first. Never
   point them at folders holding anything else.
-- Without credentials, run `tests/test_file.py`, `tests/test_volume.py`, `tests/test_path.py` and `tests/test_utils.py`.
-  `test_volume.py` and `test_file.py` use the fake Files API in `tests/dummy_api.py`.
+- Without credentials, run `tests/test_file.py`, `tests/test_volume.py`, `tests/test_path.py`, `tests/test_utils.py`,
+  `tests/test_workspace.py` and `tests/test_dbfs.py`. `test_volume.py` uses the fake Files API in `tests/dummy_api.py`.
+  The Workspace and DBFS tests use fakes of their SDK APIs.
 - A test of anything a workspace serves gets a check without one where possible, on the fake API or with mocks.
 - Test helpers shared by files are in `tests/utils.py`.
 - `tests/conftest.py` sets `cachable = False`, so each test gets new file system instances.
@@ -57,7 +58,10 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   the root folder and transfers between backends.
 - Its methods get the backend and the path to pass with `_resolve(path)`. Inside a workspace, that path is a local
   path, and names returned are mapped back with `from_local_path`.
-- Base class methods in `base.py` only check preconditions. Subclasses call `super()` first, then the API.
+- Its recursive methods, such as `find` and `copy`, call the backend's own, so that its tree strategies run. Only paths
+  at the root, or spanning backends, fall back to fsspec's methods.
+- Every backend is an async `TreeFileSystem`. Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
+  and call the SDK in threads with `_sdk`.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
 - `VolumeFileSystem` is an async fsspec file system on fsspec's loop. Its aiohttp session is created on the loop using
@@ -73,7 +77,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
   `mixins/files.py` uses the same: follow it. Keep resumable upload working too.
 - Volume write block sizes are multiples of 256 KB.
-- Workspace files are cached whole in memory, up to the API's 10 MB.
+- Workspace files are `LocallyBufferedFile`s, transferred whole, up to the API's 10 MB.
+- Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on a fake DBFS API.
 - Chatty debug logs go under `if self.verbose_debug_log:`.
 
 ## Conventions

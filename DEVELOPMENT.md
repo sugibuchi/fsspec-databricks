@@ -6,13 +6,13 @@
 |-------------------------------------|----------------------------------------------------------------------------------|
 | `src/fsspec_databricks/__init__.py` | The public API: `DatabricksFileSystem` and `use()`.                              |
 | `src/fsspec_databricks/spec.py`     | `DatabricksFileSystem`, which routes each call to a backend.                     |
-| `src/fsspec_databricks/base.py`     | `AbstractDatabricksFileSystem`, the backends' base class.                        |
+| `src/fsspec_databricks/base.py`     | The client handling, and the base classes of the router and the backends.        |
 | `src/fsspec_databricks/volume.py`   | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.                 |
 | `src/fsspec_databricks/workspace.py` | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object.      |
 | `src/fsspec_databricks/dbfs.py`     | `DBFS`, the legacy DBFS.                                                         |
 | `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, the local file system used inside a workspace.      |
-| `src/fsspec_databricks/file.py`     | The whole-file cached file objects of Workspace files.                           |
-| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the tree strategies and file objects of Volumes. |
+| `src/fsspec_databricks/file.py`     | Helpers telling what a file mode allows.                                         |
+| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the tree strategies and the file objects.  |
 | `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
 | `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
 | `src/fsspec_databricks/utils.py`    | Timestamps and enums.                                                            |
@@ -66,7 +66,9 @@ uvx pre-commit run --all-files                  # the hooks
 | `test_volume_fs.py`        | `VolumeFileSystem`                                | Mostly    |
 | `test_volume.py`           | The Volume file objects                           | No        |
 | `test_workspace_fs.py`     | `WorkspaceFileSystem`                             | Yes       |
-| `test_file.py`             | The cached file objects                           | No        |
+| `test_workspace.py`        | `WorkspaceFileSystem`, on a fake Workspace API    | No        |
+| `test_dbfs.py`             | `DBFS`, on a fake DBFS API                        | No        |
+| `test_file.py`             | `file.py`                                         | No        |
 | `test_path.py`             | `path.py`                                         | No        |
 | `test_utils.py`            | `utils.py`                                        | No        |
 
@@ -84,7 +86,8 @@ The fixtures, in `tests/conftest.py`:
 covers downloads, single uploads, multipart and resumable uploads, presigned URLs and aborts.
 `dummy_api_context.upload_mode` chooses which upload API the fake server answers with.
 
-`tests/utils.py` has the helpers that test files share.
+`tests/utils.py` has the helpers that test files share, such as the fake Workspace API, `FakeWorkspaceAPI`.
+`tests/test_dbfs.py` has the fake DBFS API, `FakeDbfsAPI`.
 
 ## CI
 
@@ -240,10 +243,10 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 ## Architecture
 
 - **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use.
-- **The backends** wrap one Databricks API each. Workspace and DBFS subclass `AbstractDatabricksFileSystem`, in
-  `base.py`. Volumes subclass the async `TreeFileSystem` of fsspec-alt-strategies.
-- **The file objects** are `RawIOBase`s. Volume files, in `volume.py`, read and write ranges concurrently. Workspace
-  files, with `file.py`'s classes, are cached whole.
+- **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies. Workspace
+  and DBFS subclass `DatabricksTreeFileSystem`, in `base.py`.
+- **The file objects** are the library's. Volume files read and write ranges concurrently. Workspace files are
+  `LocallyBufferedFile`s, transferred whole. DBFS files are the SDK's own.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
 
 ### Routing
@@ -254,7 +257,14 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 - else the Volume, Workspace or legacy DBFS backend of `path.fs_type`, and the path unchanged;
 - `FileNotFoundError` for legacy DBFS paths when the workspace disables legacy DBFS.
 
-Every method calls `_resolve`. With the local file system, `ls` and `info` map the names returned back to DBFS paths.
+Every method calls `_resolve`. With the local file system, the names returned are mapped back to DBFS paths.
+
+`find`, `glob`, `du`, `walk`, `rm`, and `copy` and `mv` within one backend, are the backend's own. So they run its
+tree strategies, which monitors of fsspec-alt-strategies see as calls to the backend. Two cases fall back to fsspec's
+own methods on top of the router:
+
+- a path or pattern at the root, which spans the backends;
+- a copy or move between backends.
 
 Whether legacy DBFS is enabled is checked once:
 
@@ -270,23 +280,29 @@ Transfers between backends:
 
 - `cp_file` streams the file from one backend's file object into the other's, 8 MB at a time. A folder is created,
   not copied.
-- `mv` uses fsspec's default, a copy then a delete.
+- `copy` is fsspec's: it finds the files with the source backend's `find`, then calls `cp_file` for each.
+- `mv` is fsspec's: a copy, then a delete.
 
-Within one backend, both go to the backend.
+### The base classes
 
-### The base class
-
-`AbstractDatabricksFileSystem` holds what the Workspace and DBFS backends share. Its mixin `DatabricksClientSupport`
-holds the client handling, which Volumes share too:
+`DatabricksClientSupport`, a mixin, holds the client handling that every file system shares:
 
 - the Databricks SDK `Config` and `WorkspaceClient`, made on first use from `client`, `config` or `config_params`;
 - `close()`, also called at exit and on garbage collection;
 - the `dbfs` protocol: `_strip_protocol` and `unstrip_protocol` use `path.py`.
 
-Its `mkdir`, `makedirs`, `rmdir` and `_rm` only check preconditions, such as a missing parent or a file where a folder
-is expected. Subclasses call them first, then make the API call.
+`AbstractDatabricksFileSystem` is the router's base: a synchronous fsspec file system with the mixin.
 
-`open` passes text mode on, and writes text with `"\n"` newlines by default.
+`DatabricksTreeFileSystem` is the base of the Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
+
+- `_sdk` runs an SDK call in a thread.
+- `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
+- `operation_concurrency` and `io_concurrency` default to 16 and 8.
+- `open` writes text with `"\n"` newlines by default.
+
+The `file.py` module once held `AbstractCachedFile`, `MemoryCachedFile` and `FileCachedFile`, and the base class had
+precondition methods for the synchronous backends. Both are removed: the library's file objects and
+`DatabricksTreeFileSystem` replace them.
 
 ### Paths
 
@@ -313,8 +329,16 @@ system's message.
 
 ### Legacy DBFS
 
-`DBFS`, in `dbfs.py`, uses the SDK's `WorkspaceClient.dbfs`. Copies, moves and recursive deletes use the API's own,
-when no glob pattern is involved. Files are opened with the SDK's `dbfs.open`.
+`DBFS`, in `dbfs.py`, uses the SDK's `WorkspaceClient.dbfs`.
+
+- `_mv_file` is the API's move, which moves a directory with all in it. So `storage_profile` declares
+  `renames_folders=True`, and a recursive `mv` moves each folder whole where it can.
+- A file moved alone is one move too.
+- A recursive `rm` without glob patterns is the API's recursive delete.
+- `rmdir` refuses a directory that is not empty. It deletes with the API's non-recursive delete, which the SDK's
+  `dbfs.delete` refuses for directories.
+- Files are opened with the SDK's `dbfs.open`. `open_async` wraps them in the library's `SyncFileAdapter`, adding the
+  mode and size that they do not tell.
 
 ### Volumes
 
@@ -324,7 +348,8 @@ fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`, `_r
 `rm`, `copy` and `mv`.
 
 fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
-those. The SDK's calls block, so they run in threads with `asyncio.to_thread`.
+those. The SDK's calls block, so they run in threads with `asyncio.to_thread`. The Workspace and DBFS backends work
+the same way.
 
 The APIs called depend on the depth of the path:
 
@@ -447,12 +472,14 @@ To refresh the copy:
 
 ### Workspace files
 
-`WorkspaceFileSystem`, in `workspace.py`, uses the SDK's `WorkspaceClient.workspace`.
+`WorkspaceFileSystem`, in `workspace.py`, uses the SDK's `WorkspaceClient.workspace`. Its `storage_profile` declares
+`implicit_folders=False` and `renames_files=False`: directories are objects, and the API has no move.
 
-`WorkspaceFile` is a `MemoryCachedFile`:
+`WorkspaceFile` is the library's `LocallyBufferedFile`:
 
-- Opening for reading or appending downloads the whole file into memory.
-- Closing or `flush(upload=True)` uploads it whole, if changed.
+- The first read or write downloads the whole file, into memory and then a temporary file.
+- Closing, or `flush(force=True)`, uploads it whole, if changed.
+- Exclusive creation uploads without overwriting, so that the API refuses a file created meanwhile.
 - Files are at most 10 MB.
 
 Notebooks are objects of type `NOTEBOOK`. `notebook_format` gives their export and import format, `SOURCE` by default.
@@ -461,21 +488,15 @@ Notebooks are objects of type `NOTEBOOK`. `notebook_format` gives their export a
 - A new notebook needs `language`.
 - Other files use `AUTO` export and `RAW` import, and refuse `notebook_format`.
 
-`cp_file` downloads and uploads, keeping notebooks as notebooks. `rm` uses the API's recursive delete when no glob
-pattern is involved.
+`cp_file` downloads and uploads, keeping notebooks as notebooks, and overwrites the destination. A recursive `rm`
+without glob patterns is the API's recursive delete. `rm` of a file checks its type first, as the API deletes an empty
+directory as a file.
 
 ### File objects
 
-`file.py` has the file objects that cache a whole remote file:
-
-| Class                         | Does                                                                          |
-|-------------------------------|-------------------------------------------------------------------------------|
-| `AbstractCachedFile`          | A whole remote file cached locally, downloaded on open and uploaded on close. |
-| `MemoryCachedFile`            | The cache in memory, with a required `max_size`.                              |
-| `FileCachedFile`              | The cache in a temporary file.                                                |
-
-The Volume files subclass the library's file objects instead. Their synchronous methods raise `RuntimeError` when called
-from the event loop. Code on the loop uses `open_async()` and awaits the file's methods.
+Every backend's files are the library's file objects, or the SDK's for DBFS. The library's raise `RuntimeError` when
+their synchronous methods are called from the event loop. Code on the loop uses `open_async()` and awaits the file's
+methods.
 
 ### Local file system
 
