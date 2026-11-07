@@ -508,7 +508,8 @@ Their shared interface is not copied. It is the dependency `fsspec-alt-strategie
 
 To refresh the copy:
 
-1. Copy `common/`, `files/`, `tree/`, `__init__.py` and `monitor.py` over the old ones.
+1. Copy `common/`, `files/`, `tree/`, `__init__.py`, `monitor.py`, `routing.py` and `streams.py` over the old ones.
+   Delete the modules the library no longer has.
 2. Run `uv lock --upgrade-package fsspec-alt-strategies-common`, so that the interface matches.
 3. Run the tests.
 

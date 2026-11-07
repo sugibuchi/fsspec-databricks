@@ -4,7 +4,7 @@
 
 `tree_transfer` is `tree_cp` between two storages. It walks the source tree,
 and copies each folder's files to the destination as soon as the folder is
-listed, each by a ``copy_file`` given by the caller. `common.streams` has one
+listed, each by a ``copy_file`` given by the caller. `streams` has one
 streaming the data through the two storages' file objects.
 
 This module depends on `cp`, `_jobs`, and `operation` and `placement` of
@@ -107,7 +107,7 @@ def tree_transfer(
     copy_file : callable
         Copies a file from the source to the destination, called as
         ``copy_file(source, destination)``: e.g. one made by
-        ``common.streams._streaming`` from both ``open_async``.
+        ``streams.streaming_copy`` from both ``open_async``.
     dst_info : callable
         Describes a destination path, called as ``dst_info(path)``.
     dst_makedirs : callable
@@ -138,7 +138,7 @@ def tree_transfer(
     ...     "backup/",
     ...     ls=src._ls,
     ...     info=src._info,
-    ...     copy_file=_streaming(src.open_async, dst.open_async),
+    ...     copy_file=streaming_copy(src.open_async, dst.open_async),
     ...     dst_info=dst._info,
     ...     dst_makedirs=dst._makedirs,
     ...     dst_rm_file=dst._rm_file,

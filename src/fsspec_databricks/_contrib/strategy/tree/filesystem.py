@@ -6,7 +6,8 @@
 folder per request. A subclass implements the storage's primitives, and gets
 fsspec's recursive methods from the tree strategies.
 
-This module depends on `cp`, `du`, `find`, `glob`, `mv`, `rm`, `walk`, and
+This module depends on `cp`, `du`, `find`, `glob`, `mv`, `rm`, `transfer`,
+`walk`, and
 `filesystem` and `operation` of `common`.
 """
 
@@ -25,6 +26,7 @@ from ..common.filesystem import (
     _copy_errors,
     _du_answer,
     _failed_folder,
+    _plain,
     _raise,
     _StrategyFileSystem,
     _with,
@@ -36,12 +38,19 @@ from .find import tree_find
 from .glob import tree_glob
 from .mv import tree_mv
 from .rm import tree_rm
+from .transfer import tree_transfer
 from .walk import tree_walk
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+
+    from fsspec.asyn import AsyncFileSystem
 
     from fsspec_alt_strategies_common.profile import StorageProfile
+    from fsspec_alt_strategies_common.states import CpState
+
+    from ..common.operation import Operation
+    from ..common.types import _Request
 
 __all__ = ["TreeFileSystem"]
 
@@ -392,6 +401,23 @@ class TreeFileSystem(_StrategyFileSystem):
             kwargs.get("callback"),
         )
         _raise(errors, "Moving")
+
+    def _transfer(
+        self,
+        path1: str | Sequence[str],
+        other: AsyncFileSystem,
+        path2: str,
+        *,
+        copy_file: _Request | None = None,
+    ) -> Operation[tuple[str, str], CpState]:
+        """Copy to ``other`` with `tree_transfer`, as `_StrategyFileSystem` says."""
+        return tree_transfer(
+            self._plain(path1),
+            _plain(other, path2),
+            ls=self._ls,
+            info=self._info,
+            **self._destination(other, copy_file),
+        )
 
     # fsspec makes sync methods only from the async ones it knows: _mv and _rmdir are
     # not. Each awaits the instance's own, so that a subclass's override is the one run.
