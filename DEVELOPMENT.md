@@ -78,21 +78,27 @@ The fixtures, in `tests/conftest.py`:
 
 - `client`: a `WorkspaceClient` with the default authentication;
 - `volume_test_root` and `workspace_test_root`: the work directories, emptied;
-- `dummy_api` and `dummy_api_context`: the fake Files API, and its state;
+- `dummy_api`, `dummy_client` and `dummy_storage_context`: the dummy server, the SDK's client of it, and its state;
 - `client_event_loop` and `aiohttp_session`: fsspec's event loop, and a session on it;
 - `dummy_table_parquet`: Parquet bytes of a generated table.
 
-`tests/dummy_api.py` is a FastAPI app of the Files API's endpoints, served by Hypercorn on a free local port. It
-covers downloads, single uploads, multipart and resumable uploads, presigned URLs and aborts.
-`dummy_api_context.upload_mode` chooses which upload API the fake server answers with.
+`tests/dummy_api.py` is a FastAPI app served by Hypercorn on a free local port. It answers the Files API, the
+Workspace API and the legacy DBFS API, as their REST references describe. The SDK's own `WorkspaceClient` talks to
+it over HTTP, so the SDK's requests, errors and mixins run as against a workspace.
 
-The same server answers the Workspace API and the legacy DBFS API, as their REST references describe. The SDK's own
-`WorkspaceClient` talks to it over HTTP, so the SDK's requests, errors and mixins run as against a workspace.
-
-- `dummy_client` is that client, and `dummy_storage_context` the Workspace files and DBFS root it holds.
-- The Workspace files, the DBFS root and the Files API's files are separate namespaces, as in Databricks.
+- The Files API covers directories, downloads with ranges, uploads whole or in parts, presigned URLs and aborts.
+- Parts go to presigned URLs, or to the Files API itself, as through the storage proxy.
+- `dummy_storage_context` holds the Volumes' files, the Workspace files and the DBFS root, separate as in Databricks.
 - `test_dummy_api.py` checks the server through the SDK alone, without this package.
-- `legacy_dbfs_disabled` makes the server answer as a workspace disabling the DBFS root.
+
+Switches of `dummy_storage_context` make the server answer as a given workspace:
+
+- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`;
+- `presigned_urls_only` refuses data transfers to the Files API itself;
+- `abort_supported = False` refuses abort URLs, as Azure Databricks does;
+- `read_errors` lists statuses that the next downloads fail with;
+- `storage_proxy_available` answers the storage proxy's probe;
+- `legacy_dbfs_disabled` answers as a workspace disabling the DBFS root.
 
 `test_workspace_fs.py` and `test_dbfs_fs.py` run each test twice, on two clients:
 
@@ -111,6 +117,13 @@ The references leave some behaviour open. The dummy then makes an assumption, ma
 - DBFS lists are sorted by name, Workspace lists in creation order.
 - A Workspace import refuses a missing parent folder.
 - Workspace imports and exports support `SOURCE`, `AUTO` and `RAW` only, with no directories.
+- Every volume exists, and paths outside the volumes are invalid parameters.
+- A Files API upload creates the missing parent directories.
+- A file is no directory, and a directory no file: each is not found as the other.
+- A file in the way of a directory or an upload fails as an existing file, with `ALREADY_EXISTS`.
+- Volume lists are sorted by name, and their directories tell no size or time.
+- A non-empty volume directory fails with `DIRECTORY_NOT_EMPTY`, whose message says it "is not empty".
+- An unknown upload session is not found, and a resumable chunk with a gap is refused.
 
 `tests/utils.py` has the helpers that test files share, such as the fake Workspace API, `FakeWorkspaceAPI`.
 `tests/test_dbfs.py` has the fake DBFS API, `FakeDbfsAPI`.

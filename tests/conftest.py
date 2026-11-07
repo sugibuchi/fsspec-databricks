@@ -23,7 +23,7 @@ from fsspec_databricks.base import (
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import VolumeFileSystem
 
-from .dummy_api import dummy_context, dummy_storage, serve_app
+from .dummy_api import dummy_storage, serve_app
 from .utils import prepare_workspace_test_root
 
 log = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ def dummy_client(dummy_api):
 
 @pytest.fixture(scope="function")
 def dummy_storage_context(dummy_api):
-    """The dummy server's Workspace files and DBFS root, emptied after the test."""
+    """The dummy server's state: the Volumes' files, the Workspace files and the DBFS root, reset after the test."""
     storage = dummy_storage()
     try:
         yield storage
@@ -134,22 +134,6 @@ def aiohttp_session(dummy_api, client_event_loop):
         yield session
     finally:
         sync(client_event_loop, session.close)
-
-
-@pytest.fixture(scope="function")
-def dummy_api_context(dummy_api):
-    context = dummy_context()
-    try:
-        yield context
-    finally:
-        context.files.clear()
-        context.multipart_upload_sessions.clear()
-        context.resumable_upload_sessions.clear()
-        context.get_file_errors.clear()
-
-        context.check_signed_url = False
-        context.upload_mode = "multipart"
-        context.abort_supported = True
 
 
 @pytest.fixture(scope="session")

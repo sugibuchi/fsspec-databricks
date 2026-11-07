@@ -94,17 +94,17 @@ def test_volume_fs_storage_proxy_probe_connection_refused():
 
 
 def test_volume_file_read(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(20 * 1000 * 1000)
-    dummy_api_context.files[path] = data
+    dummy_storage_context.vol_write(path, data)
 
     with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
         actual = f.read()
 
     assert bytes_sig(data) == bytes_sig(actual)
 
-    dummy_api_context.check_signed_url = True
+    dummy_storage_context.presigned_urls_only = True
 
     with pytest.raises(IOError):
         with _reader(
@@ -119,25 +119,25 @@ def test_volume_file_read(
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
 def test_volume_file_read_retries(
-    dummy_api_context, dummy_api, client_event_loop, aiohttp_session, status
+    dummy_storage_context, dummy_api, client_event_loop, aiohttp_session, status
 ):
     data = randbytes(1000)
-    dummy_api_context.files[path] = data
-    dummy_api_context.get_file_errors.extend([status, status])
+    dummy_storage_context.vol_write(path, data)
+    dummy_storage_context.read_errors.extend([status, status])
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
         with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
             assert f.read() == data
 
-    assert not dummy_api_context.get_file_errors
+    assert not dummy_storage_context.read_errors
 
 
 def test_volume_file_read_retries_exhausted(
-    dummy_api_context, dummy_api, client_event_loop, aiohttp_session
+    dummy_storage_context, dummy_api, client_event_loop, aiohttp_session
 ):
     data = randbytes(1000)
-    dummy_api_context.files[path] = data
-    dummy_api_context.get_file_errors.extend([500] * 10)
+    dummy_storage_context.vol_write(path, data)
+    dummy_storage_context.read_errors.extend([500] * 10)
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
         with _reader(
@@ -151,17 +151,17 @@ def test_volume_file_read_retries_exhausted(
                 f.read()
 
     # The first request and its retries.
-    attempts = 10 - len(dummy_api_context.get_file_errors)
+    attempts = 10 - len(dummy_storage_context.read_errors)
     assert attempts == VolumeReadableFile.fetch_max_retries + 1
 
 
 @pytest.mark.parametrize("status", [400, 403, 404])
 def test_volume_file_read_no_retry(
-    dummy_api_context, dummy_api, client_event_loop, aiohttp_session, status
+    dummy_storage_context, dummy_api, client_event_loop, aiohttp_session, status
 ):
     data = randbytes(1000)
-    dummy_api_context.files[path] = data
-    dummy_api_context.get_file_errors.extend([status] * 2)
+    dummy_storage_context.vol_write(path, data)
+    dummy_storage_context.read_errors.extend([status] * 2)
 
     with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
         with _reader(
@@ -174,18 +174,18 @@ def test_volume_file_read_no_retry(
             with pytest.raises(OSError):
                 f.read()
 
-    assert len(dummy_api_context.get_file_errors) == 1
+    assert len(dummy_storage_context.read_errors) == 1
 
 
 def test_volume_file_read_parquet(
     client_event_loop,
     dummy_api,
-    dummy_api_context,
+    dummy_storage_context,
     dummy_table,
     dummy_table_parquet,
     aiohttp_session,
 ):
-    dummy_api_context.files[path] = dummy_table_parquet
+    dummy_storage_context.vol_write(path, dummy_table_parquet)
 
     with _reader(
         aiohttp_session, dummy_api, client_event_loop, len(dummy_table_parquet)
@@ -200,23 +200,23 @@ def test_volume_file_read_parquet(
 
 
 def test_volume_file_oneshot_write(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
 ):
     data = randbytes(1000 * 1000)
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         f.write(data)
 
-    assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
+    assert bytes_sig(data) == bytes_sig(dummy_storage_context.volume_files[path].data)
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_parts_write(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session, upload_mode
+    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session, upload_mode
 ):
     data = randbytes(20 * 1000 * 1000)
     # The one file class follows the API the server chooses.
-    dummy_api_context.upload_mode = upload_mode
+    dummy_storage_context.upload_mode = upload_mode
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         # Several writes, so that the parts grow
@@ -224,10 +224,10 @@ def test_volume_file_parts_write(
             f.write(data[i : i + 1000 * 1000])
         assert f.sequential is (upload_mode == "resumable")
 
-    assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
+    assert bytes_sig(data) == bytes_sig(dummy_storage_context.volume_files[path].data)
 
-    dummy_api_context.check_signed_url = True
-    dummy_api_context.files.clear()
+    dummy_storage_context.presigned_urls_only = True
+    dummy_storage_context.volume_files.clear()
 
     with pytest.raises(IOError):
         with _writer(
@@ -240,9 +240,9 @@ def test_volume_file_parts_write(
 
 
 def test_volume_file_resumable_one_part_in_flight(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
 ):
-    dummy_api_context.upload_mode = "resumable"
+    dummy_storage_context.upload_mode = "resumable"
     data = randbytes(40 * 1000 * 1000)
     original = _ResumableSession.upload_part
     in_flight = 0
@@ -264,15 +264,19 @@ def test_volume_file_resumable_one_part_in_flight(
             for i in range(0, len(data), 1000 * 1000):
                 f.write(data[i : i + 1000 * 1000])
 
-    assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
+    assert bytes_sig(data) == bytes_sig(dummy_storage_context.volume_files[path].data)
     assert most_in_flight == 1
 
 
 @pytest.mark.parametrize("use_presigned_url", [True, False])
 def test_volume_file_unexpected_initiate_reply(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session, use_presigned_url
+    dummy_api,
+    dummy_storage_context,
+    client_event_loop,
+    aiohttp_session,
+    use_presigned_url,
 ):
-    dummy_api_context.upload_mode = "unknown"
+    dummy_storage_context.upload_mode = "unknown"
 
     with pytest.raises(OSError, match="Unexpected initiate-upload response"):
         with _writer(
@@ -283,7 +287,7 @@ def test_volume_file_unexpected_initiate_reply(
         ) as f:
             f.write(randbytes(20 * 1000 * 1000))
 
-    assert path not in dummy_api_context.files
+    assert path not in dummy_storage_context.volume_files
 
 
 @pytest.mark.parametrize("name", ["min_block_size", "max_block_size"])
@@ -317,12 +321,12 @@ def test_volume_file_invalid_spread(
 @pytest.mark.parametrize("abort_supported", [True, False])
 def test_volume_file_multipart_write_abort(
     dummy_api,
-    dummy_api_context,
+    dummy_storage_context,
     client_event_loop,
     aiohttp_session,
     abort_supported,
 ):
-    dummy_api_context.abort_supported = abort_supported
+    dummy_storage_context.abort_supported = abort_supported
 
     with patch.object(
         VolumeWritableFile,
@@ -335,27 +339,27 @@ def test_volume_file_multipart_write_abort(
 
     # The upload's failure is raised, not the abort's
     assert "Failed to upload a part" in str(exc_info.value)
-    assert path not in dummy_api_context.files
+    assert path not in dummy_storage_context.volume_files
 
     if abort_supported:
-        assert dummy_api_context.multipart_upload_sessions == {}
+        assert dummy_storage_context.multipart_uploads == {}
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_write_parquet(
     client_event_loop,
     dummy_api,
-    dummy_api_context,
+    dummy_storage_context,
     dummy_table,
     upload_mode,
     aiohttp_session,
 ):
-    dummy_api_context.upload_mode = upload_mode
+    dummy_storage_context.upload_mode = upload_mode
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         pq.write_table(pa.Table.from_pylist(dummy_table), f)
 
-    df = pd.read_parquet(BytesIO(dummy_api_context.files[path]))
+    df = pd.read_parquet(BytesIO(dummy_storage_context.volume_files[path].data))
 
     df.sort_values(by="id")
     assert df.shape == (256 * 1024, 3)
@@ -368,13 +372,13 @@ def test_volume_file_write_parquet(
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_parts_write_abort_per_mode(
     dummy_api,
-    dummy_api_context,
+    dummy_storage_context,
     client_event_loop,
     aiohttp_session,
     upload_mode,
     use_presigned_url,
 ):
-    dummy_api_context.upload_mode = upload_mode
+    dummy_storage_context.upload_mode = upload_mode
     session_class = (
         _MultipartSession if upload_mode == "multipart" else _ResumableSession
     )
@@ -393,14 +397,14 @@ def test_volume_file_parts_write_abort_per_mode(
             ) as f:
                 f.write(randbytes(20 * 1000 * 1000))
 
-    assert path not in dummy_api_context.files
+    assert path not in dummy_storage_context.volume_files
     # The session the server started is aborted by its own API.
-    assert dummy_api_context.multipart_upload_sessions == {}
-    assert dummy_api_context.resumable_upload_sessions == {}
+    assert dummy_storage_context.multipart_uploads == {}
+    assert dummy_storage_context.resumable_uploads == {}
 
 
 def test_volume_file_abort_without_session(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+    dummy_api, dummy_storage_context, client_event_loop, aiohttp_session
 ):
     with patch.object(
         VolumeWritableFile,
@@ -419,7 +423,7 @@ def test_volume_file_abort_without_session(
 @pytest.mark.parametrize("commit", [True, False])
 def test_volume_file_transaction(
     dummy_api,
-    dummy_api_context,
+    dummy_storage_context,
     client_event_loop,
     aiohttp_session,
     upload_mode,
@@ -427,7 +431,7 @@ def test_volume_file_transaction(
     commit,
 ):
     """In a transaction, nothing is visible before commit, and discard leaves nothing."""
-    dummy_api_context.upload_mode = upload_mode
+    dummy_storage_context.upload_mode = upload_mode
     data = randbytes(size)
     f = TransactionFile(
         AdaptiveWritableTransaction(
@@ -437,14 +441,16 @@ def test_volume_file_transaction(
     with f:
         for i in range(0, len(data), 1000 * 1000):
             f.write(data[i : i + 1000 * 1000])
-    assert path not in dummy_api_context.files
+    assert path not in dummy_storage_context.volume_files
 
     if commit:
         f.commit()
-        assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
+        assert bytes_sig(data) == bytes_sig(
+            dummy_storage_context.volume_files[path].data
+        )
     else:
         f.discard()
-        assert path not in dummy_api_context.files
-        assert dummy_api_context.multipart_upload_sessions == {}
+        assert path not in dummy_storage_context.volume_files
+        assert dummy_storage_context.multipart_uploads == {}
         if upload_mode == "multipart":
-            assert dummy_api_context.resumable_upload_sessions == {}
+            assert dummy_storage_context.resumable_uploads == {}

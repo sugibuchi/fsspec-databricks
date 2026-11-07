@@ -9,7 +9,9 @@ from io import BytesIO
 from random import randbytes
 
 import pytest
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import (
+    AlreadyExists,
     BadRequest,
     DatabricksError,
     InvalidParameterValue,
@@ -29,21 +31,284 @@ NOTEBOOK = b"# Databricks notebook source\nprint(1)"
 
 
 @pytest.fixture
-def w(dummy_client, dummy_storage_context, dummy_api_context):
+def w(dummy_client, dummy_storage_context):
     """The SDK's client of a dummy server with empty storage."""
     return dummy_client
 
 
+@pytest.fixture
+def parts_client(dummy_api, dummy_storage_context):
+    """A client of its own, uploading in parts from 1 MiB, so that the tests send little."""
+    client = WorkspaceClient(host=dummy_api, token="dummy", auth_type="pat")
+    client.files._config.files_ext_multipart_upload_min_stream_size = _MiB
+
+    def no_single_shot(*args, **kwargs):
+        raise AssertionError("A single-shot upload, as a fallback")
+
+    # The SDK falls back to a single-shot upload when parts fail: the tests must see them work.
+    client.files._single_thread_single_shot_upload = no_single_shot
+    return client
+
+
 ### Files API
+
+_MiB = 1024 * 1024
+V = "/Volumes/c/s/v"
 
 
 def test_files_upload_download_delete(w):
     data = randbytes(1000)
-    w.files.upload("/Volumes/c/s/v/a.bin", BytesIO(data), overwrite=True)
-    assert w.files.download("/Volumes/c/s/v/a.bin").contents.read() == data
-    w.files.delete("/Volumes/c/s/v/a.bin")
+    w.files.upload(f"{V}/a.bin", BytesIO(data), overwrite=True)
+    with w.files.download(f"{V}/a.bin").contents as f:
+        assert f.read() == data
+
+    metadata = w.files.get_metadata(f"{V}/a.bin")
+    assert metadata.content_length == len(data)
+    assert metadata.content_type == "application/octet-stream"
+    assert metadata.last_modified.endswith("GMT")
+
+    # The reference: an existing file is overwritten unless overwrite is false.
+    w.files.upload(f"{V}/a.bin", BytesIO(b"x"))
+    with w.files.download(f"{V}/a.bin").contents as f:
+        assert f.read() == b"x"
+    with pytest.raises(AlreadyExists):
+        w.files.upload(f"{V}/a.bin", BytesIO(b"y"), overwrite=False)
+
+    w.files.delete(f"{V}/a.bin")
     with pytest.raises(NotFound):
-        w.files.download("/Volumes/c/s/v/a.bin").contents.read()
+        w.files.download(f"{V}/a.bin").contents.read()
+    with pytest.raises(NotFound):
+        w.files.get_metadata(f"{V}/a.bin")
+    with pytest.raises(NotFound):
+        w.files.delete(f"{V}/a.bin")
+    # Assumed: the error of a path outside the volumes. A HEAD response has no body to name it.
+    with pytest.raises(InvalidParameterValue):
+        w.files.delete("/Volumes/c/s")
+    with pytest.raises(BadRequest):
+        w.files.get_metadata("/Volumes/c/s")
+
+
+def test_files_download_range(w, dummy_storage_context):
+    data = randbytes(1000)
+    dummy_storage_context.vol_write(f"{V}/r.bin", data)
+
+    def get(range_):
+        return w.api_client.do(
+            "GET",
+            f"/api/2.0/fs/files{V}/r.bin",
+            headers={"Range": range_},
+            response_headers=["content-range"],
+            raw=True,
+        )
+
+    response = get("bytes=100-199")
+    assert response["content-range"] == "bytes 100-199/1000"
+    assert response["contents"].read() == data[100:200]
+    # The SDK resumes downloads with open ranges; suffixes are HTTP's too.
+    assert get("bytes=900-")["contents"].read() == data[900:]
+    assert get("bytes=-10")["contents"].read() == data[-10:]
+    assert get("bytes=990-2000")["contents"].read() == data[990:]
+    with pytest.raises(DatabricksError):
+        get("bytes=1000-")
+
+
+def test_files_presigned_download(w, dummy_storage_context):
+    """The SDK downloads by a presigned URL first, which works when the Files API itself refuses."""
+    data = randbytes(1000)
+    dummy_storage_context.vol_write(f"{V}/p.bin", data)
+    dummy_storage_context.presigned_urls_only = True
+    with w.files.download(f"{V}/p.bin").contents as f:
+        assert f.read() == data
+
+    with pytest.raises(PermissionDenied):
+        w.api_client.do("GET", f"/api/2.0/fs/files{V}/p.bin", raw=True)
+
+
+def test_files_directories(w):
+    w.files.create_directory(f"{V}/a/b")
+    # The reference: creating an existing directory succeeds.
+    w.files.create_directory(f"{V}/a/b")
+    w.files.get_directory_metadata(f"{V}/a")
+    w.files.get_directory_metadata(V)
+    # Assumed: an upload creates the missing parents.
+    w.files.upload(f"{V}/a/c/f.bin", BytesIO(b"12345"))
+
+    entries = list(w.files.list_directory_contents(f"{V}/a"))
+    assert [(e.path, e.name, e.is_directory) for e in entries] == [
+        (f"{V}/a/b", "b", True),
+        (f"{V}/a/c", "c", True),
+    ]
+    (entry,) = w.files.list_directory_contents(f"{V}/a/c")
+    assert (entry.path, entry.is_directory, entry.file_size) == (
+        f"{V}/a/c/f.bin",
+        False,
+        5,
+    )
+    assert entry.last_modified > 0
+    assert list(w.files.list_directory_contents(f"{V}/a/b")) == []
+
+    with pytest.raises(NotFound):
+        w.files.get_directory_metadata(f"{V}/missing")
+    with pytest.raises(NotFound):
+        list(w.files.list_directory_contents(f"{V}/missing"))
+    # Assumed: a file is no directory, and a directory no file.
+    with pytest.raises(NotFound):
+        w.files.get_directory_metadata(f"{V}/a/c/f.bin")
+    with pytest.raises(NotFound):
+        list(w.files.list_directory_contents(f"{V}/a/c/f.bin"))
+    with pytest.raises(NotFound):
+        w.files.get_metadata(f"{V}/a/c")
+    with pytest.raises(NotFound):
+        w.files.delete(f"{V}/a/c")
+    # Assumed: a file in the way fails as an existing file does.
+    with pytest.raises(AlreadyExists):
+        w.files.create_directory(f"{V}/a/c/f.bin/d")
+    with pytest.raises(AlreadyExists):
+        w.files.upload(f"{V}/a/c", BytesIO(b"1"))
+
+
+def test_files_delete_directory(w):
+    w.files.create_directory(f"{V}/d/sub")
+
+    # The reference: only an empty directory is deleted.
+    with pytest.raises(BadRequest) as e:
+        w.files.delete_directory(f"{V}/d")
+    assert "is not empty" in str(e.value)
+
+    w.files.delete_directory(f"{V}/d/sub")
+    w.files.delete_directory(f"{V}/d")
+    with pytest.raises(NotFound):
+        w.files.get_directory_metadata(f"{V}/d")
+    with pytest.raises(NotFound):
+        w.files.delete_directory(f"{V}/d")
+
+
+def test_files_list_pages(w, dummy_storage_context):
+    names = [f"f{i:02}" for i in range(7)]
+    for n in names:
+        dummy_storage_context.vol_write(f"{V}/l/{n}", b"")
+
+    # The SDK follows next_page_token.
+    entries = w.files.list_directory_contents(f"{V}/l", page_size=3)
+    assert [e.name for e in entries] == names
+
+    page = w.files._api.do(
+        "GET", f"/api/2.0/fs/directories{V}/l", query={"page_size": 3}
+    )
+    assert len(page["contents"]) == 3
+    assert "next_page_token" in page
+    with pytest.raises(InvalidParameterValue):
+        w.files._api.do(
+            "GET", f"/api/2.0/fs/directories{V}/l", query={"page_token": "?"}
+        )
+
+
+@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
+def test_files_upload_in_parts(parts_client, dummy_storage_context, upload_mode):
+    """The SDK uploads in parts through presigned URLs, by the API that the server chooses."""
+    dummy_storage_context.upload_mode = upload_mode
+    data = randbytes(3 * _MiB + 1000)
+
+    parts_client.files.upload(
+        f"{V}/m.bin", BytesIO(data), part_size=_MiB, use_parallel=False
+    )
+    assert dummy_storage_context.volume_files[f"{V}/m.bin"].data == data
+    assert dummy_storage_context.multipart_uploads == {}
+    assert dummy_storage_context.resumable_uploads == {}
+
+    # The reference: an existing file without overwrite refuses the upload from its start.
+    with pytest.raises(AlreadyExists):
+        parts_client.files.upload(
+            f"{V}/m.bin", BytesIO(data), part_size=_MiB, overwrite=False
+        )
+
+
+def test_files_upload_in_parts_parallel(parts_client, dummy_storage_context):
+    data = randbytes(5 * _MiB)
+    parts_client.files.upload(f"{V}/p.bin", BytesIO(data), part_size=_MiB)
+    assert dummy_storage_context.volume_files[f"{V}/p.bin"].data == data
+
+
+@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
+def test_files_upload_storage_proxy(
+    parts_client, dummy_api, dummy_storage_context, upload_mode
+):
+    """Through the storage proxy, the parts go to the Files API itself, as fsspec-databricks sends them."""
+    dummy_storage_context.upload_mode = upload_mode
+    dummy_storage_context.storage_proxy_available = True
+    parts_client.files._config.experimental_files_ext_enable_storage_proxy = True
+    parts_client.files._STORAGE_PROXY_HOSTNAME = dummy_api
+    data = randbytes(3 * _MiB + 1000)
+
+    parts_client.files.upload(
+        f"{V}/s.bin", BytesIO(data), part_size=_MiB, use_parallel=False
+    )
+    assert parts_client.files._dp_hostname_available is True
+    with parts_client.files.download(f"{V}/s.bin").contents as f:
+        assert f.read() == data
+
+
+def test_files_upload_sessions(w, dummy_storage_context):
+    """The multipart upload API's requests, as the SDK and fsspec-databricks send them."""
+    do = w.api_client.do
+    url = f"/api/2.0/fs/files{V}/u.bin"
+
+    token = do("POST", url, query={"action": "initiate-upload"})["multipart_upload"][
+        "session_token"
+    ]
+    (part,) = do(
+        "POST",
+        "/api/2.0/fs/create-upload-part-urls",
+        body={
+            "path": f"{V}/u.bin",
+            "session_token": token,
+            "start_part_number": 1,
+            "count": 1,
+            "expire_time": "2099-01-01T00:00:00Z",
+        },
+    )["upload_part_urls"]
+    assert part["part_number"] == 1
+
+    # Not completed with a wrong ETag; aborted by a POST, as the SDK does.
+    with pytest.raises(InvalidParameterValue):
+        do(
+            "POST",
+            url,
+            query={
+                "action": "complete-upload",
+                "upload_type": "multipart",
+                "session_token": token,
+            },
+            body={"parts": [{"part_number": 1, "etag": "wrong"}]},
+        )
+    do(
+        "POST",
+        url,
+        query={
+            "action": "abort-upload",
+            "upload_type": "multipart",
+            "session_token": token,
+        },
+    )
+    assert dummy_storage_context.multipart_uploads == {}
+    assert f"{V}/u.bin" not in dummy_storage_context.volume_files
+
+    # Assumed: an unknown session is not found.
+    with pytest.raises(NotFound):
+        do(
+            "POST",
+            "/api/2.0/fs/create-resumable-upload-url",
+            body={"path": f"{V}/u.bin", "session_token": token},
+        )
+
+    # Azure Databricks refuses to abort by a presigned URL.
+    dummy_storage_context.abort_supported = False
+    with pytest.raises(BadRequest):
+        do(
+            "POST",
+            "/api/2.0/fs/create-abort-upload-url",
+            body={"path": f"{V}/u.bin", "session_token": token, "expire_time": "x"},
+        )
 
 
 ### Workspace API
