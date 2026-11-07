@@ -1,41 +1,47 @@
-import atexit
+import asyncio
+import contextlib
 import json
 import os
-import shutil
 from typing import Any
 
 from databricks.sdk import AuthorizationDetail, CredentialsStrategy, WorkspaceClient
 from databricks.sdk.config import Config
 from databricks.sdk.service.workspace import Language
+from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.spec import AbstractFileSystem
+from fsspec_alt_strategies_common.profile import StorageProfile
 
-from .base import AbstractDatabricksFileSystem, root_dir_info
+from ._contrib.strategy.routing import AsyncRoutingFileSystem
+from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
 from .dbfs import DBFS
-from .error import file_exists_error, file_not_found_error
-from .local import DatabricksLocalFileSystem
+from .error import file_not_found_error
+from .local import DatabricksLocalFileSystem, LocalTreeWrapper
 from .path import (
     FileSystemType,
     from_local_path,
     fs_type,
     scheme,
+    strip_scheme,
     to_local_path,
-    volumes_root,
-    workspace_root,
+    unstrip_scheme,
 )
+from .utils import write_mode
 from .volume import VolumeFileSystem, volumes_root_info
 from .workspace import NotebookFormat, WorkspaceFileSystem, workspace_root_info
 
-_cross_fs_copy_chunk_size = 8 * 1024 * 1024
-"""The bytes copied at a time between file systems, e.g. from Workspace to Volume."""
 
-
-class DatabricksFileSystem(AbstractDatabricksFileSystem):
+class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     """File system for Unity Catalog Volumes, Workspace files and legacy DBFS.
 
-    It routes each call to the backend serving the path: `VolumeFileSystem`, `WorkspaceFileSystem` or `DBFS`.
+    It routes each call to the backend serving the path: `VolumeFileSystem`, `WorkspaceFileSystem` or `DBFS`, or
+    the local file system inside a workspace.
     """
 
     protocol = scheme
+    root_marker = "/"
+
+    transfer_concurrency: int = 8
+    """The files copied between two backends at a time."""
 
     use_local_fs_in_workspace: bool = True
     """Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks workspace."""
@@ -82,6 +88,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         ## Options of the backends
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
+        transfer_concurrency: int | None = None,
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
         **storage_options,
@@ -163,6 +170,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         io_concurrency : int, optional
             The maximum number of concurrent transfers of the files opened, shared by all of them. Each backend has
             its own default.
+        transfer_concurrency : int, optional
+            The maximum number of files copied or moved between two backends at a time, e.g. from Workspace files
+            to a Volume. Defaults to 8.
         use_local_fs_in_workspace : bool, optional
             Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks
             workspace. Defaults to True.
@@ -207,11 +217,12 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         }
 
         super().__init__(
-            client=client,
-            config=config,
-            config_params=config_params,
+            transfer_concurrency=transfer_concurrency or self.transfer_concurrency,
+            # No Databricks file system caches listings.
+            use_listings_cache=False,
             **storage_options,
         )
+        self._init_client(client, config, config_params)
 
         self._storage_options = storage_options
 
@@ -221,89 +232,69 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             self.use_local_fs_in_workspace = use_local_fs_in_workspace
 
         self.__local_fs: DatabricksLocalFileSystem | None = None
-        self.__workspace_fs: WorkspaceFileSystem | None = None
-        self.__volume_fs: VolumeFileSystem | None = None
-        self.__legacy_fs: DBFS | None = None
 
         self._running_in_workspace: bool | None = None
         self._legacy_dbfs_enabled: bool | None = None
 
-        atexit.register(self.close)
+        _register_cleanup(self)
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        return strip_scheme(path)
+
+    def unstrip_protocol(self, name: str) -> str:
+        return unstrip_scheme(name)
 
     def close(self):
         """Close the file system and its backends."""
         try:
-            errors = []
-
-            def _close(fs):
-                try:
-                    if fs:
-                        fs.close()
-                except Exception as e:
-                    errors.append(e)
-
-            _close(self.__workspace_fs)
-            _close(self.__volume_fs)
-            _close(self.__legacy_fs)
-
-            if errors:
-                raise RuntimeError(
-                    f"Errors occurred while closing file system: {errors}"
-                )
+            if not self.closed:
+                self._close_client()
         finally:
-            self.__workspace_fs = None
-            self.__volume_fs = None
-            self.__legacy_fs = None
             self.__local_fs = None
-            super().close()
+            AsyncRoutingFileSystem.close(self)
+
+    def __enter__(self):
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        with contextlib.suppress(Exception):
+            self.close()
+
+    ### The backends, created on first use
+    def _api_backend(self, key: str, cls: type) -> AsyncFileSystem:
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+        return self._backend(
+            key,
+            lambda: cls(
+                client=self.client,
+                config=self.config,
+                operation_concurrency=self._operation_concurrency,
+                io_concurrency=self._io_concurrency,
+                **self._storage_options,
+            ),
+        )
 
     @property
     def _volume_fs(self) -> VolumeFileSystem:
         """The Volume backend, created on first use."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__volume_fs is None:
-            self.__volume_fs = VolumeFileSystem(
-                client=self.client,
-                config=self.config,
-                operation_concurrency=self._operation_concurrency,
-                io_concurrency=self._io_concurrency,
-                **self._storage_options,
-            )
-        return self.__volume_fs
+        return self._api_backend("volume", VolumeFileSystem)
 
     @property
     def _workspace_fs(self) -> WorkspaceFileSystem:
         """The Workspace backend, created on first use."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__workspace_fs is None:
-            self.__workspace_fs = WorkspaceFileSystem(
-                client=self.client,
-                config=self.config,
-                operation_concurrency=self._operation_concurrency,
-                io_concurrency=self._io_concurrency,
-                **self._storage_options,
-            )
-        return self.__workspace_fs
+        return self._api_backend("workspace", WorkspaceFileSystem)
 
     @property
     def _legacy_fs(self) -> DBFS:
         """The legacy DBFS backend, created on first use."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__legacy_fs is None:
-            self.__legacy_fs = DBFS(
-                client=self.client,
-                config=self.config,
-                operation_concurrency=self._operation_concurrency,
-                io_concurrency=self._io_concurrency,
-                **self._storage_options,
-            )
-        return self.__legacy_fs
+        return self._api_backend("legacy", DBFS)
 
     @property
     def _local_fs(self) -> DatabricksLocalFileSystem:
@@ -314,6 +305,22 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         if self.__local_fs is None:
             self.__local_fs = DatabricksLocalFileSystem(**self._storage_options)
         return self.__local_fs
+
+    @property
+    def _local_tree(self) -> LocalTreeWrapper:
+        """The local file system as the async backend the router needs."""
+        local = self._local_fs
+        return self._backend(
+            "local",
+            lambda: LocalTreeWrapper(
+                local,
+                operation_concurrency=self._operation_concurrency
+                or DBFS.operation_concurrency,
+                io_concurrency=self._io_concurrency or DBFS.io_concurrency,
+                # FUSE mounts, e.g. of Volumes, may not rename folders: nothing is declared.
+                storage_profile=StorageProfile(),
+            ),
+        )
 
     @property
     def running_in_workspace(self) -> bool:
@@ -346,280 +353,46 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         """Whether files are accessed from the local file system."""
         return self.running_in_workspace and self.use_local_fs_in_workspace
 
-    def _resolve(self, path: str) -> tuple[AbstractFileSystem, str]:
-        """Return the file system for the path, and the path to pass to it."""
-        if self._uses_local_fs:
-            return self._local_fs, to_local_path(path, self.legacy_dbfs_local_root)
+    ### Routing, for AsyncRoutingFileSystem
+    def _route(self, path: str) -> tuple[AsyncFileSystem, str] | None:
+        if path.rstrip("/") == "":
+            return None  # The root spans the backends: _roots lists it.
 
         t = fs_type(path)
+        if self._uses_local_fs:
+            local = to_local_path(path, self.legacy_dbfs_local_root)
+            # to_local_path drops a trailing "/", which means a folder to copy and glob.
+            if path.endswith("/") and not local.endswith("/"):
+                local += "/"
+            return self._local_tree, local
         if t == FileSystemType.Workspace:
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        elif t == FileSystemType.Legacy and self.legacy_dbfs_enabled:
+        # Asked once, then cached: a blocking call, as _route cannot await.
+        elif self.legacy_dbfs_enabled:
             return self._legacy_fs, path
-        else:
-            raise file_not_found_error(path)
+        raise file_not_found_error(path)
 
-    def _from_local_info(self, info: dict) -> dict:
-        """Map the name in a local file's info back to its POSIX path in Databricks."""
+    def _outer(self, fs: AsyncFileSystem, path: str) -> str:
         if self._uses_local_fs:
-            return {
-                **info,
-                "name": from_local_path(info["name"], self.legacy_dbfs_local_root),
-            }
-        else:
-            return info
+            return from_local_path(path, self.legacy_dbfs_local_root)
+        return path
 
-    def _from_local_name(self, name: str) -> str:
+    async def _roots(self, path: str) -> list[dict[str, Any]]:
+        if not await asyncio.to_thread(lambda: self.legacy_dbfs_enabled):
+            return [dict(volumes_root_info), dict(workspace_root_info)]
+        # The root of legacy DBFS, which holds the mounts of the other backends.
         if self._uses_local_fs:
-            return from_local_path(name, self.legacy_dbfs_local_root)
-        return name
-
-    def _from_local_found(self, found: Any, detail: bool) -> Any:
-        """Map the names found by `find` or `glob` back, as `_from_local_info` does."""
-        if not self._uses_local_fs:
-            return found
-        if detail:
-            return {
-                self._from_local_name(k): self._from_local_info(v)
-                for k, v in found.items()
-            }
-        return [self._from_local_name(n) for n in found]
-
-    def _backend(self, path: str) -> tuple[AbstractFileSystem, str] | None:
-        """The backend serving a path or glob pattern, with the path to pass to it.
-
-        None for the root, or a pattern matching there, as the root spans the backends.
-        """
-        stripped = self._strip_protocol(path)
-        magic = [i for i in (stripped.find(c) for c in "*?[") if i >= 0]
-        base = stripped[: min(magic)].rsplit("/", 1)[0] if magic else stripped
-        if base.rstrip("/") == "":
-            return None
-        fs, _ = self._resolve(base)
-        _, p = self._resolve(path)
-        return fs, p
-
-    def _same_backend(self, path1, path2) -> tuple[AbstractFileSystem, str, str] | None:
-        """The backend serving both paths, with the paths to pass to it: None if there is none."""
-        if not isinstance(path1, str) or not isinstance(path2, str):
-            return None
-        b1, b2 = self._backend(path1), self._backend(path2)
-        if b1 is None or b2 is None or b1[0] is not b2[0]:
-            return None
-        return b1[0], b1[1], b2[1]
-
-    def _cp_directory(self, path2):
-        """Copy a directory: create the destination, as directories have no content."""
-        try:
-            info = self.info(path2)
-        except FileNotFoundError:
-            self.makedirs(path2, exist_ok=True)
-            return
-        if info["type"] != "directory":
-            raise file_exists_error(path2)
-
-    ### Recursive operations, run by the backend of their path, with its strategies
-    def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
-        backend = self._backend(path)
-        if backend is None:
-            return super().find(
-                path, maxdepth=maxdepth, withdirs=withdirs, detail=detail, **kwargs
-            )
-        fs, p = backend
-        found = fs.find(
-            p, maxdepth=maxdepth, withdirs=withdirs, detail=detail, **kwargs
-        )
-        return self._from_local_found(found, detail)
-
-    def glob(self, path, maxdepth=None, **kwargs):
-        backend = self._backend(path)
-        if backend is None:
-            return super().glob(path, maxdepth=maxdepth, **kwargs)
-        fs, p = backend
-        found = fs.glob(p, maxdepth=maxdepth, **kwargs)
-        return self._from_local_found(found, kwargs.get("detail", False))
-
-    def du(self, path, total=True, maxdepth=None, withdirs=False, **kwargs):
-        backend = self._backend(path)
-        if backend is None:
-            return super().du(
-                path, total=total, maxdepth=maxdepth, withdirs=withdirs, **kwargs
-            )
-        fs, p = backend
-        sizes = fs.du(p, total=total, maxdepth=maxdepth, withdirs=withdirs, **kwargs)
-        if total:
-            return sizes
-        return {self._from_local_name(k): v for k, v in sizes.items()}
-
-    def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
-        backend = self._backend(path)
-        if backend is None:
-            yield from super().walk(
-                path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
-            )
-            return
-        fs, p = backend
-        mapped = self._uses_local_fs and kwargs.get("detail")
-        for root, dirs, files in fs.walk(
-            p, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
-        ):
-            if mapped:
-                yield (
-                    self._from_local_name(root),
-                    {k: self._from_local_info(v) for k, v in dirs.items()},
-                    {k: self._from_local_info(v) for k, v in files.items()},
-                )
-            else:
-                yield self._from_local_name(root), dirs, files
-
-    def copy(
-        self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs
-    ):
-        same = self._same_backend(path1, path2)
-        if same is None:
-            # Between backends: each file is streamed by `cp_file`.
-            return super().copy(
-                path1,
-                path2,
-                recursive=recursive,
-                maxdepth=maxdepth,
-                on_error=on_error,
-                **kwargs,
-            )
-        fs, p1, p2 = same
-        return fs.copy(
-            p1,
-            p2,
-            recursive=recursive,
-            maxdepth=maxdepth,
-            on_error=on_error,
-            **kwargs,
-        )
-
-    ### File/directory information
-    def ls(self, path, detail=True, **kwargs):
-        if not self.legacy_dbfs_enabled and self._strip_protocol(path) == "/":
-            return (
-                [volumes_root_info, workspace_root_info]
-                if detail
-                else [volumes_root, workspace_root]
-            )
-
-        fs, p = self._resolve(path)
-        items = fs.ls(p, detail=detail, **kwargs)
-        if not self._uses_local_fs:
-            return items
-        elif detail:
-            return [self._from_local_info(i) for i in items]
+            fs, inner = self._local_tree, self.legacy_dbfs_local_root
         else:
-            return [from_local_path(i, self.legacy_dbfs_local_root) for i in items]
+            fs, inner = self._legacy_fs, "/"
+        return [self._entry(fs, e) for e in await fs._ls(inner, detail=True)]
 
-    def info(self, path, **kwargs):
-        if not self.legacy_dbfs_enabled and self._strip_protocol(path) == "/":
-            return root_dir_info
-
-        fs, p = self._resolve(path)
-        return self._from_local_info(fs.info(p, **kwargs))
-
-    def exists(self, path, **kwargs) -> bool:
-        fs, p = self._resolve(path)
-        return fs.exists(p, **kwargs)
-
-    def isdir(self, path) -> bool:
-        if self._strip_protocol(path) == "/":
-            return True
-
-        try:
-            fs, p = self._resolve(path)
-        except FileNotFoundError:
-            return False
-        return fs.isdir(p)
-
-    def isfile(self, path) -> bool:
-        if self._strip_protocol(path) == "/":
-            return False
-
-        try:
-            fs, p = self._resolve(path)
-        except FileNotFoundError:
-            return False
-        return fs.isfile(p)
-
-    def created(self, path):
-        fs, p = self._resolve(path)
-        return fs.created(p)
-
-    def modified(self, path):
-        fs, p = self._resolve(path)
-        return fs.modified(p)
-
-    ### File/directory operations
-    def cp_file(self, path1, path2, **kwargs):
-        if fs_type(path1) == fs_type(path2):
-            fs, p1 = self._resolve(path1)
-            _, p2 = self._resolve(path2)
-            fs.cp_file(p1, p2, **kwargs)
-        else:
-            source_info = self.info(path1)
-            if source_info["type"] == "directory":
-                self._cp_directory(path2)
-                return
-
-            src_fs, src_path = self._resolve(path1)
-            dst_fs, dst_path = self._resolve(path2)
-            with src_fs.open(src_path, "rb") as src:
-                with dst_fs.open(dst_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst, length=_cross_fs_copy_chunk_size)
-
-    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
-        same = self._same_backend(path1, path2)
-        if same is not None:
-            fs, p1, p2 = same
-            fs.mv(
-                p1,
-                p2,
-                recursive=recursive,
-                maxdepth=maxdepth,
-                **kwargs,
-            )
-        else:
-            super().mv(
-                path1,
-                path2,
-                recursive=recursive,
-                maxdepth=maxdepth,
-                **kwargs,
-            )
-
-    def _rm(self, path):
-        fs, p = self._resolve(path)
-        fs.rm_file(p)
-
-    def rm(self, path, recursive=False, maxdepth=None):
-        if not isinstance(path, str):
-            for p in path:
-                self.rm(p, recursive=recursive, maxdepth=maxdepth)
-            return
-        backend = self._backend(path)
-        if backend is None:
-            super().rm(path, recursive=recursive, maxdepth=maxdepth)
-            return
-        fs, p = backend
-        fs.rm(p, recursive=recursive, maxdepth=maxdepth)
-
-    def mkdir(self, path, create_parents=True, **kwargs):
-        fs, p = self._resolve(path)
-        fs.mkdir(p, create_parents, **kwargs)
-
-    def makedirs(self, path, exist_ok=False):
-        fs, p = self._resolve(path)
-        fs.makedirs(p, exist_ok)
-
-    def rmdir(self, path):
-        fs, p = self._resolve(path)
-        fs.rmdir(p)
+    async def _info(self, path, **kwargs):
+        if self._target(path) is None:
+            return dict(root_dir_info)
+        return await super()._info(path, **kwargs)
 
     ## File I/O
     def open(
@@ -635,6 +408,8 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         **kwargs,
     ):
         """Open a file in a Unity Catalog Volume, Workspace files or legacy DBFS.
+
+        Inside `fs.transaction`, a file written is committed or discarded with the others, whatever its backend.
 
         Parameters
         ----------
@@ -661,28 +436,22 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         **kwargs
             Passed to the backend's `open`.
         """
-        fs, p = self._resolve(path)
-        autocommit = kwargs.pop("autocommit", not self._intrans)
-        in_transaction = not autocommit and "r" not in mode
-        if in_transaction:
-            # The backend's open queues the file in the backend's own transaction, which nothing ends.
-            backend_files = fs.transaction.files
-        f = fs.open(
-            path=p,
-            mode=mode,
-            notebook_format=notebook_format,
-            language=language,
-            compression=compression,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            autocommit=autocommit,
-            **kwargs,
-        )
-        if in_transaction:
-            # The router's transaction commits or discards it, with the files of every other backend.
-            self.transaction.files.append(backend_files.pop())
-        return f
+        if notebook_format is not None:
+            kwargs["notebook_format"] = notebook_format
+        if language is not None:
+            kwargs["language"] = language
+        if "b" not in mode:
+            # Text is any mode without "b": "w" as well as "wt".
+            if write_mode(mode) and newline is None:
+                newline = "\n"
+            kwargs.update(encoding=encoding, errors=errors, newline=newline)
+        return super().open(path, mode, compression=compression, **kwargs)
+
+    def pipe_file(self, path, value, mode="overwrite", **kwargs):
+        # The router's _pipe_file writes through open_async, outside the transaction: in one, write with open.
+        if self._intrans:
+            return AbstractFileSystem.pipe_file(self, path, value, mode=mode, **kwargs)
+        return sync(self.loop, self._pipe_file, path, value, mode=mode, **kwargs)
 
 
 __all__ = [
