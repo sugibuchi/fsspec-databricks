@@ -207,15 +207,10 @@ class DBFS(DatabricksTreeFileSystem):
             raise file_exists_error(path)
         return None
 
-    def _new_file(
-        self,
-        path: str,
-        mode: str,
-        size: int | None,
-        loop: asyncio.AbstractEventLoop | None = None,
-    ) -> "DbfsReadableFile | DbfsWritableFile":
-        """A file object on `loop`, by default the file system's, its fetches or uploads sharing `io_limit`."""
-        loop = loop or self.loop
+    async def _open_file(self, path: str, mode: str):
+        """Open a file object on the running loop, its fetches or uploads sharing `io_limit`."""
+        size = await self._check_open(path, mode)
+        loop = asyncio.get_running_loop()
         if "r" in mode:
             return DbfsReadableFile(
                 self, path, loop, size or 0, concurrency_limit=self.io_limit
@@ -223,11 +218,6 @@ class DBFS(DatabricksTreeFileSystem):
         return DbfsWritableFile(
             self, path, loop, overwrite="x" not in mode, concurrency_limit=self.io_limit
         )
-
-    async def _open_file(self, path: str, mode: str):
-        """Open a file object on the running loop."""
-        size = await self._check_open(path, mode)
-        return self._new_file(path, mode, size, asyncio.get_running_loop())
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
@@ -243,15 +233,17 @@ class DBFS(DatabricksTreeFileSystem):
         cache_options=None,
         **kwargs,
     ):
-        size = sync(self.loop, self._check_open, path, mode)
+        f = sync(self.loop, self._open_file, path, mode)
         if autocommit or "r" in mode:
-            return self._new_file(path, mode, size)
+            return f
         # The API's stream makes a file visible as it grows, and replaces the file there when it starts. Holding the
         # last part, as Volumes do, would still show the rest. So a transaction writes to a temporary path, moved into
         # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own.
         transaction = TempPathTransaction(
             path,
-            lambda p: self._new_file(p, "wb", None),
+            lambda p: DbfsWritableFile(
+                self, p, self.loop, concurrency_limit=self.io_limit
+            ),
             functools.partial(self._commit_move, exclusive="x" in mode),
             lambda p: sync(self.loop, self._delete, p, False),
         )
@@ -347,6 +339,9 @@ class DbfsWritableFile(AdaptiveWritableFile):
 
     sequential: bool = True
 
+    max_request_size: int | None = _max_request_size
+    """The API's limit on a put's contents and on each add-block."""
+
     def __init__(
         self,
         fs: DBFS,
@@ -356,11 +351,6 @@ class DbfsWritableFile(AdaptiveWritableFile):
         overwrite: bool = True,
         **kwargs,
     ):
-        # The put's contents are limited too: a bigger file must be streamed.
-        kwargs["min_multipart_size"] = min(
-            kwargs.get("min_multipart_size") or self.min_multipart_size,
-            _max_request_size,
-        )
         super().__init__(path, loop, **kwargs)
         self.fs = fs
         self.overwrite = overwrite
@@ -390,13 +380,10 @@ class DbfsWritableFile(AdaptiveWritableFile):
     async def _upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> None:
-        # The last part takes the rest, up to twice the API's limit: it is split.
-        view = memoryview(data)
-        for offset in range(0, len(view), _max_request_size):
-            block = base64.b64encode(view[offset : offset + _max_request_size]).decode()
-            await self._call(
-                "dbfs.add-block", lambda c, b=block: c.dbfs.add_block(self._handle, b)
-            )
+        block = base64.b64encode(data).decode()
+        await self._call(
+            "dbfs.add-block", lambda c: c.dbfs.add_block(self._handle, block)
+        )
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
         await self._call("dbfs.close", lambda c: c.dbfs.close(self._handle))
