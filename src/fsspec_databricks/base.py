@@ -36,7 +36,83 @@ def _register_cleanup(fs):
     atexit.register(_cleanup, weakref.ref(fs))
 
 
-class AbstractDatabricksFileSystem(AbstractFileSystem):
+class DatabricksClientSupport:
+    """The Databricks SDK client and configuration of a file system, made on first use.
+
+    A mixin, so that file systems with another fsspec base class share it.
+    """
+
+    def _init_client(
+        self,
+        client: WorkspaceClient | None,
+        config: Config | None,
+        config_params: dict[str, Any] | None,
+    ) -> None:
+        self._closed: bool = False
+
+        self._client = client
+        self._config = config
+        self._config_params = config_params or {}
+
+        self._active_client = self._client
+        self._active_config = client.config if client else self._config
+
+    def _close_client(self) -> None:
+        self._active_client = None
+        self._active_config = None
+        self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        """Check if the file system is closed.
+
+        Returns
+        -------
+        bool
+            `True` if the file system is closed, `False` otherwise.
+        """
+        return self._closed
+
+    @property
+    def config(self) -> Config:
+        """Databricks Workspace API client configuration.
+
+        Returns
+        -------
+        Config
+            The Databricks configuration object.
+        """
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+
+        if self._active_config is None:
+            if self._client is not None:
+                self._active_config = self._client.config
+            else:
+                self._active_config = Config(**self._config_params)
+        return self._active_config
+
+    @property
+    def client(self):
+        """Client for accessing the Databricks Workspace API.
+
+        Returns
+        -------
+        WorkspaceClient
+            The Databricks SDK WorkspaceClient object.
+        """
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+
+        if self._active_client is None:
+            if self._client is not None:
+                self._active_client = self._client
+            else:
+                self._active_client = WorkspaceClient(config=self.config)
+        return self._active_client
+
+
+class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
     """Abstract base class for Databricks file systems."""
 
     protocol = scheme
@@ -78,14 +154,7 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
         if verbose_debug_log is not None:
             self.verbose_debug_log = verbose_debug_log
 
-        self._closed: bool = False
-
-        self._client = client
-        self._config = config
-        self._config_params = config_params or {}
-
-        self.__client = self._client
-        self.__config = client.config if client else self._config
+        self._init_client(client, config, config_params)
 
         _register_cleanup(self)
         self.log.debug("Opened: %s", self)
@@ -93,9 +162,7 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
     def close(self):
         """Close the file system and release any resources."""
         if not self.closed:
-            self.__client = None
-            self.__config = None
-            self._closed = True
+            self._close_client()
             self.log.debug("Closed: %s", self)
 
     def __enter__(self):
@@ -108,55 +175,6 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
 
     def __del__(self):
         self.close()
-
-    @property
-    def closed(self) -> bool:
-        """Check if the file system is closed.
-
-        Returns
-        -------
-        bool
-            `True` if the file system is closed, `False` otherwise.
-        """
-        return self._closed
-
-    @property
-    def config(self) -> Config:
-        """Databricks Workspace API client configuration.
-
-        Returns
-        -------
-        Config
-            The Databricks configuration object.
-        """
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__config is None:
-            if self._client is not None:
-                self.__config = self._client.config
-            else:
-                self.__config = Config(**self._config_params)
-        return self.__config
-
-    @property
-    def client(self):
-        """Client for accessing the Databricks Workspace API.
-
-        Returns
-        -------
-        WorkspaceClient
-            The Databricks SDK WorkspaceClient object.
-        """
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__client is None:
-            if self._client is not None:
-                self.__client = self._client
-            else:
-                self.__client = WorkspaceClient(config=self.config)
-        return self.__client
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -312,5 +330,6 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
 
 __all__ = [
     "AbstractDatabricksFileSystem",
+    "DatabricksClientSupport",
     "root_dir_info",
 ]
