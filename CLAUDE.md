@@ -77,7 +77,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
   `mixins/files.py` uses the same: follow it. Keep resumable upload working too.
 - Volume write block sizes are multiples of 256 KB.
-- Workspace files are `LocallyBufferedFile`s, transferred whole, up to the API's 10 MB.
+- Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
 - Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on a fake DBFS API.
 - Chatty debug logs go under `if self.verbose_debug_log:`.
 

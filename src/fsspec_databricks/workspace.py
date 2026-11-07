@@ -1,8 +1,10 @@
 import asyncio
+import errno
+import io
 import logging
 from glob import has_magic
 from io import UnsupportedOperation
-from typing import IO, Any, Literal
+from typing import Any, Literal
 
 from databricks.sdk.errors import BadRequest
 from databricks.sdk.service.workspace import (
@@ -12,11 +14,9 @@ from databricks.sdk.service.workspace import (
     ObjectInfo,
     ObjectType,
 )
-from fsspec.asyn import sync
 from fsspec_alt_strategies_common.profile import StorageProfile
 
-from ._contrib.strategy.files.buffered import LocallyBufferedFile
-from ._contrib.strategy.files.fsspec_async import AsyncFileAdapter
+from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
 from .base import DatabricksTreeFileSystem, root_dir_info
 from .error import (
     error_mapping,
@@ -247,25 +247,37 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
             await self._sdk(lambda c: c.workspace.mkdirs(workspace_path))
 
     ### File I/O
-    async def _open_file(
+    def _file_info(self, path: str) -> dict[str, Any] | None:
+        """The info of the file at the path, None if missing, with a blocking SDK call."""
+        if self._strip_protocol(path) == dbfs_root:
+            raise is_a_directory_error(path)
+        try:
+            with error_mapping(path):
+                info = _map_info(
+                    self.client.workspace.get_status(_parse(path)), detail=True
+                )
+        except FileNotFoundError:
+            return None
+        if info["type"] == "directory":
+            raise is_a_directory_error(path)
+        return info
+
+    def _open_file(
         self,
         path: str,
         mode: str,
         notebook_format: NotebookFormat | None = None,
         language: Language | str | None = None,
     ) -> "WorkspaceFile":
-        """Open a file object on the running loop, with the formats of the object at the path."""
+        """Open a file object with the formats of the object at the path.
+
+        It calls the blocking SDK directly: never call it on the loop.
+        """
         self.log.debug("Opening file: path=%s, mode=%s", path, mode)
 
         if "+" in mode:
             raise UnsupportedOperation(f"Update mode (+) is not supported: {mode}")
-
-        try:
-            info = await self._info(path)
-            if info["type"] == "directory":
-                raise is_a_directory_error(path)
-        except FileNotFoundError:
-            info = None
+        info = self._file_info(path)
 
         if "r" in mode and info is None:
             raise file_not_found_error(path)
@@ -321,10 +333,11 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
     ):
         if "b" not in mode or kwargs.get("compression"):
             raise ValueError("Only binary mode without compression is supported")
-        f = await self._open_file(path, mode, notebook_format, language)
-        # Downloaded now, so that seek and tell need no request on the loop.
-        await f.aload()
-        return AsyncFileAdapter(f)
+        # Opening downloads the file: seek and tell then need no request on the loop.
+        f = await asyncio.to_thread(
+            self._open_file, path, mode, notebook_format, language
+        )
+        return SyncFileAdapter(f)
 
     def _open(
         self,
@@ -337,7 +350,7 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         language: Language | str | None = None,
         **kwargs,
     ):
-        return sync(self.loop, self._open_file, path, mode, notebook_format, language)
+        return self._open_file(path, mode, notebook_format, language)
 
     def open(
         self,
@@ -367,8 +380,17 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         )
 
 
-class WorkspaceFile(LocallyBufferedFile):
-    """A Workspace file or notebook, downloaded whole and uploaded whole, as the Workspace API transfers them."""
+class WorkspaceFile(io.BytesIO):
+    """A Workspace file or notebook, downloaded whole and uploaded whole, as the Workspace API transfers them.
+
+    A synchronous file calling the SDK directly, with no event loop:
+
+    - Opening for reading or appending downloads the whole file into memory.
+    - Closing uploads it whole, if written, or if the file is new.
+    - Leaving a `with` block by an exception, `discard`, or the garbage collector uploads nothing.
+    - Exclusive creation uploads without overwriting, so that the API refuses a file created meanwhile.
+    - Files are at most `max_size` bytes: beyond it, OSError with `errno.EFBIG`.
+    """
 
     max_size = 10 * 1024 * 1024
     """The Workspace API's limit."""
@@ -383,51 +405,136 @@ class WorkspaceFile(LocallyBufferedFile):
         import_format: ImportFormat | None = None,
         language: Language | None = None,
     ):
-        super().__init__(
-            path,
-            asyncio.get_running_loop(),
-            mode,
-            concurrency_limit=fs.io_limit,
-        )
+        super().__init__()
+        # Set first, so that closing a file whose download failed uploads nothing.
+        self._discarded = True
         self.fs = fs
+        self.path = path
+        self.mode = mode
         self.export_format = export_format
         self.import_format = import_format
         self.language = language
+        self._kind = mode.replace("b", "").replace("t", "")
+        if self._kind not in ("r", "w", "a", "x"):
+            raise ValueError(f"Unsupported mode: {mode!r}")
+        # Whether closing uploads: a new file is uploaded even if empty.
+        self._changed = self._kind in "wx"
+        if self._kind in "ra":
+            try:
+                super().write(self._download())
+            except FileNotFoundError:
+                if self._kind == "r":
+                    raise
+                self._changed = True  # Appending creates the file.
+            self.seek(0, io.SEEK_END if self._kind == "a" else io.SEEK_SET)
+        self._discarded = False
 
-    async def _download(self, target: IO[bytes]) -> None:
+    def _download(self) -> bytes:
         workspace_path = parse_workspace_path(self.path)
+        with (
+            error_mapping(self.path),
+            self.fs.client.workspace.download(
+                workspace_path, format=self.export_format
+            ) as src,
+        ):
+            data = src.read()
+        _check_size(len(data), self.max_size, self.path)
+        return data
 
-        def download(c):
-            with c.workspace.download(workspace_path, format=self.export_format) as src:
-                return src.read()
-
-        with error_mapping(self.path):
-            data = await self.fs._sdk(download)
-        target.write(data)
-
-    async def _send(self, source: IO[bytes], overwrite: bool) -> None:
+    def _upload(self) -> None:
         workspace_path = parse_workspace_path(self.path)
-        data = source.read()
         with error_mapping(self.path):
-            await self.fs._sdk(
-                lambda c: c.workspace.upload(
-                    workspace_path,
-                    data,
-                    format=self.import_format,
-                    language=self.language,
-                    overwrite=overwrite,
-                )
+            self.fs.client.workspace.upload(
+                workspace_path,
+                self.getvalue(),
+                format=self.import_format,
+                language=self.language,
+                # The API refuses to overwrite: no other client's file is lost.
+                overwrite=self._kind != "x",
             )
 
-    async def _upload(self, source: IO[bytes]) -> None:
-        await self._send(source, overwrite=True)
+    @property
+    def size(self) -> int:
+        """The file's size so far."""
+        return self.getbuffer().nbytes
 
-    async def _create(self, source: IO[bytes]) -> None:
-        # The API refuses to overwrite: no other client's file is lost.
-        await self._send(source, overwrite=False)
+    def readable(self) -> bool:
+        self._check_open()
+        return self._kind == "r"
 
-    async def _exists(self) -> bool:
-        return await self.fs._exists(self.path)
+    def writable(self) -> bool:
+        self._check_open()
+        return self._kind != "r"
+
+    def _check_open(self) -> None:
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+
+    def read(self, size: int | None = -1) -> bytes:
+        if not self.readable():
+            raise UnsupportedOperation(f"File not open for reading: {self.path}")
+        return super().read(size)
+
+    def read1(self, size: int | None = -1) -> bytes:
+        return self.read(size)
+
+    def readinto(self, buffer: Any) -> int:
+        if not self.readable():
+            raise UnsupportedOperation(f"File not open for reading: {self.path}")
+        return super().readinto(buffer)
+
+    def readline(self, size: int | None = -1) -> bytes:
+        if not self.readable():
+            raise UnsupportedOperation(f"File not open for reading: {self.path}")
+        return super().readline(size)
+
+    def write(self, data: Any) -> int:
+        if not self.writable():
+            raise UnsupportedOperation(f"File not open for writing: {self.path}")
+        if self._kind == "a":
+            self.seek(0, io.SEEK_END)
+        size = memoryview(data).nbytes
+        _check_size(max(self.tell() + size, self.size), self.max_size, self.path)
+        self._changed = True
+        return super().write(data)
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def truncate(self, size: int | None = None) -> int:
+        if not self.writable():
+            raise UnsupportedOperation(f"File not open for writing: {self.path}")
+        self._changed = True
+        return super().truncate(size)
+
+    def discard(self) -> None:
+        """Upload nothing on closing: the changes are lost."""
+        self._discarded = True
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            if not self._discarded and self._changed:
+                self._upload()
+        finally:
+            super().close()
+
+    def __exit__(self, exc_type: object, *exc_info: object) -> None:
+        if exc_type is not None:
+            self.discard()
+        self.close()
+
+    def __del__(self) -> None:
+        # A file the garbage collector finds open was abandoned: nothing is uploaded.
+        self._discarded = True
+        super().__del__()
+
+
+def _check_size(size: int, max_size: int, path: str) -> None:
+    if size > max_size:
+        raise OSError(errno.EFBIG, f"File too large, over {max_size} bytes", path)
 
 
 __all__ = [

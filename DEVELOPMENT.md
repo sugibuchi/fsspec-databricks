@@ -246,7 +246,7 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 - **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies. Workspace
   and DBFS subclass `DatabricksTreeFileSystem`, in `base.py`.
 - **The file objects** are the library's. Volume files read and write ranges concurrently. Workspace files are
-  `LocallyBufferedFile`s, transferred whole. DBFS files are the SDK's own.
+  sync `WorkspaceFile`s of `workspace.py`, transferred whole. DBFS files are the SDK's own.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
 
 ### Routing
@@ -459,7 +459,7 @@ Part sizes must be multiples of 256 KB. The constructor refuses other minimum an
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of `packages/impl/src/fsspec_alt_strategies/` of
 [fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch. It leaves out
-`flat/`. Its modules keep their license headers and relative imports, and ruff skips them.
+`flat/` and `files/buffered.py`. Its modules keep their license headers and relative imports, and ruff skips them.
 
 Their shared interface is not copied. It is the dependency `fsspec-alt-strategies-common`, from the same repository's
 `packages/common`.
@@ -475,10 +475,11 @@ To refresh the copy:
 `WorkspaceFileSystem`, in `workspace.py`, uses the SDK's `WorkspaceClient.workspace`. Its `storage_profile` declares
 `implicit_folders=False` and `renames_files=False`: directories are objects, and the API has no move.
 
-`WorkspaceFile` is the library's `LocallyBufferedFile`:
+`WorkspaceFile` is a sync `io.BytesIO` calling the SDK directly, with no event loop:
 
-- The first read or write downloads the whole file, into memory and then a temporary file.
-- Closing, or `flush(force=True)`, uploads it whole, if changed.
+- Opening for reading or appending downloads the whole file into memory.
+- Closing uploads it whole, if changed. Leaving a `with` block by an exception uploads nothing.
+- `open_async()` opens it in a thread, and wraps it in the library's `SyncFileAdapter`.
 - Exclusive creation uploads without overwriting, so that the API refuses a file created meanwhile.
 - Files are at most 10 MB.
 
