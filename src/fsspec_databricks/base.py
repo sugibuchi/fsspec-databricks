@@ -11,8 +11,8 @@ from fsspec.spec import AbstractFileSystem
 
 from ._contrib.strategy.tree.filesystem import TreeFileSystem
 from .error import file_exists_error, not_a_directory_error
-from .file import write_mode
 from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
+from .utils import write_mode
 
 T = TypeVar("T")
 

@@ -25,9 +25,8 @@ from .error import (
     not_a_directory_error,
     not_empty_error,
 )
-from .file import write_mode
 from .path import dbfs_root, parse_workspace_path, workspace_root
-from .utils import to_datetime, value_of
+from .utils import to_datetime, value_of, write_mode
 
 workspace_root_info = {
     "name": workspace_root,

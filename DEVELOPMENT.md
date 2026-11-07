@@ -11,11 +11,10 @@
 | `src/fsspec_databricks/workspace.py` | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object.      |
 | `src/fsspec_databricks/dbfs.py`     | `DBFS`, the legacy DBFS.                                                         |
 | `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, the local file system used inside a workspace.      |
-| `src/fsspec_databricks/file.py`     | Helpers telling what a file mode allows.                                         |
 | `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the tree strategies and the file objects.  |
 | `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
 | `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
-| `src/fsspec_databricks/utils.py`    | Timestamps and enums.                                                            |
+| `src/fsspec_databricks/utils.py`    | Timestamps, enums, and what a file mode allows.                                  |
 | `tests/`                            | The tests, a file per module, and the fake Files API.                            |
 
 The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies-common.
@@ -68,7 +67,6 @@ uvx pre-commit run --all-files                  # the hooks
 | `test_workspace_fs.py`     | `WorkspaceFileSystem`                             | Yes       |
 | `test_workspace.py`        | `WorkspaceFileSystem`, on a fake Workspace API    | No        |
 | `test_dbfs.py`             | `DBFS`, on a fake DBFS API                        | No        |
-| `test_file.py`             | `file.py`                                         | No        |
 | `test_path.py`             | `path.py`                                         | No        |
 | `test_utils.py`            | `utils.py`                                        | No        |
 
