@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from aiohttp import (
+    ClientConnectionError,
     ClientHandlerType,
     ClientRequest,
     ClientResponse,
@@ -128,16 +129,14 @@ def test_volume_fs_storage_proxy_probe_timeout(dummy_client):
 
 
 def test_volume_fs_storage_proxy_probe_connection_refused(dummy_client):
-    # Nothing listens on the port once the server is closed.
-    with socket.create_server(("127.0.0.1", 0)) as server:
-        port = server.getsockname()[1]
-
-    with VolumeFileSystem(client=dummy_client) as fs:
-        fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
-        # Long enough for a refused connection on Windows, which retries for seconds.
-        fs._storage_proxy_probe_timeout = 30.0
-
+    # Refused without a socket: Windows retries a refused connection for seconds, and a freed port can be reused.
+    refused = ClientConnectionError("Connection refused")
+    with (
+        patch("aiohttp.ClientSession.head", side_effect=refused) as head,
+        VolumeFileSystem(client=dummy_client) as fs,
+    ):
         assert fs.storage_proxy_available is False
+        head.assert_called_once()
 
 
 def test_volume_fs_storage_proxy_probe_answered(dummy_client, dummy):
