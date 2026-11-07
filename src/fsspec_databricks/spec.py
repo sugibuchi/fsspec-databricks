@@ -81,8 +81,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         io_concurrency: int | None = None,
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
-        ## Logging option
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         """Initialize the DatabricksFileSystem.
@@ -143,8 +141,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             The maximum number of concurrent range reads and part uploads of Unity Catalog Volume files.
         use_local_fs_in_workspace
             Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
         **storage_options
             Standard fsspec storage options.
         """
@@ -189,7 +185,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             client=client,
             config=config,
             config_params=config_params,
-            verbose_debug_log=verbose_debug_log,
             **storage_options,
         )
 
@@ -249,7 +244,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 config=self.config,
                 operation_concurrency=self._operation_concurrency,
                 io_concurrency=self._io_concurrency,
-                verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )
         return self.__volume_fs
@@ -266,7 +260,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 config=self.config,
                 operation_concurrency=self._operation_concurrency,
                 io_concurrency=self._io_concurrency,
-                verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )
         return self.__workspace_fs
@@ -283,7 +276,6 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 config=self.config,
                 operation_concurrency=self._operation_concurrency,
                 io_concurrency=self._io_concurrency,
-                verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )
         return self.__legacy_fs

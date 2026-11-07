@@ -1,7 +1,6 @@
 import asyncio
 import errno
 import io
-import logging
 from io import UnsupportedOperation
 from typing import Any, Literal
 
@@ -86,8 +85,6 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
     storage_profile = StorageProfile(implicit_folders=False, renames_files=False)
     """Directories are objects of their own, and the Workspace API has no move."""
 
-    log = logging.getLogger(__name__)
-
     def __init__(
         self,
         client=None,
@@ -95,7 +92,6 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         config_params: dict[str, Any] | None = None,
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         """Initialize the Workspace file system.
@@ -112,8 +108,6 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
             The maximum number of concurrent API requests of a recursive operation, such as `copy` or `find`.
         io_concurrency : int, optional
             The maximum number of concurrent downloads and uploads of the files opened.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -123,37 +117,38 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
             config_params=config_params,
             operation_concurrency=operation_concurrency,
             io_concurrency=io_concurrency,
-            verbose_debug_log=verbose_debug_log,
             **storage_options,
         )
 
     ### File/directory information
     async def _info(self, path, **kwargs):
-        self.log.debug("Getting info: path=%s", path)
-
         if self._strip_protocol(path) == dbfs_root:
             return dict(root_dir_info)
 
         workspace_path = _parse(path)
         with error_mapping(path):
-            status = await self._sdk(lambda c: c.workspace.get_status(workspace_path))
+            status = await self._sdk(
+                "workspace.get_status",
+                workspace_path,
+                lambda c: c.workspace.get_status(workspace_path),
+            )
         return _map_info(status, detail=True)
 
     async def _ls(self, path, detail=True, **kwargs):
-        self.log.debug("Listing directory: path=%s, detail=%s", path, detail)
-
         if self._strip_protocol(path) == dbfs_root:
             return [dict(workspace_root_info)] if detail else [workspace_root]
 
         workspace_path = _parse(path)
         with error_mapping(path):
-            entries = await self._sdk(lambda c: list(c.workspace.list(workspace_path)))
+            entries = await self._sdk(
+                "workspace.list",
+                workspace_path,
+                lambda c: list(c.workspace.list(workspace_path)),
+            )
         return [_map_info(i, detail) for i in entries]
 
     ### File/directory operations
     async def _cp_file(self, path1, path2, **kwargs):
-        self.log.debug("Copying file: path1=%s, path2=%s", path1, path2)
-
         source_info = await self._info(path1)
         if source_info["type"] == "directory":
             await self._cp_directory(path2)
@@ -171,33 +166,35 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         file_path1 = _parse(path1)
         file_path2 = _parse(path2)
 
-        def copy(c):
-            with (
-                error_mapping(path1),
-                c.workspace.download(file_path1, format=export_format) as f,
-            ):
-                data = f.read()
-            with error_mapping(path2):
-                c.workspace.upload(
+        def download(c):
+            with c.workspace.download(file_path1, format=export_format) as f:
+                return f.read()
+
+        with error_mapping(path1):
+            data = await self._sdk("workspace.download", file_path1, download)
+        with error_mapping(path2):
+            await self._sdk(
+                "workspace.upload",
+                file_path2,
+                lambda c: c.workspace.upload(
                     file_path2,
                     data,
                     format=import_format,
                     language=language,
                     overwrite=True,
-                )
-
-        await self._sdk(copy)
+                ),
+            )
 
     async def _delete(self, path: str, recursive: bool) -> None:
         workspace_path = _parse(path)
         with error_mapping(path):
             await self._sdk(
-                lambda c: c.workspace.delete(workspace_path, recursive=recursive)
+                "workspace.delete",
+                workspace_path,
+                lambda c: c.workspace.delete(workspace_path, recursive=recursive),
             )
 
     async def _rm_file(self, path, **kwargs):
-        self.log.debug("Deleting file: path=%s", path)
-
         # Checked first: the API deletes an empty directory as a file. The
         # strategies give only files, but fsspec's non-recursive rm may not.
         if (await self._info(path))["type"] != "file":
@@ -206,12 +203,9 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
 
     async def _rm_tree(self, path):
         """Delete a directory with all in it, by the API's recursive delete: one request."""
-        self.log.debug("Deleting directory tree: path=%s", path)
         await self._delete(path, recursive=True)
 
     async def _rmdir(self, path):
-        self.log.debug("Deleting directory: path=%s", path)
-
         if (await self._info(path))["type"] != "directory":
             raise not_a_directory_error(path)
 
@@ -226,7 +220,11 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
     async def _create_directory(self, path):
         workspace_path = _parse(path)
         with error_mapping(path):
-            await self._sdk(lambda c: c.workspace.mkdirs(workspace_path))
+            await self._sdk(
+                "workspace.mkdirs",
+                workspace_path,
+                lambda c: c.workspace.mkdirs(workspace_path),
+            )
 
     ### File I/O
     def _file_info(self, path: str) -> dict[str, Any] | None:
@@ -255,8 +253,6 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
 
         It calls the blocking SDK directly: never call it on the loop.
         """
-        self.log.debug("Opening file: path=%s, mode=%s", path, mode)
-
         if "+" in mode:
             raise UnsupportedOperation(f"Update mode (+) is not supported: {mode}")
         info = self._file_info(path)

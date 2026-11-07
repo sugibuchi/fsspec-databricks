@@ -79,7 +79,11 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Volume write block sizes are multiples of 256 KB.
 - Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
 - Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on a fake DBFS API.
-- Chatty debug logs go under `if self.verbose_debug_log:`.
+- Logging follows s3fs and gcsfs. Each module has `logging.getLogger(__name__)`, and the library installs no handlers.
+- Log one DEBUG line per request to Databricks, where it leaves the process: `_sdk` in `base.py`, and Volumes' HTTP
+  helpers in `volume.py`. Keep it cheap, with lazy `%` formatting.
+- Log retries, fallbacks and aborted uploads at WARNING. Log nothing else: operations are logged by the library's
+  monitors.
 
 ## Conventions
 

@@ -34,14 +34,9 @@ def test_abstract_dbx_fs_init(client: WorkspaceClient):
     assert fs._client is client
     assert fs._config_params == {}
 
-    assert not fs.verbose_debug_log
-
-    fs = DummyDatabricksFileSystem(verbose_debug_log=True)
-    assert fs.verbose_debug_log
-
 
 def test_abstract_dbx_fs_close():
-    fs = DummyDatabricksFileSystem(verbose_debug_log=True)
+    fs = DummyDatabricksFileSystem()
     _ = fs.config
     _ = fs.client
 
@@ -63,7 +58,7 @@ def test_abstract_dbx_fs_close():
 
 
 def test_abstract_dbx_fs_serialization():
-    fs = DummyDatabricksFileSystem(verbose_debug_log=True)
+    fs = DummyDatabricksFileSystem()
     _ = fs.config
     _ = fs.client
 
@@ -71,7 +66,6 @@ def test_abstract_dbx_fs_serialization():
     fs2 = pickle.loads(serialized)
 
     assert isinstance(fs2, DummyDatabricksFileSystem)
-    assert fs2.verbose_debug_log
     assert fs is not fs2
     assert fs.config is not fs2.config
     assert fs.client is not fs2.client

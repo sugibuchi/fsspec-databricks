@@ -34,12 +34,27 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `use_local_fs_in_workspace` | Use the local file system when running in a Databricks workspace.                   | `True`  |
 | `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | Per backend |
 | `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
-| `verbose_debug_log`         | Log every operation at debug level.                                                 | `False` |
 
 Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
 `16` and `8`.
 
 Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
+
+### Logging
+
+The library logs under the `fsspec_databricks` logger, and installs no handlers. To trace each request to Databricks,
+enable its debug level:
+
+```python
+import logging
+
+logging.getLogger("fsspec_databricks").setLevel(logging.DEBUG)
+```
+
+Retries, fallbacks and aborted uploads are logged as warnings.
+
+Operations, such as `find`, `rm` or `copy`, are reported by the monitors of `fsspec_alt_strategies_common`. For
+example, `with monitoring(LoggingMonitor(logger)):` logs the operations run in the block.
 
 ---
 

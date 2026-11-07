@@ -103,7 +103,7 @@ def test_workspace_fs_init(client: WorkspaceClient):
 
 
 def test_workspace_fs_close():
-    fs = WorkspaceFileSystem(verbose_debug_log=True)
+    fs = WorkspaceFileSystem()
 
     fs.close()
     assert fs.closed
@@ -131,7 +131,7 @@ def test_workspace_fs_info(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nSELECT * FROM TEST"
@@ -202,7 +202,7 @@ def test_workspace_fs_ls(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\npython"
@@ -277,7 +277,7 @@ def test_workspace_fs_exists(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(
         client,
@@ -312,7 +312,7 @@ def test_workspace_fs_cp_file(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
@@ -375,7 +375,7 @@ def test_workspace_fs_copy(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data1 = randbytes(12345)
     data2 = randbytes(12345)
@@ -452,7 +452,7 @@ def test_workspace_fs_rm(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
@@ -501,7 +501,7 @@ def test_workspace_fs_mkdir(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(client, workspace_test_root, fs_class)
 
@@ -534,7 +534,7 @@ def test_workspace_fs_makedirs(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(client, workspace_test_root, fs_class)
 
@@ -570,7 +570,7 @@ def test_workspace_fs_rmdir(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(
         client,
@@ -612,7 +612,7 @@ def test_workspace_fs_open_r(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
@@ -657,7 +657,7 @@ def test_workspace_fs_open_w(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
@@ -758,7 +758,7 @@ def test_workspace_fs_open_a(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
@@ -844,7 +844,7 @@ def test_workspace_fs_open_x(
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"

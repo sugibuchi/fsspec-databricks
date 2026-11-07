@@ -56,6 +56,8 @@ from .utils import to_datetime, to_rfc3339
 
 T = TypeVar("T")
 
+logger = logging.getLogger(__name__)
+
 _MiB = 1024 * 1024
 
 volumes_root_info = {
@@ -148,8 +150,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
     _storage_proxy_probe_timeout: float = 3.0
     """The timeout in seconds for the storage proxy probe request."""
 
-    log = logging.getLogger(__name__)
-
     def __init__(
         self,
         client: WorkspaceClient | None = None,
@@ -158,7 +158,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
         connection_pool_size: int | None = None,
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         """Initialize the Unity Catalog Volume file system.
@@ -179,8 +178,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
             opened by this file system.
         connection_pool_size : int, optional
             The maximum number of connections in the aiohttp connection pool.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -201,7 +198,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
             config_params=config_params,
             operation_concurrency=operation_concurrency,
             io_concurrency=io_concurrency,
-            verbose_debug_log=verbose_debug_log,
             **storage_options,
         )
 
@@ -239,7 +235,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
                 connector=TCPConnector(limit=self.connection_pool_size)
             )
             self._session_loop = loop
-            self.log.debug("aiohttp ClientSession created.")
         return self._session
 
     @property
@@ -262,12 +257,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
             return self._storage_proxy_available
 
         workspace_id = await asyncio.to_thread(lambda: self.workspace_id)
-        if self.verbose_debug_log:
-            self.log.debug(
-                "Check availability of the storage proxy: workspace_id=%d",
-                workspace_id,
-            )
-
         probe_url = (
             f"{self._storage_proxy_hostname}/api/2.0/fs/files"
             f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
@@ -280,23 +269,27 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
                 timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
             ) as response:
                 available = response.status == 200
-        except (TimeoutError, ClientConnectionError):
+                outcome = response.status
+        except (TimeoutError, ClientConnectionError) as e:
             # The proxy can be unresolvable or unreachable from this network.
             available = False
-
-        self.log.debug(
-            "Storage proxy is available: workspace_id=%d"
-            if available
-            else "Storage proxy is not available: workspace_id=%d",
+            outcome = type(e).__name__
+        logger.debug(
+            "HEAD storage proxy probe: workspace_id=%d, status=%s",
             workspace_id,
+            outcome,
         )
+
+        if not available:
+            logger.warning(
+                "Storage proxy unavailable, using the workspace host: workspace_id=%d",
+                workspace_id,
+            )
         self._storage_proxy_available = available
         return available
 
     ### File/directory information
     async def _info(self, path, include_browse: bool | None = None, **kwargs):
-        self.log.debug("Getting info: path=%s, include_browse=%s", path, include_browse)
-
         if self._strip_protocol(path) == dbfs_root:
             return dict(root_dir_info)
 
@@ -307,19 +300,25 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
                 return dict(volumes_root_info)
             elif schema is None:
                 info = await self._sdk(
-                    lambda c: c.catalogs.get(catalog, include_browse=include_browse)
+                    "catalogs.get",
+                    catalog,
+                    lambda c: c.catalogs.get(catalog, include_browse=include_browse),
                 )
             elif volume is None:
                 info = await self._sdk(
+                    "schemas.get",
+                    f"{catalog}.{schema}",
                     lambda c: c.schemas.get(
                         f"{catalog}.{schema}", include_browse=include_browse
-                    )
+                    ),
                 )
             elif path_in_volume == "/":
                 info = await self._sdk(
+                    "volumes.read",
+                    f"{catalog}.{schema}.{volume}",
                     lambda c: c.volumes.read(
                         f"{catalog}.{schema}.{volume}", include_browse=include_browse
-                    )
+                    ),
                 )
             else:
                 # Files first: they are asked about more often than directories
@@ -331,12 +330,18 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
 
     async def _file_info(self, full_path: str) -> dict[str, Any]:
         """Info of a file in a volume, with one API call. Raises `NotFound` for other paths."""
-        metadata = await self._sdk(lambda c: c.files.get_metadata(full_path))
+        metadata = await self._sdk(
+            "files.get_metadata", full_path, lambda c: c.files.get_metadata(full_path)
+        )
         return _map_info(metadata, detail=True, path=full_path)
 
     async def _directory_info(self, full_path: str) -> dict[str, Any]:
         """Info of a directory in a volume, with one API call. Raises `NotFound` for other paths."""
-        await self._sdk(lambda c: c.files.get_directory_metadata(full_path))
+        await self._sdk(
+            "files.get_directory_metadata",
+            full_path,
+            lambda c: c.files.get_directory_metadata(full_path),
+        )
         return {
             "name": full_path.rstrip("/"),
             "size": None,
@@ -381,13 +386,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
     async def _ls(
         self, path, detail=True, include_browse: bool | None = None, **kwargs
     ):
-        self.log.debug(
-            "Listing path: path=%s, detail=%s, include_browse=%s",
-            path,
-            detail,
-            include_browse,
-        )
-
         if self._strip_protocol(path) == dbfs_root:
             return [dict(volumes_root_info)] if detail else [volumes_root_info["name"]]
 
@@ -396,24 +394,32 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
         with error_mapping(path):
             if catalog is None:
                 entries = await self._sdk(
-                    lambda c: list(c.catalogs.list(include_browse=include_browse))
+                    "catalogs.list",
+                    path,
+                    lambda c: list(c.catalogs.list(include_browse=include_browse)),
                 )
             elif schema is None:
                 entries = await self._sdk(
+                    "schemas.list",
+                    catalog,
                     lambda c: list(
                         c.schemas.list(catalog, include_browse=include_browse)
-                    )
+                    ),
                 )
             elif volume is None:
                 entries = await self._sdk(
+                    "volumes.list",
+                    f"{catalog}.{schema}",
                     lambda c: list(
                         c.volumes.list(catalog, schema, include_browse=include_browse)
-                    )
+                    ),
                 )
             else:
                 try:
                     entries = await self._sdk(
-                        lambda c: list(c.files.list_directory_contents(full_path))
+                        "files.list_directory_contents",
+                        full_path,
+                        lambda c: list(c.files.list_directory_contents(full_path)),
                     )
                 except (NotFound, BadRequest):
                     # A file lists as itself
@@ -423,8 +429,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
 
     ### File/directory operations
     async def _cp_file(self, path1, path2, **kwargs):
-        self.log.debug("Copying file: path1=%s, path2=%s", path1, path2)
-
         try:
             src = await self.open_async(path1, "rb")
         except IsADirectoryError:
@@ -439,23 +443,21 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
                     await dst.write(chunk)
 
     async def _rm_file(self, path, **kwargs):
-        self.log.debug("Deleting file: path=%s", path)
-
         _, _, _, path_in_volume, full_path = _parse(path)
         if path_in_volume is None or path_in_volume == "/":
             raise is_a_directory_error(path)
 
         with error_mapping(path):
             try:
-                await self._sdk(lambda c: c.files.delete(full_path))
+                await self._sdk(
+                    "files.delete", full_path, lambda c: c.files.delete(full_path)
+                )
             except (NotFound, BadRequest):
                 if await self._isdir(path):
                     raise is_a_directory_error(path) from None
                 raise
 
     async def _rmdir(self, path):
-        self.log.debug("Deleting directory: path=%s", path)
-
         _, _, _, path_in_volume, full_path = _parse(path)
         if path_in_volume is None or path_in_volume == "/":
             raise permission_error(
@@ -470,7 +472,11 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
 
         with error_mapping(path):
             try:
-                await self._sdk(lambda c: c.files.delete_directory(full_path))
+                await self._sdk(
+                    "files.delete_directory",
+                    full_path,
+                    lambda c: c.files.delete_directory(full_path),
+                )
             except BadRequest as e:
                 if "is not empty" in str(e):
                     raise not_empty_error(path) from e
@@ -483,7 +489,11 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
                 path, "Catalogs, schemas and volumes are not created as directories"
             )
         with error_mapping(path):
-            await self._sdk(lambda c: c.files.create_directory(full_path))
+            await self._sdk(
+                "files.create_directory",
+                full_path,
+                lambda c: c.files.create_directory(full_path),
+            )
 
     ### File I/O
     async def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
@@ -510,8 +520,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
 
     async def _open_file(self, path: str, mode: str):
         """Open a file object on the running loop."""
-        self.log.debug("Opening file: path=%s, mode=%s", path, mode)
-
         if "a" in mode or "+" in mode:
             raise UnsupportedOperation("Append and read/write modes are not supported.")
 
@@ -532,7 +540,6 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
             "base_url": base_url,
             "auth": _workspace_authenticator(self.config),
             "concurrency_limit": self.io_limit,
-            "verbose_debug_log": self.verbose_debug_log,
         }
         loop = asyncio.get_running_loop()
         if "r" in mode:
@@ -621,15 +628,18 @@ def _response_error(path: str, error: Exception, doing: str) -> OSError:
 
 
 async def _check_response(response: ClientResponse, path: str, doing: str) -> None:
-    """Raise an OSError for a failed response, logging its body."""
+    """Log the request, and raise an OSError for a failed response, logging its body."""
     if response.ok:
+        logger.debug("%s: path=%s, status=%d", doing, path, response.status)
         return
     try:
         body = await response.text()
     except ClientError:
         # The server may close the connection before a refused upload is sent.
         body = None
-    VolumeFileSystem.log.error("%s failed: path=%s, response=%s", doing, path, body)
+    logger.debug(
+        "%s: path=%s, status=%d, response=%s", doing, path, response.status, body
+    )
     try:
         response.raise_for_status()
     except ClientResponseError as e:
@@ -661,15 +671,12 @@ class _VolumeFileMixin:
     If `None` or `0` is given, no timeout will be applied.
     See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
-    log = VolumeFileSystem.log
-
     def _init_requests(
         self,
         path: str,
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
-        verbose_debug_log: bool | None,
     ) -> None:
         self._session = session
         self._base_url = base_url.rstrip("/")
@@ -681,7 +688,6 @@ class _VolumeFileMixin:
             sock_connect=self.timeout_sock_connect,
             sock_read=self.timeout_sock_read,
         )
-        self.verbose_debug_log = bool(verbose_debug_log)
 
 
 class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
@@ -719,11 +725,10 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
         base_url: str,
         auth: ClientMiddlewareType,
         prefer_presigned_url: bool = True,
-        verbose_debug_log: bool | None = None,
         **kwargs,
     ):
         super().__init__(path, loop, size, **kwargs)
-        self._init_requests(path, session, base_url, auth, verbose_debug_log)
+        self._init_requests(path, session, base_url, auth)
 
         self.use_presigned_url = (
             prefer_presigned_url and size >= self.min_presigned_url_size
@@ -764,7 +769,6 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
                     h["name"]: h["value"] for h in result.get("headers", [])
                 }
                 self._presigned_url_refresh_time = refresh_time
-                self.log.debug("Created presigned URL: path=%s", self.path)
 
         return self._presigned_url, dict(self._presigned_url_headers)
 
@@ -777,7 +781,7 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
                 except ClientResponseError as e:
                     if e.status not in _retryable_statuses:
                         raise
-                    self.log.warning(
+                    logger.warning(
                         "Retrying range request after status %d: path=%s, range=%d-%d",
                         e.status,
                         self.path,
@@ -810,6 +814,13 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
             middlewares=middlewares,
             timeout=self._timeout,
         ) as response:
+            logger.debug(
+                "GET range %d-%d: path=%s, status=%d",
+                start,
+                end,
+                self.path,
+                response.status,
+            )
             response.raise_for_status()
             return await response.read()
 
@@ -849,7 +860,6 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         base_url: str,
         auth: ClientMiddlewareType,
         use_presigned_url: bool = True,
-        verbose_debug_log: bool | None = None,
         **kwargs,
     ):
         # Checked before the file is set up, so that nothing is left to abort.
@@ -862,7 +872,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
                 )
 
         super().__init__(path, loop, **kwargs)
-        self._init_requests(path, session, base_url, auth, verbose_debug_log)
+        self._init_requests(path, session, base_url, auth)
 
         self.use_presigned_url = use_presigned_url
         self._upload_session: _MultipartSession | _ResumableSession | None = None
@@ -917,12 +927,10 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
 
         # The server chooses the API of each upload: the file follows it.
         if "multipart_upload" in result:
-            self.log.debug("Upload mode - multipart: path=%s", self.path)
             self._upload_session = _MultipartSession(
                 self, result["multipart_upload"]["session_token"]
             )
         elif "resumable_upload" in result:
-            self.log.debug("Upload mode - resumable: path=%s", self.path)
             self._upload_session = await _ResumableSession.start(
                 self, result["resumable_upload"]["session_token"]
             )
@@ -949,7 +957,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         if self._upload_session is None:
             # No session started, e.g. the initiation failed: nothing to abort.
             return
-        self.log.warning("Aborting upload: path=%s", self.path)
+        logger.warning("Aborting upload: path=%s", self.path)
         await self._upload_session.abort()
 
 
@@ -1134,14 +1142,16 @@ class _ResumableSession:
                 timeout=file._timeout,
                 middlewares=file._middlewares(),
             ) as response:
+                logger.debug(
+                    "PUT resumable part %d-%d: path=%s, status=%d",
+                    start,
+                    end,
+                    file.path,
+                    response.status,
+                )
                 if response.status in (200, 201) and last:
                     return  # Upload is done
                 if response.status != 308:
-                    file.log.error(
-                        "Unexpected response for resumable upload: path=%s, status=%d",
-                        file.path,
-                        response.status,
-                    )
                     raise io_error(
                         file.path,
                         f"Unexpected response for resumable upload: status={response.status}",

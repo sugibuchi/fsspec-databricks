@@ -16,6 +16,8 @@ from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
 
 T = TypeVar("T")
 
+logger = logging.getLogger(__name__)
+
 root_dir_info = {
     "name": dbfs_root,
     "size": None,
@@ -118,17 +120,11 @@ class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
     protocol = scheme
     root_marker = "/"
 
-    log = logging.getLogger(__name__)
-
-    verbose_debug_log: bool = False
-    """Whether to enable verbose debug logging for file system operations."""
-
     def __init__(
         self,
         client: WorkspaceClient | None = None,
         config: Config | None = None,
         config_params: dict[str, Any] | None = None,
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         """Initialize the file system.
@@ -141,27 +137,20 @@ class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
             A Databricks SDK Config object.
         config_params : dict[str, Any], optional
             A dictionary of parameters to create a Databricks SDK Config object.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
         **storage_options
             Standard fsspec storage options.
         """
         # Directory listing cache is explicitly disabled for all Databricks file systems.
         super().__init__(use_listings_cache=False, **storage_options)
 
-        if verbose_debug_log is not None:
-            self.verbose_debug_log = verbose_debug_log
-
         self._init_client(client, config, config_params)
 
         _register_cleanup(self)
-        self.log.debug("Opened: %s", self)
 
     def close(self):
         """Close the file system and release any resources."""
         if not self.closed:
             self._close_client()
-            self.log.debug("Closed: %s", self)
 
     def __enter__(self):
         if self.closed:
@@ -198,11 +187,6 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
     io_concurrency: int = 8
     """The maximum number of concurrent file transfers, shared by all the files opened."""
 
-    verbose_debug_log: bool = False
-    """Whether to enable verbose debug logging for file system operations."""
-
-    log = logging.getLogger(__name__)
-
     def __init__(
         self,
         client: WorkspaceClient | None = None,
@@ -210,7 +194,6 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         config_params: dict[str, Any] | None = None,
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         super().__init__(
@@ -222,11 +205,7 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         )
         self._init_client(client, config, config_params)
 
-        if verbose_debug_log is not None:
-            self.verbose_debug_log = verbose_debug_log
-
         _register_cleanup(self)
-        self.log.debug("Opened: %s", self)
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -241,7 +220,6 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
             self._close_client()
             # Shuts down the threads of `_sdk`.
             TreeFileSystem.close(self)
-            self.log.debug("Closed: %s", self)
 
     def __enter__(self):
         if self.closed:
@@ -255,12 +233,21 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         with contextlib.suppress(Exception):
             self.close()
 
-    async def _sdk(self, func: Callable[[WorkspaceClient], T]) -> T:
+    async def _sdk(
+        self, api: str, path: str, func: Callable[[WorkspaceClient], T]
+    ) -> T:
         """Call the blocking Databricks SDK in one of the file system's own threads, so that the event loop goes on.
 
-        `_blocking` bounds the threads by `operation_concurrency` and `io_concurrency`.
+        `_blocking` bounds the threads by `operation_concurrency` and `io_concurrency`. `api` and `path` name the
+        request in the debug log.
         """
-        return await self._blocking(lambda: func(self.client))
+        try:
+            result = await self._blocking(lambda: func(self.client))
+        except Exception as e:
+            logger.debug("%s: path=%s, failed=%s", api, path, type(e).__name__)
+            raise
+        logger.debug("%s: path=%s, ok", api, path)
+        return result
 
     def created(self, path):
         return self.info(path)["created"]
@@ -283,10 +270,6 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
             raise file_exists_error(path2)
 
     async def _mkdir(self, path, create_parents=True, **kwargs):
-        self.log.debug(
-            "Making directory: path=%s, create_parents=%s", path, create_parents
-        )
-
         parent = self._parent(path)
         if not await self._isdir(parent):
             # Tell a missing parent from a file
@@ -305,8 +288,6 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         await self._create_directory(path)
 
     async def _makedirs(self, path, exist_ok=False):
-        self.log.debug("Making directories: path=%s, exist_ok=%s", path, exist_ok)
-
         try:
             info = await self._info(path)
         except FileNotFoundError:

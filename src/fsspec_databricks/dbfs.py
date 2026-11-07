@@ -1,6 +1,5 @@
 import contextlib
 import functools
-import logging
 from io import UnsupportedOperation
 from typing import Any
 
@@ -50,8 +49,6 @@ class DBFS(DatabricksTreeFileSystem):
     storage_profile = StorageProfile(renames_folders=True)
     """The API's move moves a directory with all in it, in one request."""
 
-    log = logging.getLogger(__name__)
-
     def __init__(
         self,
         client=None,
@@ -59,7 +56,6 @@ class DBFS(DatabricksTreeFileSystem):
         config_params: dict[str, Any] | None = None,
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         """Initialize the DBFS file system.
@@ -76,8 +72,6 @@ class DBFS(DatabricksTreeFileSystem):
             The maximum number of concurrent API requests of a recursive operation, such as `copy` or `find`.
         io_concurrency : int, optional
             Unused: DBFS files are the SDK's own, which read and write one block at a time.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -87,31 +81,28 @@ class DBFS(DatabricksTreeFileSystem):
             config_params=config_params,
             operation_concurrency=operation_concurrency,
             io_concurrency=io_concurrency,
-            verbose_debug_log=verbose_debug_log,
             **storage_options,
         )
 
     ### File/directory information
     async def _info(self, path, **kwargs):
-        self.log.debug("Getting info: path=%s", path)
-
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
-            status = await self._sdk(lambda c: c.dbfs.get_status(dbfs_path))
+            status = await self._sdk(
+                "dbfs.get_status", dbfs_path, lambda c: c.dbfs.get_status(dbfs_path)
+            )
         return map_info(status, detail=True)
 
     async def _ls(self, path, detail=True, **kwargs):
-        self.log.debug("Listing directory: path=%s, detail=%s", path, detail)
-
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
-            entries = await self._sdk(lambda c: list(c.dbfs.list(dbfs_path)))
+            entries = await self._sdk(
+                "dbfs.list", dbfs_path, lambda c: list(c.dbfs.list(dbfs_path))
+            )
         return [map_info(i, detail) for i in entries]
 
     ### File/directory operations
     async def _cp_file(self, path1, path2, **kwargs):
-        self.log.debug("Copying file: path1=%s, path2=%s", path1, path2)
-
         if (await self._info(path1))["type"] == "directory":
             await self._cp_directory(path2)
             return
@@ -119,40 +110,37 @@ class DBFS(DatabricksTreeFileSystem):
         src, dst = parse_dbfs_path(path1), parse_dbfs_path(path2)
         with error_mapping(path1):
             await self._sdk(
-                lambda c: c.dbfs.copy(src, dst, recursive=False, overwrite=True)
+                "dbfs.copy",
+                src,
+                lambda c: c.dbfs.copy(src, dst, recursive=False, overwrite=True),
             )
 
     async def _mv_file(self, path1, path2, **kwargs):
         """Move a file, or a directory with all in it, with the API's move: one request."""
-        self.log.debug("Moving: path1=%s, path2=%s", path1, path2)
-
         src, dst = parse_dbfs_path(path1), parse_dbfs_path(path2)
         with error_mapping(path1):
-            await self._sdk(lambda c: c.dbfs.move(src, dst))
+            await self._sdk("dbfs.move", src, lambda c: c.dbfs.move(src, dst))
 
     async def _delete(self, path: str, recursive: bool) -> None:
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
             # The API's own delete: the SDK's refuses directories unless recursive.
             await self._sdk(
-                lambda c: DbfsAPI.delete(c.dbfs, dbfs_path, recursive=recursive)
+                "dbfs.delete",
+                dbfs_path,
+                lambda c: DbfsAPI.delete(c.dbfs, dbfs_path, recursive=recursive),
             )
 
     async def _rm_file(self, path, **kwargs):
-        self.log.debug("Deleting file: path=%s", path)
-
         if (await self._info(path))["type"] != "file":
             raise is_a_directory_error(path)
         await self._delete(path, recursive=False)
 
     async def _rm_tree(self, path):
         """Delete a directory with all in it, by the API's recursive delete: one request."""
-        self.log.debug("Deleting directory tree: path=%s", path)
         await self._delete(path, recursive=True)
 
     async def _rmdir(self, path):
-        self.log.debug("Deleting directory: path=%s", path)
-
         if (await self._info(path))["type"] != "directory":
             raise not_a_directory_error(path)
         if await self._ls(path, detail=False):
@@ -169,13 +157,13 @@ class DBFS(DatabricksTreeFileSystem):
     async def _create_directory(self, path):
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
-            await self._sdk(lambda c: c.dbfs.mkdirs(dbfs_path))
+            await self._sdk(
+                "dbfs.mkdirs", dbfs_path, lambda c: c.dbfs.mkdirs(dbfs_path)
+            )
 
     ### File I/O
     async def _check_open(self, path: str, mode: str) -> int | None:
         """Refuse what the SDK's files cannot open, and tell the size of a file read."""
-        self.log.debug("Opening file: path=%s, mode=%s", path, mode)
-
         if "a" in mode or "+" in mode:
             raise UnsupportedOperation("Append and read/write modes are not supported.")
 

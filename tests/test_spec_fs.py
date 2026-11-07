@@ -229,7 +229,7 @@ def test_dbx_fs_init(client: WorkspaceClient):
 
 
 def test_dbx_fs_close():
-    fs = DatabricksFileSystem(verbose_debug_log=True)
+    fs = DatabricksFileSystem()
     _ = fs._legacy_fs
     _ = fs._volume_fs
     _ = fs._workspace_fs

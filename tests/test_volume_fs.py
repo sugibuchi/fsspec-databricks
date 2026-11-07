@@ -105,7 +105,7 @@ def test_volume_fs_init():
 
 
 def test_volume_fs_close():
-    fs = VolumeFileSystem(verbose_debug_log=True)
+    fs = VolumeFileSystem()
     session = sync(fs.loop, fs._get_session)
 
     fs.close()
@@ -410,7 +410,7 @@ def test_volume_fs_info(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
 
@@ -506,7 +506,7 @@ def test_volume_fs_ls(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
 
@@ -627,7 +627,7 @@ def test_volume_fs_exists(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(
         client,
@@ -656,7 +656,7 @@ def test_volume_fs_cp_file(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
 
@@ -719,7 +719,7 @@ def test_volume_fs_copy(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data1 = randbytes(12345)
     data2 = randbytes(12345)
@@ -795,7 +795,7 @@ def test_volume_fs_rm(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
 
@@ -848,7 +848,7 @@ def test_volume_fs_mv(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data1 = randbytes(12345)
     data2 = randbytes(12345)
@@ -892,7 +892,7 @@ def test_volume_fs_mkdir(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(client, volume_test_root, fs_class)
 
@@ -925,7 +925,7 @@ def test_volume_fs_makedirs(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(client, volume_test_root, fs_class)
 
@@ -953,7 +953,7 @@ def test_volume_fs_rmdir(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     test_dir = init_test_dir(
         client,
@@ -1006,7 +1006,7 @@ def test_volume_fs_open_r(
             "3_directory": {},
         },
     )
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     for min_size, use_presigned_url in [(len(data), True), (len(data) + 1, False)]:
         with patch.object(VolumeReadableFile, "min_presigned_url_size", min_size):
@@ -1037,7 +1037,7 @@ def test_volume_fs_open_w(
     fs_class: type[VolumeFileSystem | DatabricksFileSystem],
     volume_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(54321)
 
@@ -1101,7 +1101,7 @@ def test_volume_fs_open_w_abort(
             VolumeWritableFile, "_abort_multipart_upload", _abort_multipart_upload
         ):
             with pytest.raises(OSError):
-                with fs_class(client=client, verbose_debug_log=True) as fs:
+                with fs_class(client=client) as fs:
                     with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
                         f.write(randbytes(10 * 1024 * 1024))
         assert _abort_multipart_upload.called
