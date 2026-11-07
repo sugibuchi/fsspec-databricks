@@ -192,10 +192,8 @@ Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 |-------------------------|--------------------------------------------------------------------------------------|---------|
 | `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `16`    |
 | `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `24`    |
-| `upload_mode`           | The upload API of large files: `"multipart"` or `"resumable"`.                       | `"multipart"` |
 
-Every workspace endpoint this package uses takes multipart uploads, on AWS, Azure and GCP alike. A write raises an
-`OSError` when the workspace answers with the other mode. Then set `upload_mode` to that mode.
+Large files are uploaded in parts, by the upload API the workspace chooses for each upload: multipart or resumable.
 
 `VolumeFileSystem` also takes `connection_pool_size`, the maximum number of HTTP connections. It defaults to `100`.
 

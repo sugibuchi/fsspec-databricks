@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class DummyAPIContext:
-    upload_mode: Literal["multipart", "resumable"] = "multipart"
+    upload_mode: Literal["multipart", "resumable", "unknown"] = "multipart"
     check_signed_url: bool = False
     abort_supported: bool = True
 
@@ -176,6 +176,19 @@ async def get_file(
         )
 
 
+def _initiate_upload(context: DummyAPIContext) -> dict:
+    """Start a session of the upload API that the context names, as the server chooses."""
+    session_token = str(uuid.uuid4())
+    if context.upload_mode == "multipart":
+        context.multipart_upload_sessions[session_token] = {}
+        return {"multipart_upload": {"session_token": session_token}}
+    if context.upload_mode == "resumable":
+        context.resumable_upload_sessions[session_token] = (b"", False)
+        return {"resumable_upload": {"session_token": session_token}}
+    # An upload API this package does not know.
+    return {"other_upload": {"session_token": session_token}}
+
+
 @app.post("/api/2.0/fs/files{file_path:path}")
 async def post_file(
     context: Annotated[DummyAPIContext, Depends(dummy_context)],
@@ -195,13 +208,7 @@ async def post_file(
 
     if action is not None:
         if action == "initiate-upload":
-            session_token = str(uuid.uuid4())
-            if context.upload_mode == "multipart":
-                context.multipart_upload_sessions[session_token] = {}
-                return {"multipart_upload": {"session_token": session_token}}
-            else:
-                context.resumable_upload_sessions[session_token] = (b"", False)
-                return {"resumable_upload": {"session_token": session_token}}
+            return _initiate_upload(context)
 
         elif action == "complete-upload":
             if upload_type != "multipart":

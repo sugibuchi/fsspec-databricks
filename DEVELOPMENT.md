@@ -82,7 +82,7 @@ The fixtures, in `tests/conftest.py`:
 
 `tests/dummy_api.py` is a FastAPI app of the Files API's endpoints, served by Hypercorn on a free local port. It
 covers downloads, single uploads, multipart and resumable uploads, presigned URLs and aborts.
-`dummy_api_context.upload_mode` chooses between multipart and resumable uploads.
+`dummy_api_context.upload_mode` chooses which upload API the fake server answers with.
 
 `tests/utils.py` has the helpers that test files share.
 
@@ -400,21 +400,20 @@ jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" 
 
 #### Writing
 
-Each upload API has its own writable file class:
-
-- `VolumeMultipartWritableFile` sends parts concurrently, then completes the upload with their ETags.
-- `VolumeResumableWritableFile` sends one part at a time, with `Content-Range`. The last part completes the upload. A
-  `308` answer gives the bytes received, and the rest is sent again.
-
-Both subclass `_VolumeWritableFile`, which subclasses the library's `AdaptiveWritableFile`. The base class buffers the
-writes:
+`VolumeWritableFile` subclasses the library's `AdaptiveWritableFile`, which buffers the writes:
 
 1. Data is buffered until it reaches `min_multipart_size`, 5 MB. A file closed before then is uploaded by one `PUT`.
 2. Then the upload is initiated.
 3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
 
-The file system chooses the class before opening a file, by its `upload_mode` option, multipart by default.
+The server's answer to the initiation names the upload API. The file builds a session object of that API from it:
+
+- `_MultipartSession` sends parts concurrently, then completes the upload with their ETags.
+- `_ResumableSession` sends one part at a time, with `Content-Range`. The file sets `sequential` for it at the start.
+  The last part completes the upload. A `308` answer gives the bytes received, and the rest is sent again.
+
+The file forwards parts, completion and abort to the session. An answer naming neither API raises an `OSError`.
 
 Multipart support follows the endpoint, not the cloud. The Files API's endpoints listing, `GET /api/2.0/fs/endpoints`,
 gives each endpoint a `multipart_upload_supported` flag:
@@ -423,11 +422,8 @@ gives each endpoint a `multipart_upload_supported` flag:
 - Files API 3.0 on the storage host supports them;
 - Files API 2.0 called directly on the workspace host does not.
 
-AWS and GCP workspaces answered the same, and both started multipart uploads in the live tests. When a workspace answers
-resumable is not yet observed: `upload_mode="resumable"` is for that case.
-
-The server names the mode in its answer to the initiation. A file that gets the other mode aborts that upload and raises
-an `OSError`: it never switches.
+AWS and GCP workspaces answered the same, and both started multipart uploads in the live tests. The server's choice is
+not fixed per cloud and may change with API versions, so the file follows the server's answer per upload.
 
 If a part fails, `close()` aborts the upload and raises an `OSError`. Azure Databricks refuses aborts of multipart
 uploads with a 400 answer, and the abort is then skipped.

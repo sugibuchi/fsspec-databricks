@@ -19,10 +19,8 @@ from fsspec_databricks._contrib.strategy.files.fsspec_async import SyncFileAdapt
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import (
     VolumeFileSystem,
-    VolumeMultipartWritableFile,
     VolumeReadableFile,
-    VolumeResumableWritableFile,
-    _VolumeWritableFile,
+    VolumeWritableFile,
 )
 from tests.utils import bytes_sig, datetime_eq
 
@@ -104,26 +102,6 @@ def test_volume_fs_init():
     with VolumeFileSystem(operation_concurrency=3, io_concurrency=4) as fs:
         assert fs.operation_concurrency == 3
         assert fs.io_concurrency == 4
-
-
-@pytest.mark.parametrize("is_gcp", [True, False])
-def test_volume_fs_upload_mode(is_gcp):
-    client = MagicMock()
-    client.config.is_gcp = is_gcp
-
-    # Multipart on every cloud: the workspace endpoints used all support it.
-    with VolumeFileSystem(client=client) as fs:
-        assert fs.upload_mode == "multipart"
-
-    # The option chooses another.
-    for mode in ("multipart", "resumable"):
-        with VolumeFileSystem(client=client, upload_mode=mode) as fs:
-            assert fs.upload_mode == mode
-        with DatabricksFileSystem(client=client, upload_mode=mode) as fs:
-            assert fs._volume_fs.upload_mode == mode
-
-    with pytest.raises(ValueError, match="upload_mode"):
-        VolumeFileSystem(client=client, upload_mode="parallel")
 
 
 def test_volume_fs_close():
@@ -1073,21 +1051,16 @@ def test_volume_fs_open_w(
     small_data = randbytes(512 * 1023)
     large_data = randbytes(10 * 1024 * 1023)
 
-    for data, min_size, has_session_token in [
-        (small_data, len(small_data) - 1, False),
-        (large_data, len(large_data), True),
-    ]:
-        with patch.object(
-            _VolumeWritableFile, "min_multipart_size", min_size
-        ) as _upload_part:
-            stream = BytesIO(data)
-            with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
-                while chunk := stream.read(1234 * 1000):
-                    f.write(chunk)
+    # A file no bigger than the smallest part is uploaded whole, a larger one in parts.
+    for data, in_parts in [(small_data, False), (large_data, True)]:
+        stream = BytesIO(data)
+        with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+            while chunk := stream.read(1234 * 1000):
+                f.write(chunk)
 
-            written = download(client, f"{test_dir}/1_data.bin")
-            assert has_session_token == (f._session_token is not None)
-            assert bytes_sig(data) == bytes_sig(written)
+        written = download(client, f"{test_dir}/1_data.bin")
+        assert in_parts == (f._upload_session is not None)
+        assert bytes_sig(data) == bytes_sig(written)
 
     # Overwrite existing file
     with fs.open(dbfs_url(f"{test_dir}/2_data.bin"), mode="wb") as f:
@@ -1116,22 +1089,13 @@ def test_volume_fs_open_w_abort(
     test_dir = init_test_dir(client, volume_test_root, fs_class)
 
     with patch.object(
-        _VolumeWritableFile,
+        VolumeWritableFile,
         "_upload_part",
         AsyncMock(side_effect=RuntimeError("Dummy")),
     ):
         _abort_multipart_upload = AsyncMock()
-        with (
-            patch.object(
-                VolumeMultipartWritableFile,
-                "_abort_multipart_upload",
-                _abort_multipart_upload,
-            ),
-            patch.object(
-                VolumeResumableWritableFile,
-                "_abort_multipart_upload",
-                _abort_multipart_upload,
-            ),
+        with patch.object(
+            VolumeWritableFile, "_abort_multipart_upload", _abort_multipart_upload
         ):
             with pytest.raises(OSError):
                 with fs_class(client=client, verbose_debug_log=True) as fs:

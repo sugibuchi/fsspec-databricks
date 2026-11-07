@@ -16,10 +16,10 @@ from aiohttp import (
 
 from fsspec_databricks.volume import (
     VolumeFileSystem,
-    VolumeMultipartWritableFile,
     VolumeReadableFile,
-    VolumeResumableWritableFile,
-    _VolumeWritableFile,
+    VolumeWritableFile,
+    _MultipartSession,
+    _ResumableSession,
 )
 
 from .utils import bytes_sig
@@ -45,14 +45,8 @@ def _reader(session, base_url, loop, data_size, **kwargs):
     )
 
 
-_writer_classes = {
-    "multipart": VolumeMultipartWritableFile,
-    "resumable": VolumeResumableWritableFile,
-}
-
-
-def _writer(session, base_url, loop, upload_mode="multipart", **kwargs):
-    return _writer_classes[upload_mode](
+def _writer(session, base_url, loop, **kwargs):
+    return VolumeWritableFile(
         path,
         loop,
         session=session,
@@ -217,12 +211,14 @@ def test_volume_file_parts_write(
     dummy_api, dummy_api_context, client_event_loop, aiohttp_session, upload_mode
 ):
     data = randbytes(20 * 1000 * 1000)
+    # The one file class follows the API the server chooses.
     dummy_api_context.upload_mode = upload_mode
 
-    with _writer(aiohttp_session, dummy_api, client_event_loop, upload_mode) as f:
+    with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         # Several writes, so that the parts grow
         for i in range(0, len(data), 1000 * 1000):
             f.write(data[i : i + 1000 * 1000])
+        assert f.sequential is (upload_mode == "resumable")
 
     assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
 
@@ -234,10 +230,56 @@ def test_volume_file_parts_write(
             aiohttp_session,
             dummy_api,
             client_event_loop,
-            upload_mode,
             use_presigned_url=False,
         ) as f:
             f.write(data)
+
+
+def test_volume_file_resumable_one_part_in_flight(
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+):
+    dummy_api_context.upload_mode = "resumable"
+    data = randbytes(40 * 1000 * 1000)
+    original = _ResumableSession.upload_part
+    in_flight = 0
+    most_in_flight = 0
+
+    async def counting(self, *args, **kwargs):
+        nonlocal in_flight, most_in_flight
+        in_flight += 1
+        most_in_flight = max(most_in_flight, in_flight)
+        try:
+            # A pause, so that a concurrent part would overlap this one.
+            await asyncio.sleep(0.01)
+            return await original(self, *args, **kwargs)
+        finally:
+            in_flight -= 1
+
+    with patch.object(_ResumableSession, "upload_part", counting):
+        with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+            for i in range(0, len(data), 1000 * 1000):
+                f.write(data[i : i + 1000 * 1000])
+
+    assert bytes_sig(data) == bytes_sig(dummy_api_context.files[path])
+    assert most_in_flight == 1
+
+
+@pytest.mark.parametrize("use_presigned_url", [True, False])
+def test_volume_file_unexpected_initiate_reply(
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session, use_presigned_url
+):
+    dummy_api_context.upload_mode = "unknown"
+
+    with pytest.raises(OSError, match="Unexpected initiate-upload response"):
+        with _writer(
+            aiohttp_session,
+            dummy_api,
+            client_event_loop,
+            use_presigned_url=use_presigned_url,
+        ) as f:
+            f.write(randbytes(20 * 1000 * 1000))
+
+    assert path not in dummy_api_context.files
 
 
 @pytest.mark.parametrize("name", ["min_block_size", "max_block_size"])
@@ -250,10 +292,7 @@ def test_volume_file_part_granularity(
         )
 
 
-@pytest.mark.parametrize(
-    "file_class",
-    [VolumeReadableFile, VolumeMultipartWritableFile, VolumeResumableWritableFile],
-)
+@pytest.mark.parametrize("file_class", [VolumeReadableFile, VolumeWritableFile])
 def test_volume_file_invalid_spread(
     dummy_api, client_event_loop, aiohttp_session, file_class
 ):
@@ -282,7 +321,7 @@ def test_volume_file_multipart_write_abort(
     dummy_api_context.abort_supported = abort_supported
 
     with patch.object(
-        _VolumeWritableFile,
+        VolumeWritableFile,
         "_upload_part",
         AsyncMock(side_effect=RuntimeError("Dummy")),
     ):
@@ -309,7 +348,7 @@ def test_volume_file_write_parquet(
 ):
     dummy_api_context.upload_mode = upload_mode
 
-    with _writer(aiohttp_session, dummy_api, client_event_loop, upload_mode) as f:
+    with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         pq.write_table(pa.Table.from_pylist(dummy_table), f)
 
     df = pd.read_parquet(BytesIO(dummy_api_context.files[path]))
@@ -321,57 +360,51 @@ def test_volume_file_write_parquet(
     assert df.tail(1).to_dict("records") == [dummy_table[-1]]
 
 
+@pytest.mark.parametrize("use_presigned_url", [True, False])
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_parts_write_abort_per_mode(
-    dummy_api, dummy_api_context, client_event_loop, aiohttp_session, upload_mode
-):
-    dummy_api_context.upload_mode = upload_mode
-
-    with patch.object(
-        _writer_classes[upload_mode],
-        "_send_part",
-        AsyncMock(side_effect=RuntimeError("Dummy")),
-    ):
-        with pytest.raises(OSError, match="Failed to upload a part"):
-            with _writer(
-                aiohttp_session, dummy_api, client_event_loop, upload_mode
-            ) as f:
-                f.write(randbytes(20 * 1000 * 1000))
-
-    assert path not in dummy_api_context.files
-    assert dummy_api_context.multipart_upload_sessions == {}
-    assert dummy_api_context.resumable_upload_sessions == {}
-
-
-@pytest.mark.parametrize("use_presigned_url", [True, False])
-@pytest.mark.parametrize(
-    ("upload_mode", "server_mode"),
-    [("multipart", "resumable"), ("resumable", "multipart")],
-)
-def test_volume_file_upload_mode_mismatch(
     dummy_api,
     dummy_api_context,
     client_event_loop,
     aiohttp_session,
     upload_mode,
-    server_mode,
     use_presigned_url,
 ):
-    dummy_api_context.upload_mode = server_mode
+    dummy_api_context.upload_mode = upload_mode
+    session_class = (
+        _MultipartSession if upload_mode == "multipart" else _ResumableSession
+    )
 
-    with pytest.raises(OSError, match="upload_mode") as exc_info:
-        with _writer(
-            aiohttp_session,
-            dummy_api,
-            client_event_loop,
-            upload_mode,
-            use_presigned_url=use_presigned_url,
-        ) as f:
-            f.write(randbytes(20 * 1000 * 1000))
+    with patch.object(
+        session_class,
+        "upload_part",
+        AsyncMock(side_effect=RuntimeError("Dummy")),
+    ):
+        with pytest.raises(OSError, match="Failed to upload a part"):
+            with _writer(
+                aiohttp_session,
+                dummy_api,
+                client_event_loop,
+                use_presigned_url=use_presigned_url,
+            ) as f:
+                f.write(randbytes(20 * 1000 * 1000))
 
-    assert upload_mode in str(exc_info.value)
-    assert server_mode in str(exc_info.value)
     assert path not in dummy_api_context.files
-    # The session the server started is aborted.
+    # The session the server started is aborted by its own API.
     assert dummy_api_context.multipart_upload_sessions == {}
     assert dummy_api_context.resumable_upload_sessions == {}
+
+
+def test_volume_file_abort_without_session(
+    dummy_api, dummy_api_context, client_event_loop, aiohttp_session
+):
+    with patch.object(
+        VolumeWritableFile,
+        "_post_json",
+        AsyncMock(side_effect=AssertionError("No request expected")),
+    ):
+        f = _writer(aiohttp_session, dummy_api, client_event_loop)
+        # No session started: the abort sends nothing.
+        asyncio.run_coroutine_threadsafe(
+            f._abort_multipart_upload(), client_event_loop
+        ).result()

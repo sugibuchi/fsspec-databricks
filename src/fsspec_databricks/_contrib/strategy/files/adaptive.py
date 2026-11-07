@@ -448,8 +448,8 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     and a multipart upload's start, parts, completion and abort.
 
     - Until ``min_multipart_size`` bytes are written, they are buffered. A file
-      closed by then is uploaded in one request, and so is one that fits a
-      single part when closed.
+      closed by then is uploaded in one request, and so is one no bigger than
+      ``min_block_size`` when closed.
     - Beyond, parts are uploaded as soon as they fill, as the concurrency
       limit allows, while writing goes on. A file that has had n bytes
       written is assumed to get n more: its parts grow, so as to split that
@@ -478,6 +478,9 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     - ``sequential`` sends a part only once the one before it is uploaded.
       Waiting, it holds no permit of the concurrency limit, which files may
       share. ``spread`` of 1 then suits best: fewer, larger parts.
+    - A subclass may set ``sequential`` in ``_start_multipart_upload``, e.g.
+      where the storage chooses the kind of upload when it starts. It holds
+      for every part, as no part is sent before the upload starts.
     - Every part but the last has the size ``_block_size`` returns. A subclass
       overrides it to keep parts a multiple of 256 KiB, or any other rule.
     - The last part is the one given ``last``: with the file's size, as its
@@ -702,13 +705,10 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                 buffer.clear()
             return
         block = self._block_size(len(buffer) if closing else self._pos)
-        if (
-            closing
-            and not self._multipart
-            and len(buffer) - block < self.min_block_size
-        ):
-            # One part would take it all: one request uploads it, where a multipart
-            # upload would add its start and completion.
+        if closing and not self._multipart and len(buffer) <= self.min_block_size:
+            # No bigger than the smallest part: one request uploads it, where a
+            # multipart upload would add its start and completion. A bigger file goes
+            # in parts, sent at once, which a storage may take faster than one request.
             await self._upload_all(bytes(buffer))
             buffer.clear()
             return
