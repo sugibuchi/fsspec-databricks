@@ -71,7 +71,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - File systems must stay picklable. fsspec pickles them as their constructor arguments, so every argument must be
   picklable. Runtime attributes are never pickled.
 - Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
-  `mixins/files.py` uses the same: follow it. Keep the fallback to resumable upload working.
+  `mixins/files.py` uses the same: follow it. Keep resumable upload working too.
 - Volume write block sizes are multiples of 256 KB.
 - Workspace files are cached whole in memory, up to the API's 10 MB.
 - Chatty debug logs go under `if self.verbose_debug_log:`.

@@ -2,6 +2,7 @@ import atexit
 import json
 import os
 import shutil
+from typing import Literal
 
 from databricks.sdk import AuthorizationDetail, CredentialsStrategy, WorkspaceClient
 from databricks.sdk.config import Config
@@ -78,6 +79,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         ## Options for Unity Catalog Volume file system
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
+        upload_mode: Literal["multipart", "resumable"] | None = None,
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
         ## Logging option
@@ -140,6 +142,9 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             The maximum number of concurrent API requests of a recursive operation on Unity Catalog Volumes.
         io_concurrency : int, optional
             The maximum number of concurrent range reads and part uploads of Unity Catalog Volume files.
+        upload_mode : {"multipart", "resumable"}, optional
+            The upload API of large Unity Catalog Volume files. By default, resumable on GCP and
+            multipart elsewhere.
         use_local_fs_in_workspace
             Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
         verbose_debug_log : bool, optional
@@ -196,6 +201,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
         self._operation_concurrency = operation_concurrency
         self._io_concurrency = io_concurrency
+        self._upload_mode = upload_mode
         if use_local_fs_in_workspace is not None:
             self.use_local_fs_in_workspace = use_local_fs_in_workspace
 
@@ -248,6 +254,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
                 config=self.config,
                 operation_concurrency=self._operation_concurrency,
                 io_concurrency=self._io_concurrency,
+                upload_mode=self._upload_mode,
                 verbose_debug_log=self.verbose_debug_log,
                 **self._storage_options,
             )

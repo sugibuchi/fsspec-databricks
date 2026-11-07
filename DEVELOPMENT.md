@@ -355,7 +355,7 @@ Each metadata call is a round trip, so the checks inside a volume make as few as
 
 Copies, moves and deletes inside a volume:
 
-- `cp_file` streams the file from a `VolumeReadableFile` into a `VolumeWritableFile`, as the Files API has no copy.
+- `cp_file` streams the file from a `VolumeReadableFile` into a writable Volume file, as the Files API has no copy.
 - `mv` is a copy, then a delete: the Files API has no rename.
 - `rm` of a file calls `files.delete`. Only when that fails does it check for a directory.
 - A recursive `rm`, `copy` or `mv` is a tree strategy. It acts on each folder as soon as it is listed.
@@ -400,18 +400,30 @@ jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" 
 
 #### Writing
 
-`VolumeWritableFile` subclasses the library's `AdaptiveWritableFile`. The base class buffers the writes:
+Each upload API has its own writable file class:
+
+- `VolumeMultipartWritableFile` sends parts concurrently, then completes the upload with their ETags.
+- `VolumeResumableWritableFile` sends one part at a time, with `Content-Range`. The last part completes the upload. A
+  `308` answer gives the bytes received, and the rest is sent again.
+
+Both subclass `_VolumeWritableFile`, which subclasses the library's `AdaptiveWritableFile`. The base class buffers the
+writes:
 
 1. Data is buffered until it reaches `min_multipart_size`, 5 MB. A file closed before then is uploaded by one `PUT`.
-2. Then the upload is initiated, and the server chooses multipart or resumable upload.
+2. Then the upload is initiated.
 3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
 
-The two kinds of upload differ:
+The file system chooses the class before opening a file, by its `upload_mode` option. Without the option, it takes the
+mode of the workspace's cloud from the SDK config:
 
-- **Multipart**: parts upload concurrently, then the upload completes with their ETags.
-- **Resumable**: one part at a time, with `Content-Range`. The file sets the base class's `sequential` once the server
-  chooses it. A `308` answer gives the bytes received, and the rest is sent again.
+- GCP takes resumable uploads.
+- AWS and Azure take multipart uploads.
+
+This mapping is assumed, not documented by Databricks: live tests on each cloud should confirm it.
+
+The server names the mode in its answer to the initiation. A file that gets the other mode aborts that upload and raises
+an `OSError`: it never switches.
 
 If a part fails, `close()` aborts the upload and raises an `OSError`. Azure Databricks refuses aborts of multipart
 uploads with a 400 answer, and the abort is then skipped.

@@ -168,6 +168,7 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         io_concurrency: int | None = None,
         connection_pool_size: int | None = None,
         verbose_debug_log: bool | None = None,
+        upload_mode: Literal["multipart", "resumable"] | None = None,
         **storage_options,
     ):
         """Initialize the Unity Catalog Volume file system.
@@ -190,9 +191,18 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             The maximum number of connections in the aiohttp connection pool.
         verbose_debug_log : bool, optional
             Whether to enable verbose debug logging for file system operations.
+        upload_mode : {"multipart", "resumable"}, optional
+            The upload API of files from `VolumeWritableFile.min_multipart_size`. Multipart
+            uploads send parts in parallel, and resumable uploads one at a time. By default,
+            resumable on GCP workspaces and multipart elsewhere. Writing raises `OSError` when
+            the workspace answers with the other one.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
+        if upload_mode not in (None, "multipart", "resumable"):
+            raise ValueError(
+                f"upload_mode must be 'multipart', 'resumable' or None: {upload_mode!r}"
+            )
         super().__init__(
             operation_concurrency=operation_concurrency or self.operation_concurrency,
             io_concurrency=io_concurrency or self.io_concurrency,
@@ -210,6 +220,8 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         self._lock = threading.Lock()
         self._workspace_id: int | None = None
         self._storage_proxy_available: bool | None = None
+        self._upload_mode_option = upload_mode
+        self._default_upload_mode: Literal["multipart", "resumable"] | None = None
 
         # Made on the loop that uses it, as TCPConnector needs a running loop.
         self._session: ClientSession | None = None
@@ -287,6 +299,19 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             if self._workspace_id is None:
                 self._workspace_id = self.client.get_workspace_id()
             return self._workspace_id
+
+    @property
+    def upload_mode(self) -> Literal["multipart", "resumable"]:
+        """The upload API of large files: the `upload_mode` option, or the workspace cloud's default."""
+        if self._upload_mode_option is not None:
+            return self._upload_mode_option
+        if self._default_upload_mode is None:
+            # Assumed per cloud: GCS takes resumable uploads, S3 and ADLS multipart ones.
+            # The config resolves lazily, and may block on authentication.
+            self._default_upload_mode = (
+                "resumable" if self.config.is_gcp else "multipart"
+            )
+        return self._default_upload_mode
 
     @property
     def storage_proxy_available(self) -> bool:
@@ -629,7 +654,14 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
                 **kwargs,
             )
         else:
-            return VolumeWritableFile(
+            # The property may resolve the config, which blocks.
+            mode = await asyncio.to_thread(lambda: self.upload_mode)
+            file_class = (
+                VolumeResumableWritableFile
+                if mode == "resumable"
+                else VolumeMultipartWritableFile
+            )
+            return file_class(
                 full_path, loop, use_presigned_url=use_presigned_url, **kwargs
             )
 
@@ -899,13 +931,14 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
 _range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
 
 
-class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
-    """A Unity Catalog Volume file uploaded whole, or in parts by a multipart or a resumable upload.
+class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
+    """A Unity Catalog Volume file uploaded whole, or in parts by the upload API of a subclass.
 
-    The server chooses multipart or resumable when the upload starts. A resumable upload sends its
-    parts in order, one at a time. Parts but the last are multiples of 256 KB, as resumable
-    uploads require.
+    What both upload APIs share: the whole-file upload, the initiation and the URLs of a session.
     """
+
+    upload_mode: Literal["multipart", "resumable"]
+    """The upload API of the subclass, which the initiate-upload reply must name."""
 
     part_granularity: int = 256 * 1024
     """Every part but the last is a multiple of this size."""
@@ -947,13 +980,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         self._init_requests(path, session, base_url, auth, verbose_debug_log)
 
         self.use_presigned_url = use_presigned_url
-
-        self._upload_mode: Literal["multipart", "resumable"] = "multipart"
         self._session_token: str | None = None
-
-        self._resumable_upload_url: str | None = None
-        self._resumable_upload_headers: dict[str, str] = {}
-        self._resumable_upload_params: dict[str, Any] | None = None
 
     def _url_expire_time(self) -> str:
         return to_rfc3339(
@@ -990,25 +1017,163 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             await _check_response(response, self.path, "Initiating upload")
             result = await response.json()
 
-        if "multipart_upload" in result:
-            self.log.debug("Upload mode - multipart: path=%s", self.path)
-            self._upload_mode = "multipart"
-            self._session_token = result["multipart_upload"]["session_token"]
-        elif "resumable_upload" in result:
-            self.log.debug("Upload mode - resumable: path=%s", self.path)
-            self._upload_mode = "resumable"
-            self._session_token = result["resumable_upload"]["session_token"]
-            # Read by the base class before each next part: they go one at a time, in order.
-            self.sequential = True
-            (
-                self._resumable_upload_url,
-                self._resumable_upload_headers,
-                self._resumable_upload_params,
-            ) = await self._get_resumable_upload_url()
-        else:
-            raise io_error(self.path, f"Unexpected initiate-upload response: {result}")
+        expected = f"{self.upload_mode}_upload"
+        if expected in result:
+            self.log.debug("Upload mode - %s: path=%s", self.upload_mode, self.path)
+            self._session_token = result[expected]["session_token"]
+            await self._start_session()
+            return
 
-    async def _get_multipart_upload_url(
+        other = "resumable" if self.upload_mode == "multipart" else "multipart"
+        if f"{other}_upload" not in result:
+            raise io_error(self.path, f"Unexpected initiate-upload response: {result}")
+        message = (
+            f"The workspace started a {other} upload, but the file system uses "
+            f"{self.upload_mode} uploads: set the upload_mode option to {other!r}"
+        )
+        error = io_error(self.path, message)
+        try:
+            await self._discard_session(
+                other, result[f"{other}_upload"]["session_token"]
+            )
+        except (OSError, ClientError, TimeoutError) as abort_error:
+            error.add_note(
+                f"Aborting the {other} upload of {self.path!r} failed: {abort_error!r}"
+            )
+        raise error
+
+    async def _start_session(self) -> None:
+        """Prepare the session just initiated, before its first part."""
+
+    async def _discard_session(
+        self, mode: Literal["multipart", "resumable"], session_token: str
+    ) -> None:
+        """Abort a session of either upload API, such as one the server started unasked."""
+        if mode == "multipart":
+            try:
+                url, headers, params = await self._get_abort_url(session_token)
+            except OSError as e:
+                if (
+                    isinstance(e.__cause__, ClientResponseError)
+                    and e.__cause__.status == 400
+                ):
+                    return  # Azure Databricks does not support abort of multipart upload
+                raise
+        else:
+            url, headers, params = await self._get_resumable_upload_url(session_token)
+        await self._delete(url, headers, params)
+
+    async def _get_abort_url(
+        self, session_token: str
+    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+        if self.use_presigned_url:
+            result = await self._post_json(
+                f"{self._base_url}/api/2.0/fs/create-abort-upload-url",
+                {
+                    "path": self.path,
+                    "session_token": session_token,
+                    "expire_time": self._url_expire_time(),
+                },
+                "Getting URL for upload abort",
+            )
+            url = result["abort_upload_url"]["url"]
+            headers = {
+                h["name"]: h["value"]
+                for h in result["abort_upload_url"].get("headers", [])
+            }
+            headers["Content-Type"] = "application/octet-stream"
+            params = None
+        else:
+            url = self._files_url
+            headers = {"Content-Type": "application/json"}
+            params = {"action": "abort-upload", "session_token": session_token}
+
+        return url, headers, params
+
+    async def _get_resumable_upload_url(
+        self, session_token: str
+    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+        if self.use_presigned_url:
+            result = await self._post_json(
+                f"{self._base_url}/api/2.0/fs/create-resumable-upload-url",
+                {
+                    "path": self.path,
+                    "session_token": session_token,
+                    "expire_time": self._url_expire_time(),
+                },
+                "Getting URL for resumable upload",
+            )
+            url = result["resumable_upload_url"]["url"]
+            headers = {
+                h["name"]: h["value"]
+                for h in result["resumable_upload_url"].get("headers", [])
+            }
+            params = None
+        else:
+            url = self._files_url
+            headers = {"Content-Type": "application/octet-stream"}
+            params = {"session_token": session_token, "upload_type": "resumable"}
+
+        return url, headers, params
+
+    async def _delete(
+        self, url: str, headers: dict[str, str], params: dict[str, Any] | None
+    ) -> None:
+        async with self._session.delete(
+            url,
+            headers=headers,
+            params=params,
+            middlewares=self._middlewares(),
+            data=b"",
+            timeout=self._timeout,
+        ) as response:
+            await _check_response(response, self.path, "Aborting upload")
+
+    async def _upload_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> tuple[int, str] | None:
+        # An OSError, also where the base class raises a part's error as it is: closing
+        # awaits the parts in flight.
+        try:
+            return await self._send_part(data, start, end, index, last)
+        except (ClientError, TimeoutError) as e:
+            raise _response_error(self.path, e, f"Uploading part {index}") from e
+
+    async def _send_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> tuple[int, str] | None:
+        raise NotImplementedError
+
+    async def _abort_multipart_upload(self) -> None:
+        self.log.warning("Aborting upload: path=%s", self.path)
+        await self._discard_session(self.upload_mode, self._session_token)
+
+
+class VolumeMultipartWritableFile(_VolumeWritableFile):
+    """A Unity Catalog Volume file uploaded whole, or by a multipart upload of parallel parts."""
+
+    upload_mode = "multipart"
+
+    async def _send_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> tuple[int, str]:
+        # The multipart upload API's part numbers are 1-based.
+        part_number = index + 1
+
+        url, headers, params = await self._get_part_url(part_number)
+
+        async with self._session.put(
+            url,
+            headers=headers,
+            params=params,
+            data=data,
+            middlewares=self._middlewares(),
+            timeout=self._timeout,
+        ) as response:
+            await _check_response(response, self.path, f"Uploading part {part_number}")
+            return part_number, response.headers.get("etag", "")
+
+    async def _get_part_url(
         self, part_number: int
     ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
         if self.use_presigned_url:
@@ -1041,78 +1206,63 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
 
         return url, headers, params
 
-    async def _upload_part(
-        self, data: bytes, start: int, end: int, index: int, last: bool
-    ) -> tuple[int, str] | None:
-        # An OSError, also where the base class raises a part's error as it is: closing
-        # awaits the parts in flight.
-        try:
-            if self._upload_mode == "resumable":
-                await self._upload_resumable_part(data, start, end, last)
-                return None
-            return await self._upload_multipart_part(data, index)
-        except (ClientError, TimeoutError) as e:
-            raise _response_error(self.path, e, f"Uploading part {index}") from e
-
-    async def _upload_multipart_part(self, data: bytes, index: int) -> tuple[int, str]:
-        # The multipart upload API's part numbers are 1-based.
-        part_number = index + 1
-
-        url, headers, params = await self._get_multipart_upload_url(part_number)
-
-        async with self._session.put(
-            url,
-            headers=headers,
-            params=params,
-            data=data,
-            middlewares=self._middlewares(),
+    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
+        async with self._session.post(
+            self._files_url,
+            params={
+                "action": "complete-upload",
+                "upload_type": "multipart",
+                "session_token": self._session_token,
+            },
+            json={
+                "parts": [
+                    {"part_number": i, "etag": etag} for i, etag in sorted(parts)
+                ],
+            },
+            middlewares=(self._auth,),
             timeout=self._timeout,
         ) as response:
-            await _check_response(response, self.path, f"Uploading part {part_number}")
-            return part_number, response.headers.get("etag", "")
+            await _check_response(response, self.path, "Completing upload")
 
-    async def _get_resumable_upload_url(
-        self,
-    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        if self.use_presigned_url:
-            result = await self._post_json(
-                f"{self._base_url}/api/2.0/fs/create-resumable-upload-url",
-                {
-                    "path": self.path,
-                    "session_token": self._session_token,
-                    "expire_time": self._url_expire_time(),
-                },
-                "Getting URL for resumable upload",
-            )
-            url = result["resumable_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["resumable_upload_url"].get("headers", [])
-            }
-            params = None
-        else:
-            url = self._files_url
-            headers = {"Content-Type": "application/octet-stream"}
-            params = {
-                "session_token": self._session_token,
-                "upload_type": "resumable",
-            }
 
-        return url, headers, params
+class VolumeResumableWritableFile(_VolumeWritableFile):
+    """A Unity Catalog Volume file uploaded whole, or by a resumable upload of parts in order.
 
-    async def _upload_resumable_part(
-        self, data: bytes, start: int, end: int, last: bool
+    Its parts go one at a time. Parts but the last are multiples of 256 KB, as resumable uploads
+    require. The last part completes the upload.
+    """
+
+    upload_mode = "resumable"
+
+    sequential = True
+    """Read by the base class before each next part: they go one at a time, in order."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._upload_url: str | None = None
+        self._upload_headers: dict[str, str] = {}
+        self._upload_params: dict[str, Any] | None = None
+
+    async def _start_session(self) -> None:
+        (
+            self._upload_url,
+            self._upload_headers,
+            self._upload_params,
+        ) = await self._get_resumable_upload_url(self._session_token)
+
+    async def _send_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> None:
         original_start = start
         while True:
-            headers = dict(self._resumable_upload_headers)
+            headers = dict(self._upload_headers)
             headers["Content-Range"] = f"bytes {start}-{end - 1}/{end if last else '*'}"
             headers["Content-Type"] = "application/octet-stream"
 
             async with self._session.put(
-                self._resumable_upload_url,
+                self._upload_url,
                 headers=headers,
-                params=self._resumable_upload_params,
+                params=self._upload_params,
                 data=data[start - original_start :],
                 timeout=self._timeout,
                 middlewares=self._middlewares(),
@@ -1143,84 +1293,18 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
                 start = confirmed + 1
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        if self._upload_mode == "resumable":
-            return  # The last part completes a resumable upload.
-
-        async with self._session.post(
-            self._files_url,
-            params={
-                "action": "complete-upload",
-                "upload_type": "multipart",
-                "session_token": self._session_token,
-            },
-            json={
-                "parts": [
-                    {"part_number": i, "etag": etag} for i, etag in sorted(parts)
-                ],
-            },
-            middlewares=(self._auth,),
-            timeout=self._timeout,
-        ) as response:
-            await _check_response(response, self.path, "Completing upload")
-
-    async def _get_multipart_upload_abort_url(
-        self,
-    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        if self.use_presigned_url:
-            result = await self._post_json(
-                f"{self._base_url}/api/2.0/fs/create-abort-upload-url",
-                {
-                    "path": self.path,
-                    "session_token": self._session_token,
-                    "expire_time": self._url_expire_time(),
-                },
-                "Getting URL for upload abort",
-            )
-            url = result["abort_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["abort_upload_url"].get("headers", [])
-            }
-            headers["Content-Type"] = "application/octet-stream"
-            params = None
-        else:
-            url = self._files_url
-            headers = {"Content-Type": "application/json"}
-            params = {"action": "abort-upload", "session_token": self._session_token}
-
-        return url, headers, params
+        pass  # The last part completes a resumable upload.
 
     async def _abort_multipart_upload(self) -> None:
+        # The upload URL is known already: no request for another.
         self.log.warning("Aborting upload: path=%s", self.path)
-        if self._upload_mode == "multipart":
-            try:
-                url, headers, params = await self._get_multipart_upload_abort_url()
-            except OSError as e:
-                if (
-                    isinstance(e.__cause__, ClientResponseError)
-                    and e.__cause__.status == 400
-                ):
-                    return  # Azure Databricks does not support abort of multipart upload
-                raise
-        else:
-            url = self._resumable_upload_url
-            headers = self._resumable_upload_headers
-            params = self._resumable_upload_params
-
-        async with self._session.delete(
-            url,
-            headers=headers,
-            params=params,
-            middlewares=self._middlewares(),
-            data=b"",
-            timeout=self._timeout,
-        ) as response:
-            await _check_response(response, self.path, "Aborting upload")
+        await self._delete(self._upload_url, self._upload_headers, self._upload_params)
 
 
 __all__ = [
     "VolumeFileSystem",
+    "VolumeMultipartWritableFile",
     "VolumeReadableFile",
-    "VolumeWritableFile",
+    "VolumeResumableWritableFile",
     "volumes_root_info",
 ]

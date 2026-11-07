@@ -163,8 +163,8 @@ fs.ls("dbfs:/Volumes/my_catalog/my_schema/my_volume/data")
 
 `fs.ls("dbfs:/Volumes")` lists the catalogs, then the schemas and volumes below.
 
-Reads and writes run concurrent requests. Large writes use multipart upload, or resumable upload where the workspace
-requires it.
+Reads and writes run concurrent requests. Large writes use multipart upload, or resumable upload on GCP. Multipart
+upload sends parts concurrently, and resumable upload one at a time.
 
 Reads retry after transient server errors. Writes do not.
 
@@ -192,6 +192,10 @@ Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 |-------------------------|--------------------------------------------------------------------------------------|---------|
 | `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `16`    |
 | `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `24`    |
+| `upload_mode`           | The upload API of large files: `"multipart"` or `"resumable"`.                       | Cloud's |
+
+By default, `upload_mode` is `"resumable"` on GCP workspaces and `"multipart"` on AWS and Azure. A write raises an
+`OSError` when the workspace answers with the other mode. Then set `upload_mode` to that mode.
 
 `VolumeFileSystem` also takes `connection_pool_size`, the maximum number of HTTP connections. It defaults to `100`.
 
