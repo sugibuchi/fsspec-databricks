@@ -934,7 +934,10 @@ _range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
 class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
     """A Unity Catalog Volume file uploaded whole, or in parts by the upload API of a subclass.
 
-    What both upload APIs share: the whole-file upload, the initiation and the URLs of a session.
+    What both upload APIs share: the whole-file upload, and the initiation of a session, which
+    must name the subclass's API. Each API's own requests are its subclass's, and its abort a
+    function of its own below, so that a file can abort a session the server started in the
+    other API.
     """
 
     upload_mode: Literal["multipart", "resumable"]
