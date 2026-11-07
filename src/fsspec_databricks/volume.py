@@ -1,11 +1,9 @@
 import asyncio
-import contextlib
 import logging
 import re
 import sys
 import threading
 import urllib.parse
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
 from random import random
@@ -37,8 +35,7 @@ from ._contrib.strategy.files.adaptive import (
     AdaptiveWritableFile,
 )
 from ._contrib.strategy.files.fsspec_async import AsyncFileAdapter
-from ._contrib.strategy.tree.filesystem import TreeFileSystem
-from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
+from .base import DatabricksTreeFileSystem, root_dir_info
 from .error import (
     access_error,
     error_mapping,
@@ -50,8 +47,7 @@ from .error import (
     not_empty_error,
     permission_error,
 )
-from .file import write_mode
-from .path import dbfs_root, parse_volume_path, scheme, strip_scheme, unstrip_scheme
+from .path import dbfs_root, parse_volume_path
 from .utils import to_datetime, to_rfc3339
 
 T = TypeVar("T")
@@ -125,31 +121,22 @@ def _parse(path: str) -> tuple[str | None, str | None, str | None, str | None, s
         raise file_not_found_error(path) from None
 
 
-class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
+class VolumeFileSystem(DatabricksTreeFileSystem):
     """Unity Catalog Volume file system.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop. Its recursive
     operations walk the folder tree with the tree strategies of fsspec-alt-strategies, copied into
-    `_contrib.strategy`.
+    `_contrib.strategy`. Its files call the Files API with aiohttp, the rest the SDK.
     """
-
-    protocol = scheme
-    root_marker = "/"
 
     storage_profile = StorageProfile()
     """Nothing is declared: the Files API has no server-side copy or rename."""
-
-    operation_concurrency: int = 16
-    """The maximum number of concurrent API requests of a recursive operation, such as listings and deletions."""
 
     io_concurrency: int = 24
     """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""
 
     connection_pool_size: int = 100
     """The maximum number of connections in the aiohttp connection pool (TCPConnector limit)."""
-
-    verbose_debug_log: bool = False
-    """Whether to enable verbose debug logging for file system operations."""
 
     _storage_proxy_hostname: str = "http://storage-proxy.databricks.com"
     """The hostname of the Databricks storage proxy."""
@@ -193,19 +180,8 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
-        super().__init__(
-            operation_concurrency=operation_concurrency or self.operation_concurrency,
-            io_concurrency=io_concurrency or self.io_concurrency,
-            # Directory listing cache is explicitly disabled for all Databricks file systems.
-            use_listings_cache=False,
-            **storage_options,
-        )
-        self._init_client(client, config, config_params)
-
         if connection_pool_size is not None:
             self.connection_pool_size = connection_pool_size
-        if verbose_debug_log is not None:
-            self.verbose_debug_log = verbose_debug_log
 
         self._lock = threading.Lock()
         self._workspace_id: int | None = None
@@ -215,15 +191,15 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         self._session: ClientSession | None = None
         self._session_loop: asyncio.AbstractEventLoop | None = None
 
-        _register_cleanup(self)
-        self.log.debug("Opened: %s", self)
-
-    @classmethod
-    def _strip_protocol(cls, path):
-        return strip_scheme(path)
-
-    def unstrip_protocol(self, name: str) -> str:
-        return unstrip_scheme(name)
+        super().__init__(
+            client=client,
+            config=config,
+            config_params=config_params,
+            operation_concurrency=operation_concurrency,
+            io_concurrency=io_concurrency,
+            verbose_debug_log=verbose_debug_log,
+            **storage_options,
+        )
 
     def close(self):
         """Close the file system and its HTTP session."""
@@ -243,21 +219,7 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
                 elif loop.is_running() and not sys.is_finalizing():
                     sync(loop, session.close, timeout=5.0)
         finally:
-            self._close_client()
-            self.log.debug("Closed: %s", self)
-
-    def __enter__(self):
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def __del__(self):
-        # Nothing can be done for a session left open when the interpreter exits.
-        with contextlib.suppress(Exception):
-            self.close()
+            super().close()
 
     async def _get_session(self) -> ClientSession:
         """The aiohttp session of the running loop, made on first use."""
@@ -275,10 +237,6 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             self._session_loop = loop
             self.log.debug("aiohttp ClientSession created.")
         return self._session
-
-    async def _sdk(self, func: Callable[[WorkspaceClient], T]) -> T:
-        """Call the blocking Databricks SDK in a thread, so that the event loop goes on."""
-        return await asyncio.to_thread(lambda: func(self.client))
 
     @property
     def workspace_id(self) -> int:
@@ -416,12 +374,6 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         except Exception:
             return False
 
-    def created(self, path):
-        return self.info(path)["created"]
-
-    def modified(self, path):
-        return self.info(path)["modified"]
-
     async def _ls(
         self, path, detail=True, include_browse: bool | None = None, **kwargs
     ):
@@ -482,16 +434,6 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
                 while chunk := await src.read(self.transfer_size):
                     await dst.write(chunk)
 
-    async def _cp_directory(self, path2):
-        """Copy a directory: create the destination, as directories have no content."""
-        try:
-            info = await self._info(path2)
-        except FileNotFoundError:
-            await self._makedirs(path2, exist_ok=True)
-            return
-        if info["type"] != "directory":
-            raise file_exists_error(path2)
-
     async def _rm_file(self, path, **kwargs):
         self.log.debug("Deleting file: path=%s", path)
 
@@ -538,41 +480,6 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             )
         with error_mapping(path):
             await self._sdk(lambda c: c.files.create_directory(full_path))
-
-    async def _mkdir(self, path, create_parents=True, **kwargs):
-        self.log.debug(
-            "Making directory: path=%s, create_parents=%s", path, create_parents
-        )
-
-        parent = self._parent(path)
-        if not await self._isdir(parent):
-            # Tell a missing parent from a file
-            try:
-                await self._info(parent)
-            except FileNotFoundError:
-                if not create_parents:
-                    raise
-            else:
-                raise not_a_directory_error(parent)
-
-        if await self._exists(path):
-            raise file_exists_error(path)
-
-        # The Files API creates the parents too
-        await self._create_directory(path)
-
-    async def _makedirs(self, path, exist_ok=False):
-        self.log.debug("Making directories: path=%s, exist_ok=%s", path, exist_ok)
-
-        try:
-            info = await self._info(path)
-        except FileNotFoundError:
-            await self._create_directory(path)
-            return
-        if info["type"] != "directory":
-            raise not_a_directory_error(path)
-        if not exist_ok:
-            raise file_exists_error(path)
 
     ### File I/O
     async def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
@@ -666,8 +573,6 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             Passed to `fsspec.AbstractFileSystem.open`, e.g. `compression`, `encoding`, `errors` and
             `newline`. Other options of the other backends, such as `notebook_format`, are ignored.
         """
-        if "t" in mode and write_mode(mode) and kwargs.get("newline") is None:
-            kwargs["newline"] = "\n"
         return super().open(path, mode, **kwargs)
 
 

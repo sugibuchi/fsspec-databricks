@@ -60,7 +60,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   path, and names returned are mapped back with `from_local_path`.
 - Its recursive methods, such as `find` and `copy`, call the backend's own, so that its tree strategies run. Only paths
   at the root, or spanning backends, fall back to fsspec's methods.
-- Every backend is an async `TreeFileSystem`. Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
+- Every backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
   and call the SDK in threads with `_sdk`.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.

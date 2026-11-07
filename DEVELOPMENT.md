@@ -243,8 +243,8 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 ## Architecture
 
 - **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use.
-- **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies. Workspace
-  and DBFS subclass `DatabricksTreeFileSystem`, in `base.py`.
+- **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies. Each
+  subclasses `DatabricksTreeFileSystem`, in `base.py`.
 - **The file objects** are the library's. Volume files read and write ranges concurrently. Workspace files are
   sync `WorkspaceFile`s of `workspace.py`, transferred whole. DBFS files are the SDK's own.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
@@ -293,7 +293,7 @@ Transfers between backends:
 
 `AbstractDatabricksFileSystem` is the router's base: a synchronous fsspec file system with the mixin.
 
-`DatabricksTreeFileSystem` is the base of the Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
+`DatabricksTreeFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
 - `_sdk` runs an SDK call in a thread.
 - `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
@@ -342,9 +342,10 @@ system's message.
 
 ### Volumes
 
-`VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `TreeFileSystem`, from the copy of
-fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`, `_rm_file`, `_rmdir`, `_makedirs` and
-`_cp_file`. The recursive operations are the library's tree strategies: `find`, `walk`, `du`, `glob`, and recursive
+`VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `DatabricksTreeFileSystem`, a
+`TreeFileSystem` of the copy of fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`,
+`_rm_file`, `_rmdir`, `_create_directory` and `_cp_file`. It adds an aiohttp session, closed by `close()`, and
+`io_concurrency` defaults to 24. The recursive operations are the library's tree strategies: `find`, `walk`, `du`, `glob`, and recursive
 `rm`, `copy` and `mv`.
 
 fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
