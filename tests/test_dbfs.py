@@ -1,8 +1,9 @@
 """Offline tests of `DBFS`, on a fake DBFS API."""
 
+import base64
 import errno
 import posixpath
-from io import BytesIO
+from random import randbytes
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,17 +19,6 @@ from fsspec.asyn import sync
 from fsspec_databricks.dbfs import DBFS
 
 
-class _WriteHandle(BytesIO):
-    def __init__(self, api, path):
-        super().__init__()
-        self.api, self.path = api, path
-
-    def close(self):
-        if not self.closed:
-            self.api._put(self.path, self.getvalue())
-        super().close()
-
-
 class FakeDbfsAPI:
     """An in-memory `WorkspaceClient.dbfs`, answering as the DBFS API does, recording its calls."""
 
@@ -36,6 +26,8 @@ class FakeDbfsAPI:
         self.dirs = {"/"}
         self.data: dict[str, bytes] = {}
         self.calls: list[tuple] = []
+        self.handles: dict[int, str] = {}
+        self.fail_add_block = False
         self._api = SimpleNamespace(
             _cfg=SimpleNamespace(workspace_id=None), do=self._do
         )
@@ -99,13 +91,46 @@ class FakeDbfsAPI:
         self.calls.append(("copy", src, dst))
         self._put(dst, self.data[src])
 
-    def open(self, path, *, read=False, write=False, overwrite=False):
-        self.calls.append(("open", path, read, write, overwrite))
-        if read:
-            return BytesIO(self.data[path])
-        if self._exists(path) and not overwrite:
+    def _create(self, path, overwrite):
+        if path in self.dirs or (path in self.data and not overwrite):
             raise ResourceAlreadyExists(f"{path} already exists")
-        return _WriteHandle(self, path)
+        self._put(path, b"")
+
+    def read(self, path, *, offset=0, length=512 * 1024):
+        self.calls.append(("read", path, offset, length))
+        if length > 1024 * 1024:
+            raise DatabricksError("Too long", error_code="MAX_READ_SIZE_EXCEEDED")
+        data = self.data[path][offset : offset + length]
+        return SimpleNamespace(bytes_read=len(data), data=base64.b64encode(data))
+
+    def put(self, path, *, contents=None, overwrite=False):
+        data = base64.b64decode(contents or "")
+        self.calls.append(("put", path, len(data), overwrite))
+        if len(data) > 1024 * 1024:
+            raise DatabricksError("Too big", error_code="MAX_BLOCK_SIZE_EXCEEDED")
+        self._create(path, overwrite)
+        self._put(path, data)
+
+    def create(self, path, *, overwrite=False):
+        self.calls.append(("create", path, overwrite))
+        # As on DBFS: the file exists, empty, from its creation on.
+        self._create(path, overwrite)
+        self.handles[len(self.handles) + 1] = path
+        return SimpleNamespace(handle=len(self.handles))
+
+    def add_block(self, handle, data):
+        block = base64.b64decode(data)
+        self.calls.append(("add_block", handle, len(block)))
+        if len(block) > 1024 * 1024:
+            raise DatabricksError("Too big", error_code="MAX_BLOCK_SIZE_EXCEEDED")
+        if self.fail_add_block:
+            raise DatabricksError("Failed", error_code="INTERNAL_ERROR")
+        self.data[self.handles[handle]] += block
+
+    def close(self, handle):
+        self.calls.append(("close", handle))
+        if self.handles.pop(handle, None) is None:
+            raise ResourceDoesNotExist(f"Unknown handle {handle}")
 
     def _do(self, method, url, body=None, headers=None):
         assert url == "/api/2.0/dbfs/delete"
@@ -238,6 +263,70 @@ def test_dbfs_open(fs, api):
 
     assert sync(fs.loop, read) == b"new"
     assert fs.cat_file("/t/new.bin") == b"new"
+
+
+_MiB = 1024 * 1024
+
+
+def test_dbfs_open_requests(fs, api):
+    """A small file is one put; a large one a stream of add-blocks of 1 MiB at most, in order."""
+    with fs.open("/t/small.bin", "wb") as f:
+        f.write(b"small")
+    assert api.calls_of("put") == [("put", "/t/small.bin", 5, True)]
+    assert api.calls_of("create") == []
+
+    api.calls.clear()
+    data = randbytes(3 * _MiB + 12345)
+    with fs.open("/t/large.bin", "wb") as f:
+        for i in range(0, len(data), 300_000):
+            f.write(data[i : i + 300_000])
+    assert api.data["/t/large.bin"] == data
+    assert api.calls_of("create") == [("create", "/t/large.bin", True)]
+    blocks = [c[2] for c in api.calls_of("add_block")]
+    assert sum(blocks) == len(data) and max(blocks) <= _MiB
+    assert len(api.calls_of("close")) == 1
+
+    api.calls.clear()
+    with fs.open("/t/large.bin", "rb") as f:
+        assert f.seekable()
+        f.seek(2 * _MiB + 7)
+        assert f.read(100) == data[2 * _MiB + 7 : 2 * _MiB + 107]
+        assert f.tell() == 2 * _MiB + 107
+        f.seek(0)
+        assert f.read() == data
+    # Reads stay within the API's limit of 1 MB.
+    assert max(c[3] for c in api.calls_of("read")) <= _MiB
+
+
+def test_dbfs_open_exclusive(fs, api):
+    with fs.open("/t/x.bin", "xb") as f:
+        f.write(randbytes(2 * _MiB))
+    assert api.calls_of("create") == [("create", "/t/x.bin", False)]
+    with pytest.raises(FileExistsError):
+        fs.open("/t/x.bin", "xb")
+
+
+def test_dbfs_open_aborts(fs, api):
+    """A stream cannot be aborted: the file it replaced is deleted, and a small file never sent."""
+    with pytest.raises(ValueError, match="dummy"):
+        with fs.open("/t/data.bin", "wb") as f:
+            f.write(b"lost")
+            raise ValueError("dummy")
+    assert api.data["/t/data.bin"] == b"data"
+
+    with pytest.raises(ValueError, match="dummy"):
+        with fs.open("/t/data.bin", "wb") as f:
+            f.write(randbytes(3 * _MiB))
+            raise ValueError("dummy")
+    assert not fs.exists("/t/data.bin")
+    assert api.handles == {}
+
+    api.fail_add_block = True
+    with pytest.raises(OSError):
+        with fs.open("/t/failed.bin", "wb") as f:
+            f.write(randbytes(3 * _MiB))
+    assert not fs.exists("/t/failed.bin")
+    assert api.handles == {}
 
 
 def test_dbfs_transaction(fs, api):

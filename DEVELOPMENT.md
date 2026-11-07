@@ -383,8 +383,21 @@ system's message.
 - `_rm_tree` is the API's recursive delete. A recursive `rm` deletes each directory it is given by it, in one request.
 - `rmdir` refuses a directory that is not empty. It deletes with the API's non-recursive delete, which the SDK's
   `dbfs.delete` refuses for directories.
-- Files are opened with the SDK's `dbfs.open`. `open_async` wraps them in the library's `SyncFileAdapter`, adding the
-  mode and size that they do not tell.
+- Files are the library's adaptive files: `DbfsReadableFile` and `DbfsWritableFile`. They call the API in the file
+  system's threads, and share its `io_limit`. The SDK's own `dbfs.open` reads and writes one block at a time, and
+  cannot seek.
+- The API's read, add-block and put each take 1 MB at most. The SDK sends 1 MiB of raw bytes per add-block, so the limit
+  is taken to be on the decoded data.
+- A read fetches ranges of 1 MB at most, several at once. The API names no version of a file, so a file replaced while
+  read is not detected.
+- A file of 1 MB at most is written by one put. A larger one is a stream: create, add-blocks in order, close. So the
+  writer is `sequential`.
+- Create replaces the file there at once, and the file grows with each block. An aborted stream is closed, then its file
+  deleted: a failed `wb` write over a file leaves no file.
+- A plain file writes to its own path, with no temporary path. Commit would need a delete and a move, as the API's move
+  refuses an existing destination, and a crash would leave the temporary file.
+- Mode `x` is checked when opening. Create and put check it again, with overwrite off.
+- Append mode is refused, as the API's create cannot append.
 
 ### Volumes
 
@@ -545,7 +558,7 @@ Notebooks are objects of type `NOTEBOOK`. `notebook_format` gives their export a
 
 ### File objects
 
-Every backend's files are the library's file objects, or the SDK's for DBFS. The library's raise `RuntimeError` when
+Every backend's files are the library's file objects. The library's raise `RuntimeError` when
 their synchronous methods are called from the event loop. Code on the loop uses `open_async()` and awaits the file's
 methods.
 
@@ -560,6 +573,8 @@ library's `TransactionFile`, with a `FileTransaction` of `files/fsspec_transacti
   and discard drops it.
 - DBFS uses `TempPathTransaction`. Commit deletes the destination, then moves the temporary file, as the API's move
   refuses an existing destination.
+- DBFS cannot hold a last part as Volumes do. Its stream shows the file as it grows, and replaces the file there when it
+  starts.
 
 The router's `_open` passes `autocommit` to the backend's `_open`. fsspec's `open` adds the file to the router's own
 transaction, which commits or discards the files of every backend. The backends' own transactions stay empty.

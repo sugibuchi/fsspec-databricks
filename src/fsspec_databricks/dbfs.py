@@ -1,5 +1,8 @@
+import asyncio
+import base64
 import contextlib
 import functools
+import logging
 from io import UnsupportedOperation
 from typing import Any
 
@@ -8,7 +11,11 @@ from databricks.sdk.service.files import DbfsAPI, FileInfo
 from fsspec.asyn import sync
 from fsspec_alt_strategies_common.profile import StorageProfile
 
-from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
+from ._contrib.strategy.files.adaptive import (
+    AdaptiveReadableFile,
+    AdaptiveWritableFile,
+)
+from ._contrib.strategy.files.fsspec_async import AsyncFileAdapter
 from ._contrib.strategy.files.fsspec_transaction import (
     TempPathTransaction,
     TransactionFile,
@@ -16,6 +23,7 @@ from ._contrib.strategy.files.fsspec_transaction import (
 from .base import DatabricksTreeFileSystem
 from .error import (
     error_mapping,
+    file_exists_error,
     is_a_directory_error,
     not_a_directory_error,
     not_empty_error,
@@ -38,20 +46,16 @@ def map_info(info: FileInfo, detail: bool) -> dict[str, Any] | str:
         return info.path.rstrip("/") or "/"
 
 
-def _close_once(handle: Any) -> Any:
-    """Make closing the SDK's file a no-op once closed, as for Python's files.
+logger = logging.getLogger(__name__)
 
-    The SDK's file closes its write handle again on each call, which the API refuses as unknown. A transaction
-    closes its file when it is closed, then again when it is discarded.
-    """
-    close = handle.close
+_MiB = 1024 * 1024
 
-    def close_once() -> None:
-        if not handle.closed:
-            close()
+_max_request_size = _MiB
+"""The most bytes a read, an add-block or a put with contents takes, before base64 encoding.
 
-    handle.close = close_once
-    return handle
+The reference sets 1 MB for each. The SDK's own files send 1 MiB of raw bytes per add-block, so the limit is on the
+decoded data.
+"""
 
 
 class DBFS(DatabricksTreeFileSystem):
@@ -88,8 +92,8 @@ class DBFS(DatabricksTreeFileSystem):
             The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
             Defaults to 16.
         io_concurrency : int, optional
-            Adds to the threads running SDK calls. Defaults to 8. Files do not use it: they are the SDK's own,
-            which read and write one block at a time.
+            The maximum number of concurrent reads and writes of files, which also adds to the threads running SDK
+            calls. Defaults to 8.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -181,37 +185,54 @@ class DBFS(DatabricksTreeFileSystem):
 
     ### File I/O
     async def _check_open(self, path: str, mode: str) -> int | None:
-        """Refuse what the SDK's files cannot open, and tell the size of a file read."""
+        """Refuse what DBFS cannot open, and tell the size of a file read: one get-status."""
         if "a" in mode or "+" in mode:
+            # The API's create truncates or refuses an existing file: nothing appends.
             raise UnsupportedOperation("Append and read/write modes are not supported.")
 
         if "r" in mode:
             info = await self._info(path)
             if info["type"] == "directory":
                 raise is_a_directory_error(path)
-            return info["size"]
-        if await self._isdir(path):
+            return int(info["size"] or 0)
+
+        try:
+            info = await self._info(path)
+        except FileNotFoundError:
+            return None
+        if info["type"] == "directory":
             raise is_a_directory_error(path)
+        if "x" in mode:
+            # Checked on opening, as Python's files do. Creating with overwrite off checks it again.
+            raise file_exists_error(path)
         return None
 
-    def _open_handle(self, path: str, mode: str) -> Any:
-        """Open the SDK's file object: a blocking call."""
-        dbfs_path = parse_dbfs_path(path)
-        with error_mapping(path):
-            handle = self.client.dbfs.open(
-                dbfs_path,
-                read="r" in mode,
-                write="r" not in mode,
-                overwrite="x" not in mode,
+    def _new_file(
+        self,
+        path: str,
+        mode: str,
+        size: int | None,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> "DbfsReadableFile | DbfsWritableFile":
+        """A file object on `loop`, by default the file system's, its fetches or uploads sharing `io_limit`."""
+        loop = loop or self.loop
+        if "r" in mode:
+            return DbfsReadableFile(
+                self, path, loop, size or 0, concurrency_limit=self.io_limit
             )
-        return _close_once(handle)
+        return DbfsWritableFile(
+            self, path, loop, overwrite="x" not in mode, concurrency_limit=self.io_limit
+        )
+
+    async def _open_file(self, path: str, mode: str):
+        """Open a file object on the running loop."""
+        size = await self._check_open(path, mode)
+        return self._new_file(path, mode, size, asyncio.get_running_loop())
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
             raise ValueError("Only binary mode without compression is supported")
-        size = await self._check_open(path, mode)
-        opener = functools.partial(self._open_handle, path, mode)
-        return await SyncFileAdapter.open(opener, mode=mode, size=size)
+        return AsyncFileAdapter(await self._open_file(path, mode))
 
     def _open(
         self,
@@ -222,13 +243,15 @@ class DBFS(DatabricksTreeFileSystem):
         cache_options=None,
         **kwargs,
     ):
-        sync(self.loop, self._check_open, path, mode)
+        size = sync(self.loop, self._check_open, path, mode)
         if autocommit or "r" in mode:
-            return self._open_handle(path, mode)
-        # In a transaction, the SDK's file writes as it goes: to a temporary path, moved into place on commit.
+            return self._new_file(path, mode, size)
+        # The API's stream makes a file visible as it grows, and replaces the file there when it starts. Holding the
+        # last part, as Volumes do, would still show the rest. So a transaction writes to a temporary path, moved into
+        # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own.
         transaction = TempPathTransaction(
             path,
-            lambda p: self._open_handle(p, "wb"),
+            lambda p: self._new_file(p, "wb", None),
             functools.partial(self._commit_move, exclusive="x" in mode),
             lambda p: sync(self.loop, self._delete, p, False),
         )
@@ -261,6 +284,140 @@ class DBFS(DatabricksTreeFileSystem):
         return super().open(path, mode, **kwargs)
 
 
+class DbfsReadableFile(AdaptiveReadableFile):
+    """A legacy DBFS file read by the API's read, at an offset: requests of 1 MB at most, fetched together.
+
+    The API names no version of a file, so a file replaced while read is not detected.
+    """
+
+    min_block_size: int = _MiB // 2
+    """The smallest read, the API's default length. Smaller reads fetch it whole."""
+
+    max_block_size: int = _max_request_size
+    """The largest read, the API's limit. Larger reads are split, to fetch the parts together."""
+
+    def __init__(
+        self, fs: DBFS, path: str, loop: asyncio.AbstractEventLoop, size: int, **kwargs
+    ):
+        # Kept within the API's limit, whatever the caller asks.
+        kwargs["max_block_size"] = min(
+            kwargs.get("max_block_size") or self.max_block_size, _max_request_size
+        )
+        super().__init__(path, loop, size, **kwargs)
+        self.fs = fs
+        self._dbfs_path = parse_dbfs_path(path)
+
+    async def _fetch_range(self, start: int, end: int) -> bytes:
+        chunks = []
+        offset = start
+        while offset < end:
+            length = min(end - offset, _max_request_size)
+            with error_mapping(self.path):
+                response = await self.fs._blocking(
+                    lambda o=offset, n=length: self.fs.client.dbfs.read(
+                        self._dbfs_path, offset=o, length=n
+                    )
+                )
+            if not response.bytes_read:
+                # The file was truncated meanwhile: the rest is missing.
+                break
+            chunks.append(base64.b64decode(response.data or ""))
+            offset += response.bytes_read
+        return b"".join(chunks)
+
+
+class DbfsWritableFile(AdaptiveWritableFile):
+    """A legacy DBFS file written by one put, or by the API's stream: create, add-blocks, close.
+
+    The stream takes blocks one at a time, in order, so the file is `sequential`. Each part is sent as add-blocks of
+    1 MB at most, the API's limit. A file of 1 MB at most is sent in one put.
+
+    DBFS cannot abort a stream. Its create replaces the file there, and the file grows with each block. So an abort
+    closes the stream and deletes the file: a file written in `wb` mode over another leaves neither.
+    """
+
+    min_block_size: int = _max_request_size
+    """The smallest part but the last: one add-block."""
+
+    max_block_size: int = _max_request_size
+    """The largest part but the last. Parts gain nothing from being larger: each add-block takes 1 MB at most."""
+
+    min_multipart_size: int = _max_request_size
+    """The size from which a file is written by a stream. The put's contents take 1 MB at most."""
+
+    sequential: bool = True
+
+    def __init__(
+        self,
+        fs: DBFS,
+        path: str,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        overwrite: bool = True,
+        **kwargs,
+    ):
+        # The put's contents are limited too: a bigger file must be streamed.
+        kwargs["min_multipart_size"] = min(
+            kwargs.get("min_multipart_size") or self.min_multipart_size,
+            _max_request_size,
+        )
+        super().__init__(path, loop, **kwargs)
+        self.fs = fs
+        self.overwrite = overwrite
+        self._dbfs_path = parse_dbfs_path(path)
+        self._handle: int | None = None
+
+    async def _call(self, api: str, func: Any) -> Any:
+        with error_mapping(self.path):
+            return await self.fs._sdk(api, self._dbfs_path, func)
+
+    async def _upload_all(self, data: bytes) -> None:
+        contents = base64.b64encode(data).decode()
+        await self._call(
+            "dbfs.put",
+            lambda c: c.dbfs.put(
+                self._dbfs_path, contents=contents, overwrite=self.overwrite
+            ),
+        )
+
+    async def _start_multipart_upload(self) -> None:
+        created = await self._call(
+            "dbfs.create",
+            lambda c: c.dbfs.create(self._dbfs_path, overwrite=self.overwrite),
+        )
+        self._handle = created.handle
+
+    async def _upload_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> None:
+        # The last part takes the rest, up to twice the API's limit: it is split.
+        view = memoryview(data)
+        for offset in range(0, len(view), _max_request_size):
+            block = base64.b64encode(view[offset : offset + _max_request_size]).decode()
+            await self._call(
+                "dbfs.add-block", lambda c, b=block: c.dbfs.add_block(self._handle, b)
+            )
+
+    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
+        await self._call("dbfs.close", lambda c: c.dbfs.close(self._handle))
+
+    async def _abort_multipart_upload(self) -> None:
+        if self._handle is None:
+            # The create failed, e.g. on an existing file in x mode: nothing of ours is there.
+            return
+        handle, self._handle = self._handle, None
+        logger.warning("Aborting upload: path=%s", self.path)
+        try:
+            await self._call("dbfs.close", lambda c: c.dbfs.close(handle))
+        finally:
+            await self._call(
+                "dbfs.delete",
+                lambda c: DbfsAPI.delete(c.dbfs, self._dbfs_path, recursive=False),
+            )
+
+
 __all__ = [
     "DBFS",
+    "DbfsReadableFile",
+    "DbfsWritableFile",
 ]

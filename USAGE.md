@@ -165,7 +165,7 @@ Limits:
 - Files opened with `open_async` take no part in the transaction.
 - On legacy DBFS, other clients may see the temporary file. Commit deletes the file it replaces, then moves the new one:
   two requests.
-- Exclusive creation, mode `"x"`, is checked on commit on legacy DBFS, and when opening on the other backends.
+- Exclusive creation, mode `"x"`, is checked when opening. Legacy DBFS checks it again on commit.
 - If the process dies, Volume parts stay until the storage expires them, and DBFS temporary files stay.
 
 ### POSIX paths
