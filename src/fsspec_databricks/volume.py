@@ -1064,8 +1064,7 @@ class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
     async def _upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> tuple[int, str] | None:
-        # An OSError, also where the base class raises a part's error as it is: closing
-        # awaits the parts in flight.
+        # The server's errors as OSErrors of their kind, e.g. a PermissionError for a 403.
         try:
             return await self._send_part(data, start, end, index, last)
         except (ClientError, TimeoutError) as e:
@@ -1077,6 +1076,10 @@ class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         raise NotImplementedError
 
     async def _abort_multipart_upload(self) -> None:
+        if self._session_token is None:
+            # No session of this API started, e.g. the server chose the other one: the
+            # initiation aborted that session already.
+            return
         self.log.warning("Aborting upload: path=%s", self.path)
         await _ABORT_SESSION[self.upload_mode](self, self._session_token)
 
@@ -1228,6 +1231,9 @@ class VolumeResumableWritableFile(_VolumeWritableFile):
         pass  # The last part completes a resumable upload.
 
     async def _abort_multipart_upload(self) -> None:
+        if self._upload_url is None:
+            # No session of this API started: nothing to abort, as in the base class.
+            return
         # The upload URL is known already: no request for another.
         self.log.warning("Aborting upload: path=%s", self.path)
         await self._delete(self._upload_url, self._upload_headers, self._upload_params)

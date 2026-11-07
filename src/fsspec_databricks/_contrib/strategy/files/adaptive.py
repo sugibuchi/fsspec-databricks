@@ -21,9 +21,12 @@ import io
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._async_file import _AsyncFile, _MiB, _Range
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 __all__ = ["AdaptiveReadableFile", "AdaptiveWritableFile"]
 
@@ -459,10 +462,13 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     - ``flush(force=True)`` finishes the file as closing does, as fsspec's
       files do: the rest is uploaded, and the upload completed. Closing then
       sends nothing more, and writing raises ValueError.
-    - A part that fails stops the writes, and closing aborts the upload. So does
-      any failure or cancellation while closing or force-flushing, or the
-      garbage collector finding the file open: the file is written whole, or
-      not at all.
+    - A part that fails stops the writes, and closing aborts the upload. Either
+      raises OSError, its cause the part's error. Any failure or cancellation
+      while closing or force-flushing aborts too, as does a failed start.
+    - Leaving a ``with`` block by an exception uploads nothing: a small file is
+      never sent, and a multipart upload is aborted. So does a file the garbage
+      collector finds open. The file is written whole, or not at all.
+    - An abort failing too adds a note to the error raised, never replacing it.
 
     Some storages take parts only in order, one at a time, e.g. Google Cloud
     Storage's resumable uploads, where each part but the last is a multiple of
@@ -607,19 +613,18 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
             self._raise_failed_upload()
             await self._upload_buffer(closing=True)
             if self._multipart:
-                parts = await asyncio.gather(*(r.task for r in self._requests.queue))
+                try:
+                    parts = await asyncio.gather(
+                        *(r.task for r in self._requests.queue)
+                    )
+                except Exception:
+                    # A part failing now raises as one failing earlier does.
+                    self._raise_failed_upload()
+                    raise
                 await self._complete_multipart_upload(list(parts))
         except BaseException as error:
             if self._multipart:
-                try:
-                    await self._requests.cancel_all()
-                    await self._abort_multipart_upload()
-                except Exception as abort_error:
-                    # The first error is what the caller acts on: the abort's
-                    # failure only adds that parts may stay on the storage.
-                    error.add_note(
-                        f"Aborting the upload of {self.path!r} failed: {abort_error!r}"
-                    )
+                await self._abort_noting(error, self._requests.cancel_all())
             raise
         finally:
             self._buffer = bytearray()
@@ -629,6 +634,56 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         await super()._abort()
         if self._multipart:
             await self._abort_multipart_upload()
+
+    async def _abort_noting(
+        self, error: BaseException, first: Awaitable[None] | None = None
+    ) -> None:
+        """Abort the multipart upload after ``error``, which the caller raises.
+
+        ``first`` is awaited before, e.g. to cancel the parts in flight.
+        """
+        try:
+            if first is not None:
+                await first
+            await self._abort_multipart_upload()
+        except Exception as abort_error:
+            # The first error is what the caller acts on: the abort's failure
+            # only adds that parts may stay on the storage.
+            error.add_note(
+                f"Aborting the upload of {self.path!r} failed: {abort_error!r}"
+            )
+
+    # Leaving a with block by an exception aborts, as the garbage collector
+    # does: the file is written whole, or not at all.
+
+    def __exit__(
+        self, exc_type: object, exc: BaseException | None, *rest: object
+    ) -> None:
+        if exc is None or self.closed:
+            self.close()
+        else:
+            self._sync(self._aexit_by(exc))
+
+    async def __aexit__(
+        self, exc_type: object, exc: BaseException | None, *rest: object
+    ) -> None:
+        if exc is None or self.closed:
+            await self.aclose()
+        else:
+            await self._aexit_by(exc)
+
+    async def _aexit_by(self, exc: BaseException) -> None:
+        """Close without finishing, as an exception leaves the with block."""
+        try:
+            if not self._forced:
+                # A forced flush finished the file: nothing is left to undo.
+                self._buffer = bytearray()
+                await self._requests.cancel_all()
+                if self._multipart:
+                    await self._abort_noting(exc)
+        finally:
+            await self._requests.cancel_all()
+            io.RawIOBase.close(self)
 
     # The uploading underneath.
 
@@ -659,7 +714,12 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                 else:
                     break
                 if not self._multipart:
-                    await self._start_multipart_upload()
+                    try:
+                        await self._start_multipart_upload()
+                    except BaseException as error:
+                        # It may have started a session on the storage first.
+                        await self._abort_noting(error)
+                        raise
                     self._multipart = True
                 elif self.sequential:
                     # Waiting holds no permit: files sharing the limit go on.

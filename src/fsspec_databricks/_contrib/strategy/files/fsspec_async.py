@@ -49,8 +49,8 @@ class AsyncFileAdapter:
     `~fsspec_alt_strategies.files.buffered.LocallyBufferedFile` needs its
     download first: ``open_async`` awaits its ``aload`` before adapting it.
 
-    Unlike fsspec's, leaving an ``async with`` block by an exception discards a
-    locally buffered file's changes, as leaving a ``with`` block does. Close
+    Unlike fsspec's, leaving an ``async with`` block by an exception uploads
+    nothing of a written file, as leaving a ``with`` block does. Close
     it: the garbage collector aborts a file left open, keeping nothing
     written.
 
