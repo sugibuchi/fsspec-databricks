@@ -282,7 +282,8 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
 
     def open(self, path, mode="rb", **kwargs):
         """Open a file, writing text with "\\n" newlines by default."""
-        if "t" in mode and write_mode(mode) and kwargs.get("newline") is None:
+        # Text is any mode without "b": "w" as well as "wt".
+        if "b" not in mode and write_mode(mode) and kwargs.get("newline") is None:
             kwargs["newline"] = "\n"
         return super().open(path, mode, **kwargs)
 

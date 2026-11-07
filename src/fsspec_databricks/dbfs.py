@@ -38,6 +38,22 @@ def map_info(info: FileInfo, detail: bool) -> dict[str, Any] | str:
         return info.path.rstrip("/") or "/"
 
 
+def _close_once(handle: Any) -> Any:
+    """Make closing the SDK's file a no-op once closed, as for Python's files.
+
+    The SDK's file closes its write handle again on each call, which the API refuses as unknown. A transaction
+    closes its file when it is closed, then again when it is discarded.
+    """
+    close = handle.close
+
+    def close_once() -> None:
+        if not handle.closed:
+            close()
+
+    handle.close = close_once
+    return handle
+
+
 class DBFS(DatabricksTreeFileSystem):
     """Legacy DBFS file system, on the DBFS API.
 
@@ -182,12 +198,13 @@ class DBFS(DatabricksTreeFileSystem):
         """Open the SDK's file object: a blocking call."""
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
-            return self.client.dbfs.open(
+            handle = self.client.dbfs.open(
                 dbfs_path,
                 read="r" in mode,
                 write="r" not in mode,
                 overwrite="x" not in mode,
             )
+        return _close_once(handle)
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
