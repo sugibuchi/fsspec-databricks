@@ -60,8 +60,11 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Base class methods in `base.py` only check preconditions. Subclasses call `super()` first, then the API.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
-- aiohttp objects are created and used in the Volume backend's IO event loop. `TCPConnector` needs a running loop.
-- Never block on the IO loop from code running in it. File objects' synchronous methods raise there.
+- `VolumeFileSystem` is an async fsspec file system on fsspec's loop. Its aiohttp session is created on the loop using
+  it, as `TCPConnector` needs a running loop.
+- Never block on the loop from code running in it. File objects' synchronous methods raise there.
+- `src/fsspec_databricks/_contrib/strategy/` is a copy of fsspec-alt-strategies. Never edit it: DEVELOPMENT.md says how
+  to refresh it.
 - `DatabricksFileSystem.__init__` takes every parameter of the SDK's `WorkspaceClient`, in its order.
   `test_dbx_fs_accepts_workspace_client_params` fails when the SDK adds one: add it to the signature, the docstring
   and `config_params`.
