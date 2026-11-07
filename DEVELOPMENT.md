@@ -334,7 +334,7 @@ system's message.
 - `_mv_file` is the API's move, which moves a directory with all in it. So `storage_profile` declares
   `renames_folders=True`, and a recursive `mv` moves each folder whole where it can.
 - A file moved alone is one move too.
-- A recursive `rm` without glob patterns is the API's recursive delete.
+- `_rm_tree` is the API's recursive delete. A recursive `rm` deletes each directory it is given by it, in one request.
 - `rmdir` refuses a directory that is not empty. It deletes with the API's non-recursive delete, which the SDK's
   `dbfs.delete` refuses for directories.
 - Files are opened with the SDK's `dbfs.open`. `open_async` wraps them in the library's `SyncFileAdapter`, adding the
@@ -489,8 +489,8 @@ Notebooks are objects of type `NOTEBOOK`. `notebook_format` gives their export a
 - A new notebook needs `language`.
 - Other files use `AUTO` export and `RAW` import, and refuse `notebook_format`.
 
-`cp_file` downloads and uploads, keeping notebooks as notebooks, and overwrites the destination. A recursive `rm`
-without glob patterns is the API's recursive delete. `rm` of a file checks its type first, as the API deletes an empty
+`cp_file` downloads and uploads, keeping notebooks as notebooks, and overwrites the destination. `_rm_tree` is
+the API's recursive delete, which a recursive `rm` uses on each directory it is given. `rm` of a file checks its type first, as the API deletes an empty
 directory as a file.
 
 ### File objects

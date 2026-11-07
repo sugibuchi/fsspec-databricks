@@ -1,5 +1,4 @@
 import logging
-from glob import has_magic
 from io import UnsupportedOperation
 from typing import Any
 
@@ -38,8 +37,8 @@ class DBFS(DatabricksTreeFileSystem):
     """Databricks DBFS API.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
-    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies, except a recursive `rm`
-    without glob patterns, which is the API's own recursive delete.
+    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. A recursive `rm`
+    deletes each directory by the API's own recursive delete, `_rm_tree`.
     """
 
     storage_profile = StorageProfile(renames_folders=True)
@@ -125,21 +124,6 @@ class DBFS(DatabricksTreeFileSystem):
         with error_mapping(path1):
             await self._sdk(lambda c: c.dbfs.move(src, dst))
 
-    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
-        if (
-            not recursive
-            and isinstance(path1, str)
-            and isinstance(path2, str)
-            and not has_magic(path1)
-            and not has_magic(path2)
-            and not path2.endswith("/")
-            and (await self._info(path1))["type"] == "file"
-        ):
-            # A file moved alone is one request too, as in a recursive move.
-            await self._mv_file(path1, path2)
-            return
-        await super()._mv(path1, path2, recursive, maxdepth, **kwargs)
-
     async def _delete(self, path: str, recursive: bool) -> None:
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
@@ -155,30 +139,10 @@ class DBFS(DatabricksTreeFileSystem):
             raise is_a_directory_error(path)
         await self._delete(path, recursive=False)
 
-    async def _rm(
-        self, path, recursive=False, batch_size=None, maxdepth=None, **kwargs
-    ):
-        self.log.debug(
-            "Deleting path: path=%s, recursive=%s, maxdepth=%s",
-            path,
-            recursive,
-            maxdepth,
-        )
-
-        paths = [path] if isinstance(path, str) else list(path)
-        if maxdepth is not None or any(
-            has_magic(self._strip_protocol(p)) for p in paths
-        ):
-            await super()._rm(path, recursive, batch_size, maxdepth, **kwargs)
-            return
-
-        # The API's own recursive delete: one request per path, after its info.
-        for p in paths:
-            if recursive:
-                await self._info(p)  # Raises FileNotFoundError for a missing path.
-                await self._delete(p, recursive=True)
-            else:
-                await self._rm_file(p)
+    async def _rm_tree(self, path):
+        """Delete a directory with all in it, by the API's recursive delete: one request."""
+        self.log.debug("Deleting directory tree: path=%s", path)
+        await self._delete(path, recursive=True)
 
     async def _rmdir(self, path):
         self.log.debug("Deleting directory: path=%s", path)
