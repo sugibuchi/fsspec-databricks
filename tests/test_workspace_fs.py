@@ -409,10 +409,11 @@ def test_workspace_fs_copy(
         (f"{test_dir}/directory_copied", ObjectType.DIRECTORY),
     ]
 
-    items = [
+    # Sorted: the API lists in creation order, and the copy creates concurrently.
+    items = sorted(
         (i.path, i.object_type, i.language)
         for i in client.workspace.list(f"{test_dir}/directory_copied")
-    ]
+    )
     assert items == [
         (f"{test_dir}/directory_copied/1_data.bin", ObjectType.FILE, None),
         (

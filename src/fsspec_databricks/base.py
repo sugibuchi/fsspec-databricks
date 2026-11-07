@@ -1,20 +1,21 @@
+import asyncio
 import atexit
+import contextlib
 import logging
 import weakref
-from datetime import datetime
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
 from fsspec.spec import AbstractFileSystem
 
-from .error import (
-    file_exists_error,
-    is_a_directory_error,
-    not_a_directory_error,
-)
+from ._contrib.strategy.tree.filesystem import TreeFileSystem
+from .error import file_exists_error, not_a_directory_error
 from .file import write_mode
 from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
+
+T = TypeVar("T")
 
 root_dir_info = {
     "name": dbfs_root,
@@ -113,7 +114,7 @@ class DatabricksClientSupport:
 
 
 class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
-    """Abstract base class for Databricks file systems."""
+    """Base class of the synchronous Databricks file systems: the client, closing and the protocol."""
 
     protocol = scheme
     root_marker = "/"
@@ -135,8 +136,6 @@ class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
 
         Parameters
         ----------
-        *args
-            Standard fsspec filesystem options.
         client : WorkspaceClient, optional
             A Databricks SDK WorkspaceClient object.
         config : Config, optional
@@ -183,153 +182,147 @@ class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
     def unstrip_protocol(self, name: str) -> str:
         return unstrip_scheme(name)
 
-    ### File/directory information
 
-    def ls(self, path, detail=True, **kwargs) -> list[str] | list[dict[str, Any]]:
-        self.log.debug("Listing directory: path=%s, detail=%s", path, detail)
+class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
+    """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
 
-    def info(self, path, **kwargs) -> dict[str, Any]:
-        self.log.debug("Getting info: path=%s", path)
+    A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
+    they run in threads with `_sdk`.
+    """
 
-    def exists(self, path, **kwargs) -> bool:
-        self.log.debug("Checking existence: path=%s", path)
+    protocol = scheme
+    root_marker = "/"
 
-    def created(self, path) -> datetime | None:
+    operation_concurrency: int = 16
+    """The maximum number of concurrent API requests of a recursive operation, such as listings and deletions."""
+
+    io_concurrency: int = 8
+    """The maximum number of concurrent file transfers, shared by all the files opened."""
+
+    verbose_debug_log: bool = False
+    """Whether to enable verbose debug logging for file system operations."""
+
+    log = logging.getLogger(__name__)
+
+    def __init__(
+        self,
+        client: WorkspaceClient | None = None,
+        config: Config | None = None,
+        config_params: dict[str, Any] | None = None,
+        operation_concurrency: int | None = None,
+        io_concurrency: int | None = None,
+        verbose_debug_log: bool | None = None,
+        **storage_options,
+    ):
+        super().__init__(
+            operation_concurrency=operation_concurrency or self.operation_concurrency,
+            io_concurrency=io_concurrency or self.io_concurrency,
+            # Directory listing cache is explicitly disabled for all Databricks file systems.
+            use_listings_cache=False,
+            **storage_options,
+        )
+        self._init_client(client, config, config_params)
+
+        if verbose_debug_log is not None:
+            self.verbose_debug_log = verbose_debug_log
+
+        _register_cleanup(self)
+        self.log.debug("Opened: %s", self)
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        return strip_scheme(path)
+
+    def unstrip_protocol(self, name: str) -> str:
+        return unstrip_scheme(name)
+
+    def close(self):
+        """Close the file system and release any resources."""
+        if not self.closed:
+            self._close_client()
+            self.log.debug("Closed: %s", self)
+
+    def __enter__(self):
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        with contextlib.suppress(Exception):
+            self.close()
+
+    async def _sdk(self, func: Callable[[WorkspaceClient], T]) -> T:
+        """Call the blocking Databricks SDK in a thread, so that the event loop goes on."""
+        return await asyncio.to_thread(lambda: func(self.client))
+
+    def created(self, path):
         return self.info(path)["created"]
 
-    def modified(self, path) -> datetime | None:
+    def modified(self, path):
         return self.info(path)["modified"]
 
-    ### File/directory operations
-    def cp_file(self, path1, path2, **kwargs):
-        self.log.debug("Copying file: path1=%s, path2=%s", path1, path2)
+    async def _create_directory(self, path: str) -> None:
+        """Create a directory and its parents with the API."""
+        raise NotImplementedError
 
-    def _cp_directory(self, path2):
+    async def _cp_directory(self, path2: str) -> None:
         """Copy a directory: create the destination, as directories have no content."""
         try:
-            info = self.info(path2)
+            info = await self._info(path2)
         except FileNotFoundError:
-            self.mkdirs(path2)
+            await self._makedirs(path2, exist_ok=True)
             return
         if info["type"] != "directory":
             raise file_exists_error(path2)
 
-    def _rm(self, path):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
-        self.log.debug("Deleting file: path=%s", path)
-
-        info = self.info(path)
-        if info["type"] != "file":
-            raise is_a_directory_error(path)
-
-    def mkdir(self, path, create_parents=True, **kwargs):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
+    async def _mkdir(self, path, create_parents=True, **kwargs):
         self.log.debug(
             "Making directory: path=%s, create_parents=%s", path, create_parents
         )
 
         parent = self._parent(path)
-        if not self.isdir(parent):
+        if not await self._isdir(parent):
             # Tell a missing parent from a file
             try:
-                self.info(parent)
+                await self._info(parent)
             except FileNotFoundError:
-                if create_parents:
-                    return
-                else:
+                if not create_parents:
                     raise
-            raise not_a_directory_error(parent)
+            else:
+                raise not_a_directory_error(parent)
 
-        if self.exists(path):
+        if await self._exists(path):
             raise file_exists_error(path)
 
-    def makedirs(self, path, exist_ok=False):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
+        # The APIs create the parents too
+        await self._create_directory(path)
+
+    async def _makedirs(self, path, exist_ok=False):
         self.log.debug("Making directories: path=%s, exist_ok=%s", path, exist_ok)
 
         try:
-            info = self.info(path)
-            if info["type"] == "directory":
-                if exist_ok:
-                    return
-                else:
-                    raise file_exists_error(path)
-            else:
-                raise not_a_directory_error(path)
+            info = await self._info(path)
         except FileNotFoundError:
-            pass
-
-    def rmdir(self, path):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
-        self.log.debug("Deleting directory: path=%s", path)
-
-        if not self.isdir(path):
-            # Raises FileNotFoundError if the path is missing
-            self.info(path)
+            await self._create_directory(path)
+            return
+        if info["type"] != "directory":
             raise not_a_directory_error(path)
+        if not exist_ok:
+            raise file_exists_error(path)
 
-    def open(
-        self,
-        path,
-        mode="rb",
-        block_size: int | None = None,
-        compression: str | None = None,
-        encoding: str | None = None,
-        errors: str | None = None,
-        newline: str | None = None,
-        **kwargs,
-    ):
-        """Open a file for reading or writing.
-
-        Parameters
-        ----------
-        path : str
-            The path to the file to open.
-        mode : str, optional
-            The file mode like `rb`, `w`.
-        block_size : int, optional
-            The block size to use when accessing data in the file.
-        max_size : int, optional
-            The maximum size of the file to read or write.
-        compression : str, optional
-            If given, open file using compression codec. Can either be a compression
-            name (a key in ``fsspec.compression.compr``) or "infer" to guess the
-            compression from the filename suffix.
-        encoding : str, optional
-            The encoding to use when opening the file. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        errors : str, optional
-            The error handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        newline : str, optional
-            The newline handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        **kwargs
-            Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
-        """
-        self.log.debug("Opening file: path=%s, mode=%s", path, mode)
-
-        if "t" in mode and write_mode(mode):
-            newline = newline or "\n"
-
-        return super().open(
-            path=path,
-            mode=mode,
-            block_size=block_size,
-            compression=compression,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **kwargs,
-        )
+    def open(self, path, mode="rb", **kwargs):
+        """Open a file, writing text with "\\n" newlines by default."""
+        if "t" in mode and write_mode(mode) and kwargs.get("newline") is None:
+            kwargs["newline"] = "\n"
+        return super().open(path, mode, **kwargs)
 
 
 __all__ = [
     "AbstractDatabricksFileSystem",
     "DatabricksClientSupport",
+    "DatabricksTreeFileSystem",
     "root_dir_info",
 ]

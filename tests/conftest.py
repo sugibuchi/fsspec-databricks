@@ -16,7 +16,10 @@ from databricks.sdk.errors import NotFound
 from dotenv import load_dotenv
 from fsspec.asyn import get_loop, sync
 
-from fsspec_databricks.base import AbstractDatabricksFileSystem
+from fsspec_databricks.base import (
+    AbstractDatabricksFileSystem,
+    DatabricksTreeFileSystem,
+)
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import VolumeFileSystem
 
@@ -30,6 +33,7 @@ def pytest_configure(config):
     logging.getLogger("databricks.sdk").setLevel(logging.INFO)
     logging.getLogger("urllib3").setLevel(logging.INFO)
     AbstractDatabricksFileSystem.cachable = False
+    DatabricksTreeFileSystem.cachable = False
     VolumeFileSystem.cachable = False
 
 
