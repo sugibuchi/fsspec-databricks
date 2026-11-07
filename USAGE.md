@@ -51,7 +51,7 @@ import logging
 logging.getLogger("fsspec_databricks").setLevel(logging.DEBUG)
 ```
 
-Retries, fallbacks and aborted uploads are logged as warnings.
+Retries and aborted uploads are logged as warnings.
 
 Operations, such as `find`, `rm` or `copy`, are reported by the monitors of `fsspec_alt_strategies_common`. For
 example, `LoggingMonitor` logs the operations run in a `monitoring` block:

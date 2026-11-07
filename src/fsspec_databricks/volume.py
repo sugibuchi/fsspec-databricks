@@ -281,7 +281,8 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
         )
 
         if not available:
-            logger.warning(
+            # Outside Databricks the proxy is normally absent: the fallback is expected.
+            logger.debug(
                 "Storage proxy unavailable, using the workspace host: workspace_id=%d",
                 workspace_id,
             )
@@ -814,13 +815,7 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
             middlewares=middlewares,
             timeout=self._timeout,
         ) as response:
-            logger.debug(
-                "GET range %d-%d: path=%s, status=%d",
-                start,
-                end,
-                self.path,
-                response.status,
-            )
+            # Reads of ranges are not logged: a read makes many, and the lines would drown the rest.
             response.raise_for_status()
             return await response.read()
 

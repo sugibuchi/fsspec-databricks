@@ -533,9 +533,11 @@ paths from `DatabricksFileSystem`.
 Logging follows s3fs and gcsfs. Each module has a logger of its name, under `fsspec_databricks`, and no handlers are
 installed.
 
-- Each request to Databricks is one DEBUG line: its API or HTTP method, the path and the outcome.
+- Each request to Databricks, but a read of a range, is one DEBUG line: its API or HTTP method, the path and the outcome.
 - `_sdk` logs the SDK's calls, and `volume.py` logs its own HTTP requests.
-- Retries, the fallback from the storage proxy and aborted uploads are WARNINGs.
+- Reads of ranges are not logged: a read makes many. Their retries are still WARNINGs.
+- Retries and aborted uploads are WARNINGs.
+- The fallback from the storage proxy is DEBUG: outside Databricks, the proxy is normally absent.
 - Operations, such as `find` or `rm`, are not logged here. The library's monitors report them.
 
 The `verbose_debug_log` parameter and attribute are removed: the request lines replace them.
