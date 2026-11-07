@@ -7,15 +7,15 @@ from typing import Any
 from databricks.sdk import AuthorizationDetail, CredentialsStrategy, WorkspaceClient
 from databricks.sdk.config import Config
 from databricks.sdk.service.workspace import Language
-from fsspec.asyn import AsyncFileSystem, sync
-from fsspec.spec import AbstractFileSystem
+from fsspec.asyn import AsyncFileSystem
 from fsspec_alt_strategies_common.profile import StorageProfile
 
 from ._contrib.strategy.routing import AsyncRoutingFileSystem
+from ._contrib.strategy.tree.wrapper import SyncTreeWrapper
 from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
 from .dbfs import DBFS
 from .error import file_not_found_error
-from .local import DatabricksLocalFileSystem, LocalTreeWrapper
+from .local import DatabricksLocalFileSystem
 from .path import (
     FileSystemType,
     from_local_path,
@@ -307,12 +307,12 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
         return self.__local_fs
 
     @property
-    def _local_tree(self) -> LocalTreeWrapper:
+    def _local_tree(self) -> SyncTreeWrapper:
         """The local file system as the async backend the router needs."""
         local = self._local_fs
         return self._backend(
             "local",
-            lambda: LocalTreeWrapper(
+            lambda: SyncTreeWrapper(
                 local,
                 operation_concurrency=self._operation_concurrency
                 or DBFS.operation_concurrency,
@@ -360,16 +360,12 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
 
         t = fs_type(path)
         if self._uses_local_fs:
-            local = to_local_path(path, self.legacy_dbfs_local_root)
-            # to_local_path drops a trailing "/", which means a folder to copy and glob.
-            if path.endswith("/") and not local.endswith("/"):
-                local += "/"
-            return self._local_tree, local
+            return self._local_tree, to_local_path(path, self.legacy_dbfs_local_root)
         if t == FileSystemType.Workspace:
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        # Asked once, then cached: a blocking call, as _route cannot await.
+        # _prepare_route has asked, except before a sync call of an async router: then this blocks.
         elif self.legacy_dbfs_enabled:
             return self._legacy_fs, path
         raise file_not_found_error(path)
@@ -378,6 +374,14 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
         if self._uses_local_fs:
             return from_local_path(path, self.legacy_dbfs_local_root)
         return path
+
+    async def _prepare_route(self, path: str) -> None:
+        # Only legacy DBFS paths need the workspace setting, asked once in a thread and then cached.
+        if self._legacy_dbfs_enabled is None and fs_type(path) not in (
+            FileSystemType.Workspace,
+            FileSystemType.Volume,
+        ):
+            await asyncio.to_thread(lambda: self.legacy_dbfs_enabled)
 
     async def _roots(self, path: str) -> list[dict[str, Any]]:
         if not await asyncio.to_thread(lambda: self.legacy_dbfs_enabled):
@@ -389,10 +393,9 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
             fs, inner = self._legacy_fs, "/"
         return [self._entry(fs, e) for e in await fs._ls(inner, detail=True)]
 
-    async def _info(self, path, **kwargs):
-        if self._target(path) is None:
-            return dict(root_dir_info)
-        return await super()._info(path, **kwargs)
+    async def _root_info(self, path: str) -> dict[str, Any]:
+        # _route gives None for the root only.
+        return dict(root_dir_info)
 
     ## File I/O
     def open(
@@ -446,12 +449,6 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
                 newline = "\n"
             kwargs.update(encoding=encoding, errors=errors, newline=newline)
         return super().open(path, mode, compression=compression, **kwargs)
-
-    def pipe_file(self, path, value, mode="overwrite", **kwargs):
-        # The router's _pipe_file writes through open_async, outside the transaction: in one, write with open.
-        if self._intrans:
-            return AbstractFileSystem.pipe_file(self, path, value, mode=mode, **kwargs)
-        return sync(self.loop, self._pipe_file, path, value, mode=mode, **kwargs)
 
 
 __all__ = [

@@ -1,8 +1,5 @@
-import asyncio
-
 from fsspec.implementations.local import LocalFileSystem
 
-from ._contrib.strategy.tree.wrapper import SyncTreeWrapper
 from .path import scheme, strip_scheme, unstrip_scheme
 
 
@@ -27,23 +24,6 @@ class DatabricksLocalFileSystem(LocalFileSystem):
         return unstrip_scheme(name)
 
 
-class LocalTreeWrapper(SyncTreeWrapper):
-    """The local file system as an async `TreeFileSystem`, so that `DatabricksFileSystem` can route to it.
-
-    It adds what the library's wrapper does not pass on: `_mkdir`, `created` and `modified`.
-    """
-
-    async def _mkdir(self, path, create_parents=True, **kwargs):
-        await asyncio.to_thread(self.fs.mkdir, path, create_parents, **kwargs)
-
-    def created(self, path):
-        return self.fs.created(path)
-
-    def modified(self, path):
-        return self.fs.modified(path)
-
-
 __all__ = [
     "DatabricksLocalFileSystem",
-    "LocalTreeWrapper",
 ]

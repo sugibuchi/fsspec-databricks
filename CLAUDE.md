@@ -62,7 +62,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   Override a method that the router passes on only for what Databricks adds, e.g. `open`'s notebook parameters.
 - `_route(path)` gives the backend and its path. Inside a workspace, that path is a local path, and `_outer` maps the
   names returned back with `from_local_path`.
-- Every backend must be async. The local file system is wrapped in `LocalTreeWrapper`.
+- Every backend must be async. The local file system is wrapped in the library's `SyncTreeWrapper`.
 - Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
   and call the SDK in threads with `_sdk`.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.

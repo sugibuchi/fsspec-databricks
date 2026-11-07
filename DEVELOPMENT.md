@@ -355,13 +355,13 @@ Whether legacy DBFS is enabled is checked once:
 - with the local file system, by whether `legacy_dbfs_local_root` exists;
 - otherwise, from the workspace setting `disable_legacy_dbfs`.
 
-`_route` cannot await, so the first legacy DBFS path asks the workspace setting in a blocking call.
+`_prepare_route` asks the workspace setting in a thread before the first legacy DBFS path is routed. A sync call of an
+async router, such as `open`, cannot await it, so `_route` asks in a blocking call.
 
 The backends are created on first use with the router's `_backend`, with the file system's client, config and
 options. `close()` closes them.
 
-The router needs async backends. The local file system is sync, so `LocalTreeWrapper`, in `local.py`, wraps it in the
-library's `SyncTreeWrapper`. It adds `_mkdir`, `created` and `modified`, which the wrapper does not pass on.
+The router needs async backends. The local file system is sync, so the library's `SyncTreeWrapper` wraps it.
 
 ### The base classes
 
