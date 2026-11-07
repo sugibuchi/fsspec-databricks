@@ -18,9 +18,20 @@ from databricks.sdk.service.workspace import (
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.workspace import WorkspaceFileSystem
-from tests.utils import bytes_sig
+from tests.utils import bytes_sig, prepare_workspace_test_root
 
 log = logging.getLogger(__name__)
+
+
+@pytest.fixture(scope="module", params=["dummy", "live"])
+def client(request) -> WorkspaceClient:
+    """The dummy server's client, offline, then the real workspace's, when configured."""
+    return request.getfixturevalue(f"{request.param}_client")
+
+
+@pytest.fixture(scope="module")
+def workspace_test_root(client: WorkspaceClient) -> str:
+    return prepare_workspace_test_root(client)
 
 
 def init_test_dir(

@@ -1,11 +1,15 @@
+import logging
+import os
 import posixpath
 from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from unittest.mock import MagicMock
 
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import (
     BadRequest,
+    NotFound,
     ResourceAlreadyExists,
     ResourceDoesNotExist,
 )
@@ -15,6 +19,8 @@ from databricks.sdk.service.workspace import (
     ObjectInfo,
     ObjectType,
 )
+
+log = logging.getLogger(__name__)
 
 
 def datetime_eq(a: datetime, b: datetime):
@@ -117,6 +123,47 @@ class FakeWorkspaceAPI:
 
     def calls_of(self, name: str) -> list[tuple]:
         return [c for c in self.calls if c[0] == name]
+
+
+default_workspace_test_root = "/fsspec-databricks-test/local"
+default_dbfs_test_root = "/fsspec-databricks-test/local"
+
+
+def _test_root(variable: str, default: str) -> str:
+    return "/" + os.getenv(variable, default).strip("/")
+
+
+def prepare_workspace_test_root(client: WorkspaceClient) -> str:
+    """Create the Workspace work directory, or empty it."""
+    path = _test_root(
+        "FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT", default_workspace_test_root
+    )
+    log.info("Preparing workspace test root: %s", path)
+    try:
+        client.workspace.get_status(path)
+    except NotFound:
+        client.workspace.mkdirs(path)
+        return path
+    for i in client.workspace.list(path):
+        client.workspace.delete(i.path, recursive=True)
+    return path
+
+
+def prepare_dbfs_test_root(client: WorkspaceClient) -> str:
+    """Create the legacy DBFS work directory, or empty it."""
+    path = _test_root("FSSPEC_DATABRICKS_DBFS_TEST_ROOT", default_dbfs_test_root)
+    log.info("Preparing DBFS test root: %s", path)
+    client.dbfs.mkdirs(path)
+    for i in client.dbfs.list(path):
+        client.dbfs.delete(i.path, recursive=True)
+    return path
+
+
+def legacy_dbfs_disabled(client: WorkspaceClient) -> bool:
+    """Whether the workspace disables the legacy DBFS API."""
+    return client.workspace_settings_v2.get_public_workspace_setting(
+        "disable_legacy_dbfs"
+    ).effective_boolean_val.value
 
 
 def fake_workspace_client() -> MagicMock:

@@ -23,7 +23,8 @@ from fsspec_databricks.base import (
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import VolumeFileSystem
 
-from .dummy_api import dummy_context, serve_app
+from .dummy_api import dummy_context, dummy_storage, serve_app
+from .utils import prepare_workspace_test_root
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +93,33 @@ def client_event_loop():
 @pytest.fixture(scope="session")
 def dummy_api(server_event_loop):
     yield from serve_app(server_event_loop)
+
+
+@pytest.fixture(scope="session")
+def dummy_client(dummy_api):
+    """A `WorkspaceClient` of the dummy server, on its Files, Workspace and DBFS APIs."""
+    return WorkspaceClient(host=dummy_api, token="dummy", auth_type="pat")
+
+
+@pytest.fixture(scope="function")
+def dummy_storage_context(dummy_api):
+    """The dummy server's Workspace files and DBFS root, emptied after the test."""
+    storage = dummy_storage()
+    try:
+        yield storage
+    finally:
+        storage.reset()
+
+
+@pytest.fixture(scope="session")
+def live_client():
+    """A `WorkspaceClient` of the real workspace, or a skip without credentials."""
+    try:
+        return WorkspaceClient()
+    except (
+        Exception
+    ) as e:  # The SDK raises ValueError, among others, without a configuration.
+        pytest.skip(f"No Databricks workspace configured: {e}")
 
 
 @pytest.fixture(scope="function")
@@ -195,34 +223,6 @@ def volume_test_root(client):
     return path
 
 
-default_workspace_test_root = "/fsspec-databricks-test/local"
-
-
 @pytest.fixture(scope="session")
 def workspace_test_root(client):
-    path = os.getenv(
-        "FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT",
-        default_workspace_test_root,
-    )
-
-    path = "/" + path.strip("/")
-
-    # Changed f-string logging to lazy-format
-    log.info("Preparing workspace test root: %s", path)
-
-    try:
-        client.workspace.get_status(path)
-    except NotFound:
-        # Directory does not exist, create it
-        client.workspace.mkdirs(path)
-        # Changed f-string logging to lazy-format
-        log.info("Workspace test root has been created: %s", path)
-        return path
-
-    for i in client.workspace.list(path):
-        client.workspace.delete(i.path, recursive=True)
-
-    # Changed f-string logging to lazy-format
-    log.info("Workspace test root has been cleaned: %s", path)
-
-    return path
+    return prepare_workspace_test_root(client)
