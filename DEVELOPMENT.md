@@ -5,12 +5,12 @@
 | Path                                | Contents                                                                         |
 |-------------------------------------|----------------------------------------------------------------------------------|
 | `src/fsspec_databricks/__init__.py` | The public API: `DatabricksFileSystem` and `use()`.                              |
-| `src/fsspec_databricks/spec.py`     | `DatabricksFileSystem`, which routes each call to a backend.                     |
-| `src/fsspec_databricks/base.py`     | The client handling, and the base classes of the router and the backends.        |
+| `src/fsspec_databricks/spec.py`     | `DatabricksFileSystem`, the library's router, sending each call to a backend.    |
+| `src/fsspec_databricks/base.py`     | The client handling, and the base classes of the backends.                       |
 | `src/fsspec_databricks/volume.py`   | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.                 |
 | `src/fsspec_databricks/workspace.py` | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object.      |
 | `src/fsspec_databricks/dbfs.py`     | `DBFS`, the legacy DBFS.                                                         |
-| `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, the local file system used inside a workspace.      |
+| `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, used inside a workspace, and its async wrapper.     |
 | `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the tree strategies and the file objects.  |
 | `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
 | `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
@@ -281,7 +281,8 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 
 ## Architecture
 
-- **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use.
+- **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use. It is the library's
+  `AsyncRoutingFileSystem`.
 - **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies. Each
   subclasses `DatabricksTreeFileSystem`, in `base.py`.
 - **The file objects** are the library's. Volume files read and write ranges concurrently. Workspace files are
@@ -289,38 +290,43 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
 
 ### Routing
+### Routing
 
-`DatabricksFileSystem._resolve(path)` gives the file system for a path, and the path to pass to it:
+`DatabricksFileSystem` subclasses the library's `AsyncRoutingFileSystem`, in `routing.py` of the copy. The library
+passes each call on, and `spec.py` only says where each path goes:
 
-- the local file system and the local path, when running in a workspace with `use_local_fs_in_workspace`;
-- else the Volume, Workspace or legacy DBFS backend of `path.fs_type`, and the path unchanged;
-- `FileNotFoundError` for legacy DBFS paths when the workspace disables legacy DBFS.
+- `_route(path)` gives the backend and its path: the local file system and the local path in a workspace with
+  `use_local_fs_in_workspace`, else the Volume, Workspace or legacy DBFS backend of `path.fs_type`.
+- It gives `None` for the root, which spans the backends.
+- It raises `FileNotFoundError` for legacy DBFS paths when the workspace disables legacy DBFS.
+- `_outer` maps the local file system's names back to DBFS paths.
+- `_roots` lists the root: `/Volumes` and `/Workspace` without legacy DBFS, else the root of legacy DBFS.
 
-Every method calls `_resolve`. With the local file system, the names returned are mapped back to DBFS paths.
+The library's router does the rest:
 
-`find`, `glob`, `du`, `walk`, `rm`, and `copy` and `mv` within one backend, are the backend's own. So they run its
-tree strategies, which monitors of fsspec-alt-strategies see as calls to the backend. Two cases fall back to fsspec's
-own methods on top of the router:
+- `find`, `glob`, `du`, `walk`, `rm`, and `copy` and `mv` within one backend, are the backend's own. So they run its
+  tree strategies, which monitors see as calls to the backend, with the router in `Call.via`.
+- A path or pattern at the root is walked by fsspec's own methods, over `_roots`.
+- A change of the root raises `PermissionError`.
+- A copy or move between two backends is the source backend's `_transfer`, a tree strategy, under one call of the
+  router. Each file is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
+- A move between backends deletes each source file once it is copied, then the source folders.
 
-- a path or pattern at the root, which spans the backends;
-- a copy or move between backends.
+No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
+`_same_storage` and `_server_copy`.
 
 Whether legacy DBFS is enabled is checked once:
 
 - with the local file system, by whether `legacy_dbfs_local_root` exists;
 - otherwise, from the workspace setting `disable_legacy_dbfs`.
 
-When legacy DBFS is disabled, `ls("/")` and `info("/")` answer without a backend: the root holds `/Volumes` and
-`/Workspace`.
+`_route` cannot await, so the first legacy DBFS path asks the workspace setting in a blocking call.
 
-The backends are created on first use, with the file system's client, config and options. `close()` closes them.
+The backends are created on first use with the router's `_backend`, with the file system's client, config and
+options. `close()` closes them.
 
-Transfers between backends:
-
-- `cp_file` streams the file from one backend's file object into the other's, 8 MB at a time. A folder is created,
-  not copied.
-- `copy` is fsspec's: it finds the files with the source backend's `find`, then calls `cp_file` for each.
-- `mv` is fsspec's: a copy, then a delete.
+The router needs async backends. The local file system is sync, so `LocalTreeWrapper`, in `local.py`, wraps it in the
+library's `SyncTreeWrapper`. It adds `_mkdir`, `created` and `modified`, which the wrapper does not pass on.
 
 ### The base classes
 
@@ -330,7 +336,8 @@ Transfers between backends:
 - `close()`, also called at exit and on garbage collection;
 - the `dbfs` protocol: `_strip_protocol` and `unstrip_protocol` use `path.py`.
 
-`AbstractDatabricksFileSystem` is the router's base: a synchronous fsspec file system with the mixin.
+`AbstractDatabricksFileSystem` is a synchronous fsspec file system with the mixin, for file systems without a library
+base. `DatabricksFileSystem` takes the mixin with the library's `AsyncRoutingFileSystem` instead.
 
 `DatabricksTreeFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
@@ -554,8 +561,11 @@ library's `TransactionFile`, with a `FileTransaction` of `files/fsspec_transacti
 - DBFS uses `TempPathTransaction`. Commit deletes the destination, then moves the temporary file, as the API's move
   refuses an existing destination.
 
-`DatabricksFileSystem.open` passes `autocommit` to the backend. It then moves the file from the backend's own
-transaction to its own, which commits or discards the files of every backend.
+The router's `_open` passes `autocommit` to the backend's `_open`. fsspec's `open` adds the file to the router's own
+transaction, which commits or discards the files of every backend. The backends' own transactions stay empty.
+
+The router's `_pipe_file` writes through `open_async`, which knows no transaction. So `DatabricksFileSystem.pipe_file` writes
+with `open` inside a transaction.
 
 ### Local file system
 

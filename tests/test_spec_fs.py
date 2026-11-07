@@ -128,7 +128,7 @@ class _Calls(Monitor):
         self.calls = []
 
     async def started(self, call, state, op):
-        self.calls.append((call.fs, call.method, call.path))
+        self.calls.append(call)
 
 
 @pytest.fixture
@@ -158,13 +158,15 @@ def test_dbx_fs_routes_recursive_operations(routed_fs):
         assert fs.du("/Workspace/t/dir") == 3
         fs.copy("/Workspace/t/dir", "/Workspace/t/copy", recursive=True)
 
+    # The backend's calls, with its paths, made through the router.
     backend = fs._workspace_fs
-    assert monitor.calls == [
-        (backend, "find", "dbfs:/Workspace/t/dir"),
+    assert [(c.fs, c.method, c.path) for c in monitor.calls] == [
+        (backend, "find", "/Workspace/t/dir"),
         (backend, "glob", "/Workspace/t/dir/*.bin"),
         (backend, "du", "/Workspace/t/dir"),
         (backend, "copy", "/Workspace/t/dir"),
     ]
+    assert all(c.via == (fs,) for c in monitor.calls)
     assert fs.find("/Workspace/t/copy") == [
         "/Workspace/t/copy/a.bin",
         "/Workspace/t/copy/sub/b.bin",
@@ -176,9 +178,14 @@ def test_dbx_fs_routes_recursive_operations(routed_fs):
 
 
 def test_dbx_fs_copies_between_backends(routed_fs):
-    """A copy between backends streams each file through the backends' file objects."""
+    """A copy between backends is the router's own, streaming each file through the backends' file objects."""
     fs = routed_fs
-    fs.copy("/Workspace/t/dir", "/backup", recursive=True)
+    monitor = _Calls()
+    with monitoring(monitor):
+        fs.copy("/Workspace/t/dir", "/backup", recursive=True)
+    assert [(c.fs, c.method, c.path) for c in monitor.calls] == [
+        (fs, "copy", "/Workspace/t/dir")
+    ]
 
     assert fs.find("/backup") == ["/backup/a.bin", "/backup/sub/b.bin"]
     assert fs.cat_file("/backup/sub/b.bin") == b"bb"
@@ -186,6 +193,17 @@ def test_dbx_fs_copies_between_backends(routed_fs):
     fs.mv("/backup/a.bin", "/Workspace/t/a.bin")
     assert not fs.exists("/backup/a.bin")
     assert fs.cat_file("/Workspace/t/a.bin") == b"a"
+
+
+def test_dbx_fs_root_without_legacy_dbfs(routed_fs):
+    """Without legacy DBFS, the root holds the Volumes and Workspace roots, and cannot be changed."""
+    fs = routed_fs
+    fs._legacy_dbfs_enabled = False
+    assert fs.ls("/", detail=False) == ["/Volumes", "/Workspace"]
+    assert fs.info("dbfs:/")["type"] == "directory"
+    assert not fs.exists("/t")
+    with pytest.raises(PermissionError):
+        fs.rm("/", recursive=True)
 
 
 def test_dbx_fs_transaction_spans_backends(routed_fs):

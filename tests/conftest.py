@@ -21,6 +21,7 @@ from fsspec_databricks.base import (
     DatabricksTreeFileSystem,
 )
 from fsspec_databricks.path import parse_volume_path
+from fsspec_databricks.spec import DatabricksFileSystem
 from fsspec_databricks.volume import VolumeFileSystem
 
 from .dummy_api import dummy_storage, serve_app
@@ -36,6 +37,7 @@ def pytest_configure(config):
     AbstractDatabricksFileSystem.cachable = False
     DatabricksTreeFileSystem.cachable = False
     VolumeFileSystem.cachable = False
+    DatabricksFileSystem.cachable = False
 
 
 def _event_loop(thread_name: str):

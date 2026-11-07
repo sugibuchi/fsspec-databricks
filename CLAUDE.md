@@ -60,13 +60,12 @@ DEVELOPMENT.md describes the layout, the tests and their setup. Read its Tests s
 
 DEVELOPMENT.md's Architecture section describes each part: read it before changing one. The traps:
 
-- `DatabricksFileSystem` routes each call to a backend by path. It holds no file system logic of its own, except for
-  the root folder and transfers between backends.
-- Its methods get the backend and the path to pass with `_resolve(path)`. Inside a workspace, that path is a local
-  path, and names returned are mapped back with `from_local_path`.
-- Its recursive methods, such as `find` and `copy`, call the backend's own, so that its tree strategies run. Only paths
-  at the root, or spanning backends, fall back to fsspec's methods.
-- Every backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
+- `DatabricksFileSystem` is the library's `AsyncRoutingFileSystem`. It implements `_route`, `_outer` and `_roots`.
+  Override a method that the router passes on only for what Databricks adds, e.g. `open`'s notebook parameters.
+- `_route(path)` gives the backend and its path. Inside a workspace, that path is a local path, and `_outer` maps the
+  names returned back with `from_local_path`.
+- Every backend must be async. The local file system is wrapped in `LocalTreeWrapper`.
+- Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
   and call the SDK in threads with `_sdk`.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.

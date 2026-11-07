@@ -34,6 +34,7 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `use_local_fs_in_workspace` | Use the local file system when running in a Databricks workspace.                   | `True`  |
 | `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.   | Per backend |
 | `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
+| `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                       | `8`     |
 
 Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
 `16` and `8`. Their files are transferred whole or one block at a time, so `io_concurrency` does not limit them.
@@ -160,7 +161,8 @@ keeps a file invisible in its own way:
 Limits:
 
 - The files are committed one after another. A transaction is not atomic across files or backends.
-- Only files written with `open` join the transaction. Copies, moves and deletes take effect at once.
+- Only files written with `open` or `pipe_file` join the transaction. Copies, moves and deletes take effect at once.
+- Files opened with `open_async` take no part in the transaction.
 - On legacy DBFS, other clients may see the temporary file. Commit deletes the file it replaces, then moves the new one:
   two requests.
 - Exclusive creation, mode `"x"`, is checked on commit on legacy DBFS, and when opening on the other backends.
@@ -194,6 +196,12 @@ fs.mv(
     "dbfs:/Workspace/Users/alice@example.com/output.txt",
 )
 ```
+
+Between two backends:
+
+- files are streamed through this process, `transfer_concurrency` at a time;
+- a recursive move deletes each source file as soon as it is copied, then the folders left empty;
+- monitors see a copy or move between backends as one operation of `DatabricksFileSystem`.
 
 ---
 
