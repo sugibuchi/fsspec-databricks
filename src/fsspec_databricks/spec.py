@@ -79,7 +79,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         ## Options for Unity Catalog Volume file system
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
-        upload_mode: Literal["multipart", "resumable"] | None = None,
+        upload_mode: Literal["multipart", "resumable"] = "multipart",
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
         ## Logging option
@@ -143,8 +143,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         io_concurrency : int, optional
             The maximum number of concurrent range reads and part uploads of Unity Catalog Volume files.
         upload_mode : {"multipart", "resumable"}, optional
-            The upload API of large Unity Catalog Volume files. By default, resumable on GCP and
-            multipart elsewhere.
+            The upload API of large Unity Catalog Volume files: multipart by default.
         use_local_fs_in_workspace
             Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
         verbose_debug_log : bool, optional

@@ -448,7 +448,8 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     and a multipart upload's start, parts, completion and abort.
 
     - Until ``min_multipart_size`` bytes are written, they are buffered. A file
-      closed by then is uploaded in one request.
+      closed by then is uploaded in one request, and so is one that fits a
+      single part when closed.
     - Beyond, parts are uploaded as soon as they fill, as the concurrency
       limit allows, while writing goes on. A file that has had n bytes
       written is assumed to get n more: its parts grow, so as to split that
@@ -701,6 +702,16 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                 buffer.clear()
             return
         block = self._block_size(len(buffer) if closing else self._pos)
+        if (
+            closing
+            and not self._multipart
+            and len(buffer) - block < self.min_block_size
+        ):
+            # One part would take it all: one request uploads it, where a multipart
+            # upload would add its start and completion.
+            await self._upload_all(bytes(buffer))
+            buffer.clear()
+            return
         offset = self._pos - len(buffer)
         taken = 0
         try:

@@ -414,13 +414,17 @@ writes:
 3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
 
-The file system chooses the class before opening a file, by its `upload_mode` option. Without the option, it takes the
-mode of the workspace's cloud from the SDK config:
+The file system chooses the class before opening a file, by its `upload_mode` option, multipart by default.
 
-- GCP takes resumable uploads.
-- AWS and Azure take multipart uploads.
+Multipart support follows the endpoint, not the cloud. The Files API's endpoints listing, `GET /api/2.0/fs/endpoints`,
+gives each endpoint a `multipart_upload_supported` flag:
 
-This mapping is assumed, not documented by Databricks: live tests on each cloud should confirm it.
+- the offload path on the workspace host, which presigned URLs use, supports multipart uploads;
+- Files API 3.0 on the storage host supports them;
+- Files API 2.0 called directly on the workspace host does not.
+
+AWS and GCP workspaces answered the same, and both started multipart uploads in the live tests. When a workspace answers
+resumable is not yet observed: `upload_mode="resumable"` is for that case.
 
 The server names the mode in its answer to the initiation. A file that gets the other mode aborts that upload and raises
 an `OSError`: it never switches.

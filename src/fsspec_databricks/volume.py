@@ -168,7 +168,7 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         io_concurrency: int | None = None,
         connection_pool_size: int | None = None,
         verbose_debug_log: bool | None = None,
-        upload_mode: Literal["multipart", "resumable"] | None = None,
+        upload_mode: Literal["multipart", "resumable"] = "multipart",
         **storage_options,
     ):
         """Initialize the Unity Catalog Volume file system.
@@ -193,15 +193,15 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             Whether to enable verbose debug logging for file system operations.
         upload_mode : {"multipart", "resumable"}, optional
             The upload API of files from `VolumeWritableFile.min_multipart_size`. Multipart
-            uploads send parts in parallel, and resumable uploads one at a time. By default,
-            resumable on GCP workspaces and multipart elsewhere. Writing raises `OSError` when
-            the workspace answers with the other one.
+            uploads send parts in parallel, and resumable uploads one at a time. Multipart by
+            default: every workspace endpoint used supports it, on every cloud. Writing raises
+            `OSError` when the workspace answers with the other one.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
-        if upload_mode not in (None, "multipart", "resumable"):
+        if upload_mode not in ("multipart", "resumable"):
             raise ValueError(
-                f"upload_mode must be 'multipart', 'resumable' or None: {upload_mode!r}"
+                f"upload_mode must be 'multipart' or 'resumable': {upload_mode!r}"
             )
         super().__init__(
             operation_concurrency=operation_concurrency or self.operation_concurrency,
@@ -220,8 +220,7 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
         self._lock = threading.Lock()
         self._workspace_id: int | None = None
         self._storage_proxy_available: bool | None = None
-        self._upload_mode_option = upload_mode
-        self._default_upload_mode: Literal["multipart", "resumable"] | None = None
+        self.upload_mode = upload_mode
 
         # Made on the loop that uses it, as TCPConnector needs a running loop.
         self._session: ClientSession | None = None
@@ -299,19 +298,6 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
             if self._workspace_id is None:
                 self._workspace_id = self.client.get_workspace_id()
             return self._workspace_id
-
-    @property
-    def upload_mode(self) -> Literal["multipart", "resumable"]:
-        """The upload API of large files: the `upload_mode` option, or the workspace cloud's default."""
-        if self._upload_mode_option is not None:
-            return self._upload_mode_option
-        if self._default_upload_mode is None:
-            # Assumed per cloud: GCS takes resumable uploads, S3 and ADLS multipart ones.
-            # The config resolves lazily, and may block on authentication.
-            self._default_upload_mode = (
-                "resumable" if self.config.is_gcp else "multipart"
-            )
-        return self._default_upload_mode
 
     @property
     def storage_proxy_available(self) -> bool:
@@ -541,14 +527,18 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
                 path, "Catalogs, schemas and volumes are not deleted as directories"
             )
 
+        # Checked first, as the old precondition did: deleting a missing directory
+        # succeeds on some clouds, e.g. AWS, where rmdir must raise FileNotFoundError.
+        info = await self._info(path)
+        if info["type"] != "directory":
+            raise not_a_directory_error(path)
+
         with error_mapping(path):
             try:
                 await self._sdk(lambda c: c.files.delete_directory(full_path))
-            except (NotFound, BadRequest) as e:
-                if isinstance(e, BadRequest) and "is not empty" in str(e):
+            except BadRequest as e:
+                if "is not empty" in str(e):
                     raise not_empty_error(path) from e
-                if await self._isfile(path):
-                    raise not_a_directory_error(path) from None
                 raise
 
     async def _create_directory(self, path):
@@ -654,11 +644,9 @@ class VolumeFileSystem(DatabricksClientSupport, TreeFileSystem):
                 **kwargs,
             )
         else:
-            # The property may resolve the config, which blocks.
-            mode = await asyncio.to_thread(lambda: self.upload_mode)
             file_class = (
                 VolumeResumableWritableFile
-                if mode == "resumable"
+                if self.upload_mode == "resumable"
                 else VolumeMultipartWritableFile
             )
             return file_class(

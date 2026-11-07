@@ -106,17 +106,16 @@ def test_volume_fs_init():
         assert fs.io_concurrency == 4
 
 
-@pytest.mark.parametrize(
-    ("is_gcp", "default"), [(True, "resumable"), (False, "multipart")]
-)
-def test_volume_fs_upload_mode(is_gcp, default):
+@pytest.mark.parametrize("is_gcp", [True, False])
+def test_volume_fs_upload_mode(is_gcp):
     client = MagicMock()
     client.config.is_gcp = is_gcp
 
+    # Multipart on every cloud: the workspace endpoints used all support it.
     with VolumeFileSystem(client=client) as fs:
-        assert fs.upload_mode == default
+        assert fs.upload_mode == "multipart"
 
-    # The option overrides the cloud's default.
+    # The option chooses another.
     for mode in ("multipart", "resumable"):
         with VolumeFileSystem(client=client, upload_mode=mode) as fs:
             assert fs.upload_mode == mode
@@ -1079,7 +1078,7 @@ def test_volume_fs_open_w(
         (large_data, len(large_data), True),
     ]:
         with patch.object(
-            _VolumeWritableFile, "min_multipart_upload_size", min_size
+            _VolumeWritableFile, "min_multipart_size", min_size
         ) as _upload_part:
             stream = BytesIO(data)
             with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
