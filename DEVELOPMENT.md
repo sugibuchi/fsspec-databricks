@@ -64,9 +64,11 @@ uvx pre-commit run --all-files                  # the hooks
 | `test_base_fs.py`          | `AbstractDatabricksFileSystem`                    | Yes       |
 | `test_volume_fs.py`        | `VolumeFileSystem`                                | Mostly    |
 | `test_volume.py`           | The Volume file objects                           | No        |
-| `test_workspace_fs.py`     | `WorkspaceFileSystem`                             | Yes       |
+| `test_workspace_fs.py`     | `WorkspaceFileSystem`, on the dummy and live      | Optional  |
 | `test_workspace.py`        | `WorkspaceFileSystem`, on a fake Workspace API    | No        |
+| `test_dbfs_fs.py`          | `DBFS`, on the dummy and live                     | Optional  |
 | `test_dbfs.py`             | `DBFS`, on a fake DBFS API                        | No        |
+| `test_dummy_api.py`        | The dummy server, through the SDK                 | No        |
 | `test_path.py`             | `path.py`                                         | No        |
 | `test_utils.py`            | `utils.py`                                        | No        |
 
@@ -83,6 +85,32 @@ The fixtures, in `tests/conftest.py`:
 `tests/dummy_api.py` is a FastAPI app of the Files API's endpoints, served by Hypercorn on a free local port. It
 covers downloads, single uploads, multipart and resumable uploads, presigned URLs and aborts.
 `dummy_api_context.upload_mode` chooses which upload API the fake server answers with.
+
+The same server answers the Workspace API and the legacy DBFS API, as their REST references describe. The SDK's own
+`WorkspaceClient` talks to it over HTTP, so the SDK's requests, errors and mixins run as against a workspace.
+
+- `dummy_client` is that client, and `dummy_storage_context` the Workspace files and DBFS root it holds.
+- The Workspace files, the DBFS root and the Files API's files are separate namespaces, as in Databricks.
+- `test_dummy_api.py` checks the server through the SDK alone, without this package.
+- `legacy_dbfs_disabled` makes the server answer as a workspace disabling the DBFS root.
+
+`test_workspace_fs.py` and `test_dbfs_fs.py` run each test twice, on two clients:
+
+- `dummy`, on the dummy server, with no workspace;
+- `live`, on the real workspace, skipped without credentials.
+
+The live DBFS cases also skip when the workspace disables legacy DBFS. Most workspaces do, so the dummy is usually
+how DBFS is tested. Their work directory is `FSSPEC_DATABRICKS_DBFS_TEST_ROOT`, by default
+`/fsspec-databricks-test/local`, emptied at the start.
+
+The references leave some behaviour open. The dummy then makes an assumption, marked in a comment:
+
+- A DBFS delete of a missing path succeeds.
+- A DBFS file exists from `create` on, and grows with each block.
+- DBFS `create` and `move` create the missing parents.
+- DBFS lists are sorted by name, Workspace lists in creation order.
+- A Workspace import refuses a missing parent folder.
+- Workspace imports and exports support `SOURCE`, `AUTO` and `RAW` only, with no directories.
 
 `tests/utils.py` has the helpers that test files share, such as the fake Workspace API, `FakeWorkspaceAPI`.
 `tests/test_dbfs.py` has the fake DBFS API, `FakeDbfsAPI`.

@@ -43,9 +43,15 @@ DEVELOPMENT.md describes the layout, the tests and their setup. Read its Tests s
   environment.
 - The session fixtures `volume_test_root` and `workspace_test_root` delete everything in the test roots first. Never
   point them at folders holding anything else.
-- Without credentials, run `tests/test_volume.py`, `tests/test_path.py`, `tests/test_utils.py`,
-  `tests/test_workspace.py` and `tests/test_dbfs.py`. `test_volume.py` uses the fake Files API in `tests/dummy_api.py`.
-  The Workspace and DBFS tests use fakes of their SDK APIs.
+- Without credentials, run these:
+  - `tests/test_volume.py`, `tests/test_path.py`, `tests/test_utils.py`, `tests/test_workspace.py` and
+    `tests/test_dbfs.py`;
+  - `tests/test_dummy_api.py`, the tests of the dummy server itself;
+  - `tests/test_workspace_fs.py` and `tests/test_dbfs_fs.py`, whose `dummy` cases need no workspace.
+- `tests/dummy_api.py` serves the Files, Workspace and legacy DBFS APIs over HTTP, to the SDK's real
+  `WorkspaceClient`. Follow the REST reference there, and mark behaviour it leaves open as an assumption.
+- `test_workspace_fs.py` and `test_dbfs_fs.py` run each test on the dummy server, then on the real workspace. The live
+  cases skip without credentials. The DBFS ones also skip when the workspace disables legacy DBFS.
 - A test of anything a workspace serves gets a check without one where possible, on the fake API or with mocks.
 - Test helpers shared by files are in `tests/utils.py`.
 - `tests/conftest.py` sets `cachable = False`, so each test gets new file system instances.
