@@ -57,6 +57,21 @@ class _FileSystemWrapper:
     def unstrip_protocol(self, name: str) -> str:
         return self.fs.unstrip_protocol(name)
 
+    # The sync methods fsspec leaves to each filesystem, the wrapped one's as
+    # they are: a router passes them on to its storages.
+
+    def created(self, path: str) -> Any:
+        return self.fs.created(path)
+
+    def modified(self, path: str) -> Any:
+        return self.fs.modified(path)
+
+    def sign(self, path: str, expiration: int = 100, **kwargs: Any) -> str:
+        return self.fs.sign(path, expiration=expiration, **kwargs)
+
+    def invalidate_cache(self, path: str | None = None) -> None:
+        self.fs.invalidate_cache(path)
+
     def _unwrapped(self) -> Any:
         """The filesystem wrapped, unwrapped too if a wrapper: a monitor's `Call` names it.
 
@@ -99,6 +114,11 @@ class _AsyncFileSystemWrapper(_FileSystemWrapper):
 
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
         await self.fs._makedirs(path, exist_ok=exist_ok)
+
+    async def _mkdir(
+        self, path: str, create_parents: bool = True, **kwargs: Any
+    ) -> None:
+        await self.fs._mkdir(path, create_parents=create_parents, **kwargs)
 
     async def _cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
@@ -156,6 +176,13 @@ class _SyncFileSystemWrapper(_FileSystemWrapper):
 
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
         await asyncio.to_thread(self.fs.makedirs, path, exist_ok=exist_ok)
+
+    async def _mkdir(
+        self, path: str, create_parents: bool = True, **kwargs: Any
+    ) -> None:
+        await asyncio.to_thread(
+            self.fs.mkdir, path, create_parents=create_parents, **kwargs
+        )
 
     async def _cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any

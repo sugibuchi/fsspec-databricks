@@ -128,6 +128,19 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     client replaces the file. A version id names a version the storage keeps,
     e.g. in a versioned S3 bucket: the read goes on with it.
 
+    A storage whose responses name no version may still tell one apart, e.g.
+    by the modification time and size its status gives:
+
+    - ``version`` is then that token, from the info the file was opened with.
+    - `_current_version` returns the token as the storage has it now. Each
+      fetch awaits it once its bytes arrive, and passes it to
+      `_check_version`. It returns None by default, which checks nothing.
+    - Checked after the bytes arrive, a token unchanged shows they came from
+      that version. This detects a file replaced while read, without
+      preventing it: the storage cannot refuse another version's bytes. It
+      costs a request per fetch, and is only as fine as the token, e.g. two
+      writes within a modification time's resolution look alike.
+
     Parameters
     ----------
     path : str
@@ -233,6 +246,23 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         It asks for ``version`` if the storage can, and passes the version the
         response came from to `_check_version` if the storage tells it.
         """
+
+    async def _current_version(self) -> str | None:
+        """The file's version now, for a storage whose responses name none.
+
+        Each fetch awaits it after `_fetch_range`, and passes what it returns to
+        `_check_version`. A subclass returns a token, e.g. the modification time
+        and size from the filesystem's ``_info``, as ``version`` was given. None,
+        the default, checks nothing and sends no request.
+        """
+        return None
+
+    async def _fetch_checked(self, start: int, end: int) -> bytes:
+        """Fetch [start, end), then check the version the file has after it."""
+        data = await self._fetch_range(start, end)
+        if (version := await self._current_version()) is not None:
+            self._check_version(version)
+        return data
 
     def _check_version(self, version: str) -> None:
         """Check the version a response came from, e.g. its ETag.
@@ -387,7 +417,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         part = math.ceil((stop - start) / parts)
         for s in range(start, stop, part):
             e = min(s + part, stop)
-            await self._requests.send(s, e, self._fetch_range, s, e)
+            await self._requests.send(s, e, self._fetch_checked, s, e)
 
     async def _collect(self, pos: int, end: int) -> bytes:
         """The bytes [pos, end) from the blocks fetched, which must cover them."""
@@ -486,6 +516,14 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     - The last part is the one given ``last``: with the file's size, as its
       ``end``. A storage where it makes the file visible completes nothing.
 
+    Some storages limit each request's size, e.g. to 1 MiB. ``max_request_size``
+    declares it, and no ``_upload_all`` or ``_upload_part`` call exceeds it:
+
+    - A file bigger than it is uploaded in parts, even below
+      ``min_multipart_size``.
+    - Parts are at most that size. A last part that would exceed it, as it
+      takes up to ``min_block_size`` more than the others, is split in two.
+
     Parameters
     ----------
     path : str
@@ -507,11 +545,15 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     sequential : bool, optional
         Whether parts are uploaded one at a time, in order. The class attribute
         if None.
+    max_request_size : int, optional
+        The most bytes a request may upload. The class attribute if None, which
+        is unlimited by default.
 
     Raises
     ------
     ValueError
-        If ``spread`` is less than 1.
+        If ``spread`` is less than 1, or ``max_request_size`` less than
+        ``min_block_size``.
 
     See Also
     --------
@@ -530,6 +572,9 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     sequential: bool = False
     """Whether parts are uploaded one at a time, in order, as some storages need."""
 
+    max_request_size: int | None = None
+    """The most bytes a request may upload, if the storage limits it."""
+
     mode: str = "wb"
     """The mode, as fsspec's files have it: only writing, from the start."""
 
@@ -544,6 +589,7 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         max_block_size: int | None = None,
         min_multipart_size: int | None = None,
         sequential: bool | None = None,
+        max_request_size: int | None = None,
     ) -> None:
         super().__init__(path, loop, concurrency_limit=concurrency_limit, spread=spread)
         self.min_block_size = min_block_size or self.min_block_size
@@ -552,6 +598,12 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         )
         self.min_multipart_size = min_multipart_size or self.min_multipart_size
         self.sequential = self.sequential if sequential is None else sequential
+        self.max_request_size = max_request_size or self.max_request_size
+        if (cap := self.max_request_size) is not None and cap < self.min_block_size:
+            raise ValueError(
+                f"max_request_size {cap} is less than min_block_size "
+                f"{self.min_block_size}: no part would fit"
+            )
         self._pos = 0
         self._buffer = bytearray()
         self._multipart = False
@@ -698,20 +750,26 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     async def _upload_buffer(self, closing: bool) -> None:
         """Upload the parts the buffer fills, or all of it when ``closing``."""
         buffer = self._buffer
-        if not self._multipart and len(buffer) < self.min_multipart_size:
-            if closing:
-                # Even an empty file is created.
-                await self._upload_all(bytes(buffer))
-                buffer.clear()
+        cap = self.max_request_size or math.inf
+        small = len(buffer) < self.min_multipart_size
+        if not self._multipart and small and not closing:
             return
-        block = self._block_size(len(buffer) if closing else self._pos)
-        if closing and not self._multipart and len(buffer) <= self.min_block_size:
-            # No bigger than the smallest part: one request uploads it, where a
-            # multipart upload would add its start and completion. A bigger file goes
-            # in parts, sent at once, which a storage may take faster than one request.
+        # Below min_multipart_size, or no bigger than the smallest part, one
+        # request uploads it, where a multipart upload would add its start and
+        # completion. A bigger file goes in parts, sent at once, which a storage
+        # may take faster than one request. Beyond the cap, even a small file
+        # goes in parts.
+        if (
+            closing
+            and not self._multipart
+            and (small or len(buffer) <= self.min_block_size)
+            and len(buffer) <= cap
+        ):
+            # Even an empty file is created.
             await self._upload_all(bytes(buffer))
             buffer.clear()
             return
+        block = min(self._block_size(len(buffer) if closing else self._pos), cap)
         offset = self._pos - len(buffer)
         taken = 0
         try:
@@ -720,8 +778,10 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                 if remaining - block >= self.min_block_size:
                     size = block
                 elif closing:
-                    # The last part takes the rest, which would be too small alone.
-                    size = remaining
+                    # The last part takes the rest, which would be too small
+                    # alone. Beyond the cap, a part of it is split off first:
+                    # the rest is then less than min_block_size, so within it.
+                    size = min(remaining, cap)
                 else:
                     break
                 if not self._multipart:
