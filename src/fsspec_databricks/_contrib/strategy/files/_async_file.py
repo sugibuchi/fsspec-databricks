@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import sys
 import warnings
 from collections import deque
@@ -23,6 +24,9 @@ if TYPE_CHECKING:
     from typing import Self
 
 _MiB = 1024 * 1024
+
+# Only for what fails where no caller can be told: see DEVELOPMENT.md's "Logging".
+logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
@@ -154,6 +158,7 @@ class _AsyncFile(io.RawIOBase):
                 future = asyncio.run_coroutine_threadsafe(coro, self.loop)
                 _aborting.add(future)
                 future.add_done_callback(_aborting.discard)
+                future.add_done_callback(self._warn_if_abort_failed)
             except RuntimeError:
                 coro.close()  # The loop closed meanwhile.
         io.RawIOBase.close(self)
@@ -250,11 +255,27 @@ class _AsyncFile(io.RawIOBase):
             if on_its_loop:
                 self._do_abort_soon()
             elif self.loop.is_running() and not sys.is_finalizing():
-                self._sync(self._abort())
+                try:
+                    self._sync(self._abort())
+                except Exception:
+                    # Nobody is there to catch it: requests may stay on the storage.
+                    logger.warning(
+                        "Aborting the unclosed file %r failed", self.path, exc_info=True
+                    )
             # Else nothing can undo the requests, e.g. at exit: they stay, as
             # if the process had died.
         finally:
             io.RawIOBase.close(self)
+
+    def _warn_if_abort_failed(self, future: concurrent.futures.Future[None]) -> None:
+        # The garbage collector's abort, scheduled: nobody awaits its future.
+        if future.cancelled():
+            return
+        error = future.exception()
+        if isinstance(error, Exception):
+            logger.warning(
+                "Aborting the unclosed file %r failed", self.path, exc_info=error
+            )
 
     # The conventions of Python's file objects.
 

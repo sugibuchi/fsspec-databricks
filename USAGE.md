@@ -54,7 +54,18 @@ logging.getLogger("fsspec_databricks").setLevel(logging.DEBUG)
 Retries, fallbacks and aborted uploads are logged as warnings.
 
 Operations, such as `find`, `rm` or `copy`, are reported by the monitors of `fsspec_alt_strategies_common`. For
-example, `with monitoring(LoggingMonitor(logger)):` logs the operations run in the block.
+example, `LoggingMonitor` logs the operations run in a `monitoring` block:
+
+```python
+import logging
+
+from fsspec_alt_strategies_common import LoggingMonitor, monitoring
+
+logger = logging.getLogger("my_app")
+
+with monitoring(LoggingMonitor(logger, level=logging.INFO)):
+    fs.rm("dbfs:/Volumes/catalog/schema/volume/tmp", recursive=True)
+```
 
 ---
 

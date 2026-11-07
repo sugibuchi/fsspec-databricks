@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import logging
 import shutil
 import sys
 import tempfile
@@ -71,6 +72,9 @@ __all__ = [
 ]
 
 _MiB = 1024 * 1024
+
+# Only for what fails where no caller can be told: see DEVELOPMENT.md's "Logging".
+logger = logging.getLogger(__name__)
 
 
 class FileTransaction(ABC):
@@ -361,8 +365,12 @@ class TransactionFile(io.RawIOBase):
 
     def _discard_quietly(self) -> None:
         # From the garbage collector: nobody is there to catch an error.
-        with contextlib.suppress(Exception):
+        try:
             self.discard()
+        except Exception:
+            logger.warning(
+                "Discarding the undecided file %r failed", self.path, exc_info=True
+            )
 
 
 def _temp_path(path: str) -> str:
