@@ -1033,8 +1033,8 @@ class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         )
         error = io_error(self.path, message)
         try:
-            await self._discard_session(
-                other, result[f"{other}_upload"]["session_token"]
+            await _ABORT_SESSION[other](
+                self, result[f"{other}_upload"]["session_token"]
             )
         except (OSError, ClientError, TimeoutError) as abort_error:
             error.add_note(
@@ -1044,77 +1044,6 @@ class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
 
     async def _start_session(self) -> None:
         """Prepare the session just initiated, before its first part."""
-
-    async def _discard_session(
-        self, mode: Literal["multipart", "resumable"], session_token: str
-    ) -> None:
-        """Abort a session of either upload API, such as one the server started unasked."""
-        if mode == "multipart":
-            try:
-                url, headers, params = await self._get_abort_url(session_token)
-            except OSError as e:
-                if (
-                    isinstance(e.__cause__, ClientResponseError)
-                    and e.__cause__.status == 400
-                ):
-                    return  # Azure Databricks does not support abort of multipart upload
-                raise
-        else:
-            url, headers, params = await self._get_resumable_upload_url(session_token)
-        await self._delete(url, headers, params)
-
-    async def _get_abort_url(
-        self, session_token: str
-    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        if self.use_presigned_url:
-            result = await self._post_json(
-                f"{self._base_url}/api/2.0/fs/create-abort-upload-url",
-                {
-                    "path": self.path,
-                    "session_token": session_token,
-                    "expire_time": self._url_expire_time(),
-                },
-                "Getting URL for upload abort",
-            )
-            url = result["abort_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["abort_upload_url"].get("headers", [])
-            }
-            headers["Content-Type"] = "application/octet-stream"
-            params = None
-        else:
-            url = self._files_url
-            headers = {"Content-Type": "application/json"}
-            params = {"action": "abort-upload", "session_token": session_token}
-
-        return url, headers, params
-
-    async def _get_resumable_upload_url(
-        self, session_token: str
-    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        if self.use_presigned_url:
-            result = await self._post_json(
-                f"{self._base_url}/api/2.0/fs/create-resumable-upload-url",
-                {
-                    "path": self.path,
-                    "session_token": session_token,
-                    "expire_time": self._url_expire_time(),
-                },
-                "Getting URL for resumable upload",
-            )
-            url = result["resumable_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["resumable_upload_url"].get("headers", [])
-            }
-            params = None
-        else:
-            url = self._files_url
-            headers = {"Content-Type": "application/octet-stream"}
-            params = {"session_token": session_token, "upload_type": "resumable"}
-
-        return url, headers, params
 
     async def _delete(
         self, url: str, headers: dict[str, str], params: dict[str, Any] | None
@@ -1146,7 +1075,7 @@ class _VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
 
     async def _abort_multipart_upload(self) -> None:
         self.log.warning("Aborting upload: path=%s", self.path)
-        await self._discard_session(self.upload_mode, self._session_token)
+        await _ABORT_SESSION[self.upload_mode](self, self._session_token)
 
 
 class VolumeMultipartWritableFile(_VolumeWritableFile):
@@ -1248,7 +1177,7 @@ class VolumeResumableWritableFile(_VolumeWritableFile):
             self._upload_url,
             self._upload_headers,
             self._upload_params,
-        ) = await self._get_resumable_upload_url(self._session_token)
+        ) = await _resumable_upload_url(self, self._session_token)
 
     async def _send_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
@@ -1299,6 +1228,88 @@ class VolumeResumableWritableFile(_VolumeWritableFile):
         # The upload URL is known already: no request for another.
         self.log.warning("Aborting upload: path=%s", self.path)
         await self._delete(self._upload_url, self._upload_headers, self._upload_params)
+
+
+async def _multipart_abort_url(
+    file: _VolumeWritableFile, session_token: str
+) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+    """Where to abort a multipart upload session."""
+    if file.use_presigned_url:
+        result = await file._post_json(
+            f"{file._base_url}/api/2.0/fs/create-abort-upload-url",
+            {
+                "path": file.path,
+                "session_token": session_token,
+                "expire_time": file._url_expire_time(),
+            },
+            "Getting URL for upload abort",
+        )
+        url = result["abort_upload_url"]["url"]
+        headers = {
+            h["name"]: h["value"] for h in result["abort_upload_url"].get("headers", [])
+        }
+        headers["Content-Type"] = "application/octet-stream"
+        return url, headers, None
+    return (
+        file._files_url,
+        {"Content-Type": "application/json"},
+        {"action": "abort-upload", "session_token": session_token},
+    )
+
+
+async def _abort_multipart_session(
+    file: _VolumeWritableFile, session_token: str
+) -> None:
+    """Abort a multipart upload session."""
+    try:
+        url, headers, params = await _multipart_abort_url(file, session_token)
+    except OSError as e:
+        if isinstance(e.__cause__, ClientResponseError) and e.__cause__.status == 400:
+            return  # Azure Databricks does not support abort of multipart upload
+        raise
+    await file._delete(url, headers, params)
+
+
+async def _resumable_upload_url(
+    file: _VolumeWritableFile, session_token: str
+) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+    """Where to send the parts of a resumable upload session, and to abort it."""
+    if file.use_presigned_url:
+        result = await file._post_json(
+            f"{file._base_url}/api/2.0/fs/create-resumable-upload-url",
+            {
+                "path": file.path,
+                "session_token": session_token,
+                "expire_time": file._url_expire_time(),
+            },
+            "Getting URL for resumable upload",
+        )
+        url = result["resumable_upload_url"]["url"]
+        headers = {
+            h["name"]: h["value"]
+            for h in result["resumable_upload_url"].get("headers", [])
+        }
+        return url, headers, None
+    return (
+        file._files_url,
+        {"Content-Type": "application/octet-stream"},
+        {"session_token": session_token, "upload_type": "resumable"},
+    )
+
+
+async def _abort_resumable_session(
+    file: _VolumeWritableFile, session_token: str
+) -> None:
+    """Abort a resumable upload session."""
+    await file._delete(*await _resumable_upload_url(file, session_token))
+
+
+# Each upload API's abort, by its name: a file aborts a session the server started in the
+# other API through it, knowing nothing of that API.
+_ABORT_SESSION = {
+    "multipart": _abort_multipart_session,
+    "resumable": _abort_resumable_session,
+}
 
 
 __all__ = [
