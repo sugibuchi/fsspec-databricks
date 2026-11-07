@@ -32,11 +32,11 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `config`                    | A Databricks SDK `Config` to authenticate with.                                     | `None`  |
 | `client`                    | A Databricks SDK `WorkspaceClient` to call the APIs with.                           | `None`  |
 | `use_local_fs_in_workspace` | Use the local file system when running in a Databricks workspace.                   | `True`  |
-| `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | Per backend |
+| `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.   | Per backend |
 | `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
 
 Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
-`16` and `8`.
+`16` and `8`. Their files are transferred whole or one block at a time, so `io_concurrency` does not limit them.
 
 Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
 
@@ -224,8 +224,11 @@ fs.ls("dbfs:/Volumes/my_catalog/my_schema/my_volume/data")
 
 `fs.ls("dbfs:/Volumes")` lists the catalogs, then the schemas and volumes below.
 
-Reads and writes run concurrent requests. Large writes use multipart upload, or resumable upload on GCP. Multipart
-upload sends parts concurrently, and resumable upload one at a time.
+Reads and writes run concurrent requests. Large files are uploaded in parts, by the upload API that the workspace
+chooses for each upload:
+
+- multipart upload sends the parts concurrently;
+- resumable upload sends them one at a time.
 
 Reads retry after transient server errors. Writes do not.
 
@@ -254,12 +257,12 @@ Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 | `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `16`    |
 | `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `24`    |
 
-Large files are uploaded in parts, by the upload API the workspace chooses for each upload: multipart or resumable.
-
 `VolumeFileSystem` also takes `connection_pool_size`, the maximum number of HTTP connections. It defaults to `100`.
 
-Files size their requests by how they are read or written. Reads fetch blocks of 1 MB to 4 MB. Writes upload files
-from 5 MB in parts of 5 MB to 16 MB.
+Files size their requests by how they are read or written:
+
+- reads fetch blocks of 1 MB to 4 MB;
+- files from 5 MB are uploaded in parts of 5 MB to 16 MB.
 
 For a slow or distant network, lower the concurrency:
 

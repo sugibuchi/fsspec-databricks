@@ -301,9 +301,8 @@ Transfers between backends:
 - `operation_concurrency` and `io_concurrency` default to 16 and 8.
 - `open` writes text with `"\n"` newlines by default.
 
-The `file.py` module once held `AbstractCachedFile`, `MemoryCachedFile` and `FileCachedFile`, and the base class had
-precondition methods for the synchronous backends. Both are removed: the library's file objects and
-`DatabricksTreeFileSystem` replace them.
+Volumes' files take their limit from `io_concurrency`. Workspace and DBFS files do not: the threads are its only use
+there.
 
 ### Paths
 
@@ -345,13 +344,15 @@ system's message.
 
 `VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `DatabricksTreeFileSystem`, a
 `TreeFileSystem` of the copy of fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`,
-`_rm_file`, `_rmdir`, `_create_directory` and `_cp_file`. It adds an aiohttp session, closed by `close()`, and
-`io_concurrency` defaults to 24. The recursive operations are the library's tree strategies: `find`, `walk`, `du`, `glob`, and recursive
-`rm`, `copy` and `mv`.
+`_rm_file`, `_rmdir`, `_create_directory` and `_cp_file`. It adds an aiohttp session, closed by `close()`. Its
+`io_concurrency` defaults to 24.
+
+The recursive operations are the library's tree strategies: `find`, `walk`, `du`, `glob`, and recursive `rm`, `copy`
+and `mv`.
 
 fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
-those. The SDK's calls block, so they run in the file system's own threads, with `_sdk`. The Workspace and DBFS backends work
-the same way.
+those. The SDK's calls block, so they run in the file system's own threads, with `_sdk`. The Workspace and DBFS
+backends work the same way.
 
 The APIs called depend on the depth of the path:
 
@@ -491,9 +492,9 @@ Notebooks are objects of type `NOTEBOOK`. `notebook_format` gives their export a
 - A new notebook needs `language`.
 - Other files use `AUTO` export and `RAW` import, and refuse `notebook_format`.
 
-`cp_file` downloads and uploads, keeping notebooks as notebooks, and overwrites the destination. `_rm_tree` is
-the API's recursive delete, which a recursive `rm` uses on each directory it is given. `rm` of a file checks its type first, as the API deletes an empty
-directory as a file.
+- `cp_file` downloads and uploads, keeping notebooks as notebooks, and overwrites the destination.
+- `_rm_tree` is the API's recursive delete, which a recursive `rm` uses on each directory it is given.
+- `rm` of a file checks its type first, as the API deletes an empty directory as a file.
 
 ### File objects
 
@@ -533,11 +534,9 @@ paths from `DatabricksFileSystem`.
 Logging follows s3fs and gcsfs. Each module has a logger of its name, under `fsspec_databricks`, and no handlers are
 installed.
 
-- Each request to Databricks, but a read of a range, is one DEBUG line: its API or HTTP method, the path and the outcome.
+- Each request to Databricks, except range reads, is one DEBUG line: its API or HTTP method, the path and the outcome.
 - `_sdk` logs the SDK's calls, and `volume.py` logs its own HTTP requests.
 - Reads of ranges are not logged: a read makes many. Their retries are still WARNINGs.
 - Retries and aborted uploads are WARNINGs.
 - The fallback from the storage proxy is DEBUG: outside Databricks, the proxy is normally absent.
 - Operations, such as `find` or `rm`, are not logged here. The library's monitors report them.
-
-The `verbose_debug_log` parameter and attribute are removed: the request lines replace them.

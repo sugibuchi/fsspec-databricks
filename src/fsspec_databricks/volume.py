@@ -75,8 +75,7 @@ def _map_info(
     detail: bool,
     path: str | None = None,
 ) -> dict[str, Any] | str:
-    """Map Unity Catalog CatalogInfo, SchemaInfo, VolumeInfo, DirectoryEntry or GetMetadataResponse
-    to fsspec file info dict, or to the name only if not detail."""
+    """Map a catalog, schema, volume, directory entry or file metadata to an fsspec info dict, or to its name."""
     if isinstance(info, CatalogInfo | SchemaInfo | VolumeInfo):
         if isinstance(info, CatalogInfo):
             name = f"/Volumes/{info.name}"
@@ -165,19 +164,19 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
         Parameters
         ----------
         client : WorkspaceClient, optional
-            A Databricks SDK WorkspaceClient object.
+            A Databricks SDK `WorkspaceClient` to call the APIs with.
         config : Config, optional
-            A Databricks SDK Config object.
+            A Databricks SDK `Config` to authenticate with.
         config_params : dict[str, Any], optional
-            A dictionary of parameters to create a Databricks SDK Config object.
+            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
         operation_concurrency : int, optional
-            The maximum number of concurrent API requests of a recursive operation,
-            such as `rm`, `copy`, `find` or `du`.
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
+            Defaults to 16.
         io_concurrency : int, optional
-            The maximum number of concurrent range reads and part uploads, shared by all the files
-            opened by this file system.
+            The maximum number of concurrent range reads and part uploads, shared by all the files opened.
+            Defaults to 24.
         connection_pool_size : int, optional
-            The maximum number of connections in the aiohttp connection pool.
+            The maximum number of connections in the aiohttp connection pool. Defaults to 100.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -239,7 +238,7 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
 
     @property
     def workspace_id(self) -> int:
-        """Get the workspace ID for this file system."""
+        """The ID of the workspace, fetched once."""
         with self._lock:
             if self._workspace_id is None:
                 self._workspace_id = self.client.get_workspace_id()
@@ -585,10 +584,10 @@ class VolumeFileSystem(DatabricksTreeFileSystem):
         path : str
             The path to the file in the Unity Catalog Volume file system.
         mode : str, optional
-            The file mode like `rb`, `w`. Append and read/write modes are not supported.
+            The file mode, such as `rb` or `w`. Append and update modes are not supported.
         **kwargs
             Passed to `fsspec.AbstractFileSystem.open`, e.g. `compression`, `encoding`, `errors` and
-            `newline`. Other options of the other backends, such as `notebook_format`, are ignored.
+            `newline`. Options of the other backends, such as `notebook_format`, are ignored.
         """
         return super().open(path, mode, **kwargs)
 
@@ -651,26 +650,24 @@ class _VolumeFileMixin:
     """Request settings shared by the file classes."""
 
     timeout_total: float | None = None
-    """The maximal number of seconds for the whole operation including connection establishment,
-    request sending and response reading.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds for a whole request: connecting, sending and reading the response.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     timeout_connect: float | None = None
-    """The maximal number of seconds for connecting to a peer for a new connection,
-    including wait for a free connection from a pool.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds to get a connection, including the wait for a free one from the pool.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     timeout_sock_connect: float | None = 30
-    """The maximal number of seconds for connecting to a peer for a new connection.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds to connect to a peer for a new connection.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     timeout_sock_read: float | None = 120
-    """The maximal number of seconds allowed for period between reading a new data portion from a peer.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds between two reads of data from a peer.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     def _init_requests(
         self,
@@ -701,17 +698,16 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
     """The largest range request. Larger reads are split, to fetch the parts together."""
 
     min_presigned_url_size: int = 1024 * 1024
-    """The minimum file size to use presigned URLs for reading the file content. If the file size is smaller
-    than this threshold, the file content will be read from the Files API without using presigned URLs."""
+    """The smallest file read through presigned URLs. Smaller files are read from the Files API directly."""
 
     presigned_url_expiration_duration: int = 60  # min
-    """The duration in minutes for which the presigned URLs are valid."""
+    """How many minutes the presigned URLs are valid."""
 
     presigned_url_refresh_after: int = 30  # min
-    """The duration in minutes after which the presigned URL should be refreshed."""
+    """After how many minutes a presigned URL is renewed."""
 
     fetch_max_retries: int = 3
-    """The maximal number of retries of a range request after a transient error."""
+    """The maximum number of retries of a range request after a transient error."""
 
     fetch_retry_delay: float = 1.0
     """The base delay in seconds before the first retry of a range request. It doubles with each retry."""
@@ -741,9 +737,7 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
         self._presigned_url_lock = asyncio.Lock()
 
     async def _get_presigned_url(self) -> tuple[str, dict[str, str]]:
-        """Get the presigned URL for reading the file content.
-
-        If the current presigned URL is expired or not exists, a new presigned URL will be created."""
+        """The presigned URL to read the file, with its headers: created anew when missing or due for renewal."""
 
         async with self._presigned_url_lock:
             if (
@@ -844,7 +838,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
     """The size from which a file is uploaded in parts."""
 
     url_expiration_duration_min: int = 60  # 1 hour
-    """The duration in minutes for which the upload URLs and abort URLs are valid."""
+    """How many minutes the upload and abort URLs are valid."""
 
     def __init__(
         self,

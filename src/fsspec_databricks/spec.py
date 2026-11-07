@@ -30,15 +30,18 @@ _cross_fs_copy_chunk_size = 8 * 1024 * 1024
 
 
 class DatabricksFileSystem(AbstractDatabricksFileSystem):
-    """File system for accessing Databricks Workspace files, Unity Catalog Volumes, and the legacy DBFS."""
+    """File system for Unity Catalog Volumes, Workspace files and legacy DBFS.
+
+    It routes each call to the backend serving the path: `VolumeFileSystem`, `WorkspaceFileSystem` or `DBFS`.
+    """
 
     protocol = scheme
 
     use_local_fs_in_workspace: bool = True
-    """Whether to access files from the local file system rather than the remote Databricks API when running within a Databricks workspace. Defaults to True."""
+    """Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks workspace."""
 
     legacy_dbfs_local_root: str = "/dbfs"
-    """The local path where Databricks mounts the legacy DBFS when running within a Databricks workspace."""
+    """The local path where Databricks mounts legacy DBFS in a workspace."""
 
     def __init__(
         self,
@@ -76,7 +79,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         custom_headers: dict | None = None,
         # Additional parameters
         client: WorkspaceClient | None = None,
-        ## Options for Unity Catalog Volume file system
+        ## Options of the backends
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
         ## Fallback to local file system when running on Databricks
@@ -85,10 +88,10 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
     ):
         """Initialize the DatabricksFileSystem.
 
+        The parameters up to `custom_headers` are those of the Databricks SDK's `WorkspaceClient` and `Config`.
+
         Parameters
         ----------
-        *args
-            Standard fsspec filesystem options.
         host
             See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
         account_id
@@ -123,24 +126,46 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
         group_id
             The ID of the account group to authenticate as. See the Databricks SDK `Config` class.
+        google_credentials
+            See `Google Cloud native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html>`_.
+        google_service_account
+            See `Google Cloud native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html>`_.
         workspace_id
-            The ID of the workspace to connect. Required on unified hosts serving multiple workspaces. See the Databricks SDK `Config` class.
-        custom_headers
-            Custom HTTP headers to add to every request sent by the Databricks SDK.
-        debug_headers
-            See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
+            The ID of the workspace to connect to. Required on unified hosts serving several workspaces. See the
+            Databricks SDK `Config` class.
         debug_truncate_bytes
             See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
+        debug_headers
+            See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
+        product
+            The product name sent in the user agent. See the Databricks SDK `Config` class.
+        product_version
+            The product version sent in the user agent. See the Databricks SDK `Config` class.
+        credentials_strategy
+            A custom credentials strategy. See the Databricks SDK `Config` class.
+        credentials_provider
+            The former name of `credentials_strategy`. See the Databricks SDK `Config` class.
+        token_audience
+            The audience of OIDC tokens. See the Databricks SDK `Config` class.
         config
-            An optional pre-configured Databricks SDK `Config` object. If provided, it will be used for authentication.
+            A Databricks SDK `Config` to authenticate with, instead of the parameters above.
+        scopes
+            The OAuth scopes to request. See the Databricks SDK `Config` class.
+        authorization_details
+            The OAuth authorization details to request. See the Databricks SDK `Config` class.
+        custom_headers
+            HTTP headers added to every request sent by the Databricks SDK.
         client
-            An optional pre-configured Databricks SDK `WorkspaceClient` object. If provided, it will be used for accessing the Databricks Workspace API.
+            A Databricks SDK `WorkspaceClient` to call the APIs with. It is not picklable.
         operation_concurrency : int, optional
-            The maximum number of concurrent API requests of a recursive operation on Unity Catalog Volumes.
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`. Each
+            backend has its own default.
         io_concurrency : int, optional
-            The maximum number of concurrent range reads and part uploads of Unity Catalog Volume files.
-        use_local_fs_in_workspace
-            Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
+            The maximum number of concurrent transfers of the files opened, shared by all of them. Each backend has
+            its own default.
+        use_local_fs_in_workspace : bool, optional
+            Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks
+            workspace. Defaults to True.
         **storage_options
             Standard fsspec storage options.
         """
@@ -206,7 +231,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         atexit.register(self.close)
 
     def close(self):
-        """Close the file system and all underlying file system instances."""
+        """Close the file system and its backends."""
         try:
             errors = []
 
@@ -234,7 +259,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     @property
     def _volume_fs(self) -> VolumeFileSystem:
-        """Get or create the UnityCatalogVolumeFileSystem instance."""
+        """The Volume backend, created on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -250,7 +275,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     @property
     def _workspace_fs(self) -> WorkspaceFileSystem:
-        """Get or create the DatabricksWorkspaceFileSystem instance."""
+        """The Workspace backend, created on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -266,7 +291,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     @property
     def _legacy_fs(self) -> DBFS:
-        """Get or create the LegacyDBFS instance."""
+        """The legacy DBFS backend, created on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -282,7 +307,7 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     @property
     def _local_fs(self) -> DatabricksLocalFileSystem:
-        """Get or create the local file system instance."""
+        """The local file system, created on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -292,16 +317,16 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
 
     @property
     def running_in_workspace(self) -> bool:
-        """Whether the code is running within a Databricks workspace."""
+        """Whether the code runs in a Databricks workspace."""
         if self._running_in_workspace is None:
             self._running_in_workspace = "DATABRICKS_RUNTIME_VERSION" in os.environ
         return self._running_in_workspace
 
     @property
     def legacy_dbfs_enabled(self) -> bool:
-        """Whether access to the legacy DBFS file system is enabled.
+        """Whether legacy DBFS is enabled in the workspace.
 
-        With the local file system, it is enabled when its local mount exists, without calling the API.
+        With the local file system, it is enabled when its local mount exists: no API is called.
         """
         if self._legacy_dbfs_enabled is None:
             if self._uses_local_fs:
@@ -609,33 +634,32 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         newline: str | None = None,
         **kwargs,
     ):
-        """Open a file in a file system in Databricks (Workspace, Unity Catalog volume or legacy DBFS).
+        """Open a file in a Unity Catalog Volume, Workspace files or legacy DBFS.
 
         Parameters
         ----------
         path : str
-            The path to the file in the Unity Catalog Volume file system.
+            The path to the file: a `dbfs:/` URL or a POSIX path.
         mode : str, optional
-            The file mode like `rb`, `w`.
+            The file mode, such as `rb` or `w`. The modes supported depend on the backend.
         notebook_format : NotebookFormat, optional
-            The format to use when reading or writing a notebook. Applicable only to Workspace notebooks.
+            The format of a notebook read or written. Applies only to Workspace notebooks.
         language : Language, str, optional
-            Language of the notebook to read or write. Applicable only to Workspace files.
+            The language of a notebook written. Applies only to Workspace notebooks.
         compression : str, optional
-            If given, open file using compression codec. Can either be a compression
-            name (a key in ``fsspec.compression.compr``) or "infer" to guess the
-            compression from the filename suffix.
+            The compression codec: a key of ``fsspec.compression.compr``, or "infer" to guess it from the file
+            name's suffix.
         encoding : str, optional
-            The encoding to use when opening the file. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            The text encoding, in text mode only. See `io.TextIOWrapper
+            <https://docs.python.org/3/library/io.html#io.TextIOWrapper>`_.
         errors : str, optional
-            The error handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            How encoding errors are handled, in text mode only. See `io.TextIOWrapper
+            <https://docs.python.org/3/library/io.html#io.TextIOWrapper>`_.
         newline : str, optional
-            The newline handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            How newlines are handled, in text mode only. The backends write "\\n" newlines by default. See
+            `io.TextIOWrapper <https://docs.python.org/3/library/io.html#io.TextIOWrapper>`_.
         **kwargs
-            Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
+            Passed to the backend's `open`.
         """
         fs, p = self._resolve(path)
         autocommit = kwargs.pop("autocommit", not self._intrans)

@@ -39,7 +39,7 @@ def map_info(info: FileInfo, detail: bool) -> dict[str, Any] | str:
 
 
 class DBFS(DatabricksTreeFileSystem):
-    """Databricks DBFS API.
+    """Legacy DBFS file system, on the DBFS API.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
     threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. A recursive `rm`
@@ -58,20 +58,22 @@ class DBFS(DatabricksTreeFileSystem):
         io_concurrency: int | None = None,
         **storage_options,
     ):
-        """Initialize the DBFS file system.
+        """Initialize the legacy DBFS file system.
 
         Parameters
         ----------
         client : WorkspaceClient, optional
-            A Databricks SDK WorkspaceClient object.
+            A Databricks SDK `WorkspaceClient` to call the APIs with.
         config : Config, optional
-            A Databricks SDK Config object.
+            A Databricks SDK `Config` to authenticate with.
         config_params : dict[str, Any], optional
-            A dictionary of parameters to create a Databricks SDK Config object.
+            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
         operation_concurrency : int, optional
-            The maximum number of concurrent API requests of a recursive operation, such as `copy` or `find`.
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
+            Defaults to 16.
         io_concurrency : int, optional
-            Unused: DBFS files are the SDK's own, which read and write one block at a time.
+            Adds to the threads running SDK calls. Defaults to 8. Files do not use it: they are the SDK's own,
+            which read and write one block at a time.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -234,7 +236,7 @@ class DBFS(DatabricksTreeFileSystem):
         path : str
             The path to the file in the legacy DBFS.
         mode : str, optional
-            The file mode like `rb`, `w`. Append and read/write modes are not supported.
+            The file mode, such as `rb` or `w`. Append and update modes are not supported.
         **kwargs
             Passed to `fsspec.AbstractFileSystem.open`. Options of the other backends, such as
             `notebook_format`, are ignored.

@@ -4,31 +4,31 @@ import re
 from enum import Enum
 
 scheme = "dbfs"
-""" The URL scheme used for Databricks file paths. """
+"""The URL scheme of Databricks paths."""
 
 dbfs_root = "/"
-""" The root directory for DBFS file paths. """
+"""The root directory of Databricks paths."""
 
 volumes_root = "/Volumes"
-""" The root directory for Unity Catalog Volumes in Databricks file paths. """
+"""The root directory of Unity Catalog Volumes."""
 
 workspace_root = "/Workspace"
-""" The root directory for Workspace files in Databricks file paths. """
+"""The root directory of Workspace files."""
 
 dbfs_url_pat = re.compile(rf"(?:(?P<scheme>{scheme}):/?)?(?P<path>/(?:[^/].*)?)")
-""" Regular expression pattern for matching DBFS URLs and capturing the path component. """
+"""Matches a `dbfs:/` URL or a POSIX path, and captures the path."""
 
 workspace_path_pat = re.compile(rf"{workspace_root}(?:/(?P<path>.*)|)")
-""" Regular expression pattern for matching Workspace file paths and capturing the path within the workspace. """
+"""Matches a Workspace path, and captures the path in the workspace."""
 
 volume_path_pat = re.compile(
     rf"{volumes_root}(?:/(?:(?P<catalog>[^/]+)(?:/(?:(?P<schema>[^/]+)(?:/(?:(?P<volume>[^/]+)(?:/(?P<path>.*)|)|)|)|)|)|)|)"
 )
-""" Regular expression pattern for matching Unity Catalog Volume file paths and capturing the catalog, schema, volume, and path components. """
+"""Matches a Volume path, and captures the catalog, schema, volume and path in the volume."""
 
 
 def strip_scheme(path: str) -> str:
-    """Strip the "dbfs:/" scheme from the given path if it exists.
+    """Strip the "dbfs:" scheme from a path, if it has one.
 
     Parameters
     ----------
@@ -46,7 +46,7 @@ def strip_scheme(path: str) -> str:
 
 
 def unstrip_scheme(path: str) -> str:
-    """Add the "dbfs:/" scheme to the given path if it doesn't already have it.
+    """Add the "dbfs:" scheme to a path that lacks it.
 
     Parameters
     ----------
@@ -67,18 +67,18 @@ def unstrip_scheme(path: str) -> str:
 
 
 class FileSystemType(Enum):
-    """Type of Databricks File System."""
+    """The backend serving a path."""
 
     Workspace = 1
-    """ Workspace File System """
+    """Workspace files."""
     Volume = 2
-    """ Unity Catalog Volume File System """
+    """Unity Catalog Volumes."""
     Legacy = 3
-    """ Databricks DBFS File System (Legacy) """
+    """Legacy DBFS."""
 
 
 def fs_type(path: str) -> FileSystemType:
-    """Returns the type of filesystem for the given path.
+    """Return the backend serving a path.
 
     Parameters
     ----------
@@ -88,7 +88,7 @@ def fs_type(path: str) -> FileSystemType:
     Returns
     -------
     FileSystemType
-        The type of filesystem (Volumes, Workspace, or DBFS).
+        The backend: Volume, Workspace or Legacy.
     """
     stripped = strip_scheme(path)
 
@@ -183,12 +183,12 @@ def parse_workspace_path(path: str) -> str:
 
 
 def parse_dbfs_path(path: str) -> str:
-    """Parse a DBFS file path (DBFS URL or POSIX path) and return the only path.
+    """Parse a legacy DBFS path (DBFS URL or POSIX path) and return the path in DBFS.
 
     Parameters
     ----------
     path : str
-        The DBFS URL to parse.
+        The legacy DBFS path (DBFS URL or POSIX path) to parse.
 
     Returns
     -------

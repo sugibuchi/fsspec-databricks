@@ -27,7 +27,7 @@ def os_error(
 
 
 def io_error(path: str, message: str | None = None) -> OSError:
-    """Return a generic IOError for the given path."""
+    """Return a generic OSError with EIO for the given path."""
     return os_error(OSError, errno.EIO, path, message)
 
 
@@ -52,23 +52,23 @@ def is_a_directory_error(path: str, message: str | None = None) -> OSError:
 
 
 def permission_error(path: str, message: str | None = None) -> OSError:
-    """Return a PermissionError for the given path."""
+    """Return a PermissionError with EPERM for the given path."""
     return os_error(PermissionError, errno.EPERM, path, message)
 
 
 def access_error(path: str, message: str | None = None) -> OSError:
-    """Return an PermissionError for the given path."""
+    """Return a PermissionError with EACCES for the given path."""
     return os_error(PermissionError, errno.EACCES, path, message)
 
 
 def not_empty_error(path: str, message: str | None = None) -> OSError:
-    """Return a DirectoryNotEmptyError for the given path."""
+    """Return an OSError with ENOTEMPTY for the given path."""
     return os_error(OSError, errno.ENOTEMPTY, path, message)
 
 
 @contextmanager
 def error_mapping(path) -> Generator[None, Any, None]:
-    """Context manager to map exception classes defined by Databricks SDK to standard exceptions."""
+    """Map the Databricks SDK's exceptions raised in the block to standard OSError subclasses."""
     try:
         yield
     except NotFound as e:

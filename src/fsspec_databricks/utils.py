@@ -5,7 +5,7 @@ from typing import Any, TypeVar
 
 
 def to_datetime(timestamp: float | str | None, is_ms: bool = True) -> datetime | None:
-    """Convert a timestamp to a datetime object."""
+    """Convert a timestamp, in milliseconds unless `is_ms` is False, or an RFC 822 date to a datetime."""
 
     if timestamp is None:
         return None
@@ -15,7 +15,7 @@ def to_datetime(timestamp: float | str | None, is_ms: bool = True) -> datetime |
         else:
             return datetime.fromtimestamp(timestamp, tz=UTC)
     elif isinstance(timestamp, str):
-        # RFC 822 timestamp like "Wed, 02 Oct 2002 08:00:00 EST
+        # An RFC 822 date, like "Wed, 02 Oct 2002 08:00:00 EST"
         return email.utils.parsedate_to_datetime(timestamp)
     else:
         raise ValueError(f"Cannot convert timestamp {timestamp} to datetime")
@@ -30,7 +30,7 @@ ENUM = TypeVar("ENUM", bound=Enum)
 
 
 def value_of(value: Any, enum_class: type[ENUM]) -> ENUM | None:
-    """Convert a value to an enum member of the given enum type."""
+    """Convert a value, or a member's name in any case, to a member of the enum."""
     if value is None:
         return None
     elif isinstance(value, enum_class):

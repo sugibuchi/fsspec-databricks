@@ -99,15 +99,17 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         Parameters
         ----------
         client : WorkspaceClient, optional
-            A Databricks SDK WorkspaceClient object.
+            A Databricks SDK `WorkspaceClient` to call the APIs with.
         config : Config, optional
-            A Databricks SDK Config object.
+            A Databricks SDK `Config` to authenticate with.
         config_params : dict[str, Any], optional
-            A dictionary of parameters to create a Databricks SDK Config object.
+            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
         operation_concurrency : int, optional
-            The maximum number of concurrent API requests of a recursive operation, such as `copy` or `find`.
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
+            Defaults to 16.
         io_concurrency : int, optional
-            The maximum number of concurrent downloads and uploads of the files opened.
+            Adds to the threads running SDK calls. Defaults to 8. Files do not use it: each is downloaded and
+            uploaded whole, in the thread that opens or closes it.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -348,11 +350,12 @@ class WorkspaceFileSystem(DatabricksTreeFileSystem):
         path : str
             The path to the file in the Databricks Workspace.
         mode : str, optional
-            The file mode like `rb`, `w`. Update modes (`+`) are not supported.
+            The file mode, such as `rb` or `w`. Update modes (`+`) are not supported.
         notebook_format : NotebookFormat, optional
-            The format to use when reading or writing a notebook. Applies only to notebook objects.
+            The format of a notebook read or written: `SOURCE` by default. Existing files that are not
+            notebooks refuse it.
         language : Language, str, optional
-            Language of the notebook to read or write. Applies only to notebook objects.
+            The language of a notebook written. Required for a new notebook.
         **kwargs
             Passed to `fsspec.AbstractFileSystem.open`, e.g. `compression`, `encoding`, `errors` and `newline`.
         """

@@ -66,24 +66,12 @@ class DatabricksClientSupport:
 
     @property
     def closed(self) -> bool:
-        """Check if the file system is closed.
-
-        Returns
-        -------
-        bool
-            `True` if the file system is closed, `False` otherwise.
-        """
+        """Whether the file system is closed."""
         return self._closed
 
     @property
     def config(self) -> Config:
-        """Databricks Workspace API client configuration.
-
-        Returns
-        -------
-        Config
-            The Databricks configuration object.
-        """
+        """The Databricks SDK `Config`, made on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -96,13 +84,7 @@ class DatabricksClientSupport:
 
     @property
     def client(self):
-        """Client for accessing the Databricks Workspace API.
-
-        Returns
-        -------
-        WorkspaceClient
-            The Databricks SDK WorkspaceClient object.
-        """
+        """The Databricks SDK `WorkspaceClient`, made on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -132,15 +114,15 @@ class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
         Parameters
         ----------
         client : WorkspaceClient, optional
-            A Databricks SDK WorkspaceClient object.
+            A Databricks SDK `WorkspaceClient` to call the APIs with.
         config : Config, optional
-            A Databricks SDK Config object.
+            A Databricks SDK `Config` to authenticate with.
         config_params : dict[str, Any], optional
-            A dictionary of parameters to create a Databricks SDK Config object.
+            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
         **storage_options
             Standard fsspec storage options.
         """
-        # Directory listing cache is explicitly disabled for all Databricks file systems.
+        # No Databricks file system caches listings.
         super().__init__(use_listings_cache=False, **storage_options)
 
         self._init_client(client, config, config_params)
@@ -182,10 +164,10 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
     root_marker = "/"
 
     operation_concurrency: int = 16
-    """The maximum number of concurrent API requests of a recursive operation, such as listings and deletions."""
+    """The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`."""
 
     io_concurrency: int = 8
-    """The maximum number of concurrent file transfers, shared by all the files opened."""
+    """The maximum number of concurrent transfers of the files opened, shared by all of them."""
 
     def __init__(
         self,
@@ -199,7 +181,7 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         super().__init__(
             operation_concurrency=operation_concurrency or self.operation_concurrency,
             io_concurrency=io_concurrency or self.io_concurrency,
-            # Directory listing cache is explicitly disabled for all Databricks file systems.
+            # No Databricks file system caches listings.
             use_listings_cache=False,
             **storage_options,
         )
@@ -238,8 +220,8 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
     ) -> T:
         """Call the blocking Databricks SDK in one of the file system's own threads, so that the event loop goes on.
 
-        `_blocking` bounds the threads by `operation_concurrency` and `io_concurrency`. `api` and `path` name the
-        request in the debug log.
+        `_blocking` makes `operation_concurrency + io_concurrency` threads. `api` and `path` name the request in the
+        debug log.
         """
         try:
             result = await self._blocking(lambda: func(self.client))
