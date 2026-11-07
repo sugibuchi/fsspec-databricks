@@ -22,9 +22,6 @@ A `FileTransaction` holds the strategy, for one file:
 - `AdaptiveWritableTransaction` has an
   `~fsspec_alt_strategies.files.adaptive.AdaptiveWritableFile` upload its
   parts, but complete the upload only on commit. It costs nothing more.
-- `LocallyBufferedTransaction` has a
-  `~fsspec_alt_strategies.files.buffered.LocallyBufferedFile` upload its
-  buffer only on commit. It costs nothing more.
 
 A storage with a way of its own gets a subclass of `FileTransaction`.
 `TransactionFile` is the file fsspec gets, for any of them. A filesystem's
@@ -64,13 +61,11 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from .adaptive import AdaptiveWritableFile
-    from .buffered import LocallyBufferedFile
 
 __all__ = [
     "AdaptiveWritableTransaction",
     "FileTransaction",
     "LocalBufferTransaction",
-    "LocallyBufferedTransaction",
     "TempPathTransaction",
     "TransactionFile",
 ]
@@ -627,41 +622,3 @@ class AdaptiveWritableTransaction(FileTransaction):
         if self._multipart:
             self._multipart = False
             self.file._sync(self.file._abort_multipart_upload())
-
-
-class LocallyBufferedTransaction(FileTransaction):
-    """A locally buffered file, uploaded on commit.
-
-    The file holds its bytes locally until closed: so closing it waits for
-    commit. Discard closes it after its own ``discard``, uploading nothing.
-
-    It costs nothing more than writing the file without a transaction, and
-    other clients see nothing until commit. Exclusive creation, "x", is checked
-    on the first write, or on commit.
-
-    Parameters
-    ----------
-    file : LocallyBufferedFile
-        The file, open for writing.
-
-    Examples
-    --------
-    >>> f = TransactionFile(LocallyBufferedTransaction(MyFile(fs, path, "wb")))
-    """
-
-    def __init__(self, file: LocallyBufferedFile) -> None:
-        super().__init__(file.path)
-        self.file = file
-
-    def start_staging(self) -> IO[bytes]:
-        return self.file
-
-    def end_staging(self) -> None:
-        pass  # The file keeps its buffer for commit.
-
-    def commit(self) -> None:
-        self.file.close()
-
-    def discard(self) -> None:
-        self.file.discard()
-        self.file.close()

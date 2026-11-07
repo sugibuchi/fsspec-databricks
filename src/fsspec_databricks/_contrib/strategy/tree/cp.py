@@ -94,8 +94,9 @@ def tree_cp(
     is a pattern or a list. Patterns, or a list, add the requests of their
     `tree_glob`. One ``ls`` per folder, one ``cp_file`` per file, and one
     ``makedirs`` per destination folder with files or empty. A storage
-    refusing to overwrite costs an ``rm_file`` and a ``cp_file`` more per file
-    it refused. Each request holds a permit of ``concurrency_limit`` while it
+    refusing to overwrite costs an ``info``, an ``rm_file`` and a ``cp_file``
+    more per file it refused. The ``info`` checks it is a file, as
+    ``rm_file`` is given only paths known to be files. Each request holds a permit of ``concurrency_limit`` while it
     runs.
 
     The profile's ``parents_required=False``, or ``implicit_folders=True``,
@@ -300,7 +301,11 @@ class _Copy(_Transfer):
             try:
                 await self.cp_file(source, destination)
             except FileExistsError:
-                # The storage refuses to overwrite, which fsspec's copy does.
+                # The storage refuses to overwrite, which fsspec's copy does. A
+                # folder there is no file to replace: rm_file takes files only.
+                # The job holds its permit already.
+                if (await self.info(destination))["type"] == "directory":
+                    raise
                 await self.rm_file(destination)
                 await self.cp_file(source, destination)
         except Exception as e:

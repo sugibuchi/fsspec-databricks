@@ -9,9 +9,6 @@ And a file is opened long before its reads show which kind it gets.
 
 - `adaptive` is for storages reading byte ranges and writing in parts. Its
   files adapt their requests to the reads and writes so far.
-- `buffered` is for storages transferring only whole files. Its file
-  downloads the file once, works on a local copy, and uploads it once if it
-  changed.
 - `fsspec_transaction` writes a file in fsspec's transactions, in one of several
   strategies: a temporary path, a local buffer, or the storage's own.
 - `fsspec_async` gives the files the API of those fsspec's ``open_async``

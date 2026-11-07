@@ -459,7 +459,7 @@ Part sizes must be multiples of 256 KB. The constructor refuses other minimum an
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of `packages/impl/src/fsspec_alt_strategies/` of
 [fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch. It leaves out
-`flat/` and `files/buffered.py`. Its modules keep their license headers and relative imports, and ruff skips them.
+`flat/`. Its modules keep their license headers and relative imports, and ruff skips them.
 
 Their shared interface is not copied. It is the dependency `fsspec-alt-strategies-common`, from the same repository's
 `packages/common`.

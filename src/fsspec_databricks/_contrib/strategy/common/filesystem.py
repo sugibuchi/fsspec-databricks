@@ -17,6 +17,7 @@ import asyncio
 import functools
 import os
 from abc import ABCMeta
+from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
 from fsspec.asyn import AsyncFileSystem
@@ -101,6 +102,22 @@ class _StrategyFileSystem(
             return [self._plain(p) for p in path]
         plain = self._strip_protocol(path)
         return plain + "/" if path.endswith("/") and not plain.endswith("/") else plain
+
+    async def _single_file(self, path: str | Sequence[str]) -> bool:
+        """Whether ``path`` names one existing file, with no pattern.
+
+        fsspec's ``mv`` of a file that is not recursive copies it, then deletes
+        it, never calling ``_mv_file``. The families move such a file with
+        their recursive strategy instead, which moves it as a recursive move
+        would: by the storage's rename, where the class uses one.
+        """
+        if not isinstance(path, str) or has_magic(path) or path.endswith("/"):
+            return False
+        try:
+            entry = await self._info(self._strip_protocol(path))
+        except FileNotFoundError:
+            return False
+        return entry["type"] != "directory"
 
     async def _cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any

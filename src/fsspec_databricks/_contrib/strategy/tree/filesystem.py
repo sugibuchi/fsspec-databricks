@@ -39,7 +39,7 @@ from .rm import tree_rm
 from .walk import tree_walk
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable
 
     from fsspec_alt_strategies_common.profile import StorageProfile
 
@@ -64,7 +64,8 @@ class TreeFileSystem(_StrategyFileSystem):
     ``_makedirs``. It implements ``open_async`` too, giving its files
     ``io_limit`` as their concurrency limit, and ``_open``. ``_cat_file``,
     ``_pipe_file``, ``_get_file`` and ``_put_file`` read and write through
-    ``open_async``'s files.
+    ``open_async``'s files. It may implement ``_rm_tree`` too, a storage's
+    recursive delete of a folder, which a recursive ``rm`` then uses.
 
     Two limits bound its requests, each an `asyncio.Semaphore` of its own:
 
@@ -76,8 +77,8 @@ class TreeFileSystem(_StrategyFileSystem):
     storage does. It is required: `StorageProfile()` says the storage is
     unknown, and the strategies then take the way right on any storage.
 
-    A recursive ``mv`` moves each file with ``_mv_file``, which is fsspec's
-    copy then delete. A subclass whose storage renames a path in one request
+    A recursive ``mv``, or one of a single file, moves each file with
+    ``_mv_file``, which is fsspec's copy then delete. A subclass whose storage renames a path in one request
     overrides it. If its rename moves a folder too, with all in it, the
     profile's ``renames_folders=True`` says so: a recursive ``mv`` then moves
     each folder whole where it can.
@@ -125,6 +126,15 @@ class TreeFileSystem(_StrategyFileSystem):
     storage_profile: StorageProfile
     """What the storage does, for the strategies: a subclass must set it."""
 
+    _rm_tree: Callable[[str], Awaitable[None]] | None = None
+    """Optional: deletes a folder with everything in it, in one request.
+
+    A subclass whose storage has a recursive delete defines it as
+    ``async def _rm_tree(self, path)``. A recursive ``rm`` then deletes each
+    folder root by it, and walks only the roots it fails on. Left None, every
+    folder is walked.
+    """
+
     def __init__(
         self,
         *args: Any,
@@ -151,7 +161,12 @@ class TreeFileSystem(_StrategyFileSystem):
 
     @abstractmethod
     async def _rm_file(self, path: str, **kwargs: Any) -> None:
-        """Delete a file."""
+        """Delete a file.
+
+        The strategies call it only on paths they found to be files, by a
+        listing or an ``info``: it need not check that the path is no folder.
+        fsspec's own methods, e.g. ``rm`` when not recursive, may not.
+        """
 
     @abstractmethod
     async def _rmdir(self, path: str) -> None:
@@ -298,6 +313,7 @@ class TreeFileSystem(_StrategyFileSystem):
                 info=self._info,
                 rm_file=self._rm_file,
                 rm_folder=self._rmdir,
+                rm_tree=self._rm_tree,
                 profile=self.storage_profile,
                 concurrency_limit=self.operation_limit,
             ),
@@ -346,10 +362,16 @@ class TreeFileSystem(_StrategyFileSystem):
         maxdepth: int | None = None,
         **kwargs: Any,
     ) -> None:
-        """Move files, as fsspec's ``mv`` does: with `tree_mv` when recursive."""
+        """Move files, as fsspec's ``mv`` does: with `tree_mv` when recursive.
+
+        A single file goes by `tree_mv` too, recursive or not, so that it moves
+        by ``_mv_file``, the storage's rename where a subclass overrides it.
+        """
         if path1 == path2:
             return
-        if not recursive or maxdepth is not None:
+        if (not recursive or maxdepth is not None) and not await self._single_file(
+            path1
+        ):
             # fsspec's own: a copy, then the deletion of its sources.
             await self._copy(path1, path2, recursive, "raise", maxdepth, **kwargs)
             await self._rm(path1, recursive=recursive)

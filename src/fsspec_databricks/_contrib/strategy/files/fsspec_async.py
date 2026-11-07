@@ -4,9 +4,8 @@
 
 ``AsyncFileSystem.open_async`` returns a file whose methods are awaited, with
 the API of fsspec's ``AbstractAsyncStreamedFile``. An `AsyncFileAdapter`
-gives that API to the file objects of `files.adaptive` and `files.buffered`,
-so that a filesystem implements its requests once, for both ``open`` and
-``open_async``:
+gives that API to the file objects of `files.adaptive`, so that a filesystem
+implements its requests once, for both ``open`` and ``open_async``:
 
 >>> async def open_async(self, path, mode="rb", **kwargs):
 ...     return AsyncFileAdapter(MyFile(self, path, mode))
@@ -45,9 +44,7 @@ class AsyncFileAdapter:
       they send no request.
     - ``path``, ``mode``, ``size``, ``loc`` and ``closed`` describe the file.
 
-    ``seek`` and ``tell`` run the file's own: they must need no request. A
-    `~fsspec_alt_strategies.files.buffered.LocallyBufferedFile` needs its
-    download first: ``open_async`` awaits its ``aload`` before adapting it.
+    ``seek`` and ``tell`` run the file's own: they must need no request.
 
     Unlike fsspec's, leaving an ``async with`` block by an exception uploads
     nothing of a written file, as leaving a ``with`` block does. Close
@@ -56,16 +53,14 @@ class AsyncFileAdapter:
 
     Parameters
     ----------
-    file : AdaptiveReadableFile, AdaptiveWritableFile or LocallyBufferedFile
+    file : AdaptiveReadableFile or AdaptiveWritableFile
         The file. Its requests run on its ``loop``: the awaited methods raise
         RuntimeError on another one.
 
     Examples
     --------
     >>> async def open_async(self, path, mode="rb", **kwargs):
-    ...     f = MyLocallyBufferedFile(self, path, mode)
-    ...     await f.aload()  # So that a missing file raises here.
-    ...     return AsyncFileAdapter(f)
+    ...     return AsyncFileAdapter(MyFile(self, path, mode))
     >>> async with await fs.open_async(path) as f:
     ...     header = await f.read(8)
     ...     f.seek(-8, io.SEEK_END)

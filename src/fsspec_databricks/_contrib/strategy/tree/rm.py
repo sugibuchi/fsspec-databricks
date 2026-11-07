@@ -11,6 +11,7 @@ This module depends on `_jobs`, and `jobs` and `operation` of `common`.
 
 from __future__ import annotations
 
+import asyncio
 from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
@@ -21,8 +22,7 @@ from ..common.operation import Operation
 from ._jobs import _expand, _TreeJobs
 
 if TYPE_CHECKING:
-    import asyncio
-    from collections.abc import Awaitable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Sequence
 
     from fsspec_alt_strategies_common.profile import StorageProfile
 
@@ -39,6 +39,7 @@ def tree_rm(
     info: _Info,
     rm_file: _Request,
     rm_folder: _Request,
+    rm_tree: _Request | None = None,
     profile: StorageProfile,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[str, RmState]:
@@ -60,7 +61,14 @@ def tree_rm(
 
     It loses on object stores, which list a whole tree in one paginated request:
     fsspec's ``_rm`` makes fewer requests there. On a storage deleting a folder
-    with everything in it in one request, that request wins.
+    with everything in it in one request, that request wins: give it as
+    ``rm_tree``.
+
+    With ``rm_tree``, each folder root is first deleted whole by one
+    ``rm_tree``, with no walk. A root whose deletion fails, e.g. as the
+    storage refuses so large a folder, is walked and deleted file by file, as
+    without it. A real failure then shows on its files. A root deleted whole
+    is yielded once: what was in it is neither listed, yielded nor counted.
 
     A glob pattern deletes each path it matches, and all in it, as fsspec's
     ``_rm`` with ``recursive=True`` does. So does a list of paths and
@@ -75,8 +83,10 @@ def tree_rm(
 
     Requests: one ``ls`` per folder, one ``rm_file`` per file, and one
     ``rm_folder`` per folder. Patterns, or a list, add the requests of their
-    `tree_glob`. Each request holds a permit of ``concurrency_limit`` while it
-    runs.
+    `tree_glob`. With ``rm_tree``, a root deleted whole costs one ``rm_tree``
+    instead. A single ``path`` then costs an ``info`` first, as ``rm_tree``
+    is given folders only. Each request holds a permit of
+    ``concurrency_limit`` while it runs.
 
     The profile's ``implicit_folders=True`` saves the ``rm_folder`` of each
     folder, as a folder goes with its last file. Such a folder is not yielded,
@@ -102,6 +112,10 @@ def tree_rm(
         filesystem's ``_rmdir``, or its ``_rm_file`` as fsspec's ``_rm`` does
         without one. A FileNotFoundError from it counts as deleted, as object
         stores have no folders to delete.
+    rm_tree : callable, optional
+        Deletes a folder with everything in it, in one request, called as
+        ``rm_tree(path)`` on folders only: e.g. a storage's recursive delete.
+        Without it, every folder is walked.
     profile : StorageProfile
         What the storage does: ``StorageProfile()`` if it is unknown.
     concurrency_limit : asyncio.Semaphore
@@ -142,6 +156,7 @@ def tree_rm(
             info,
             rm_file,
             rm_folder,
+            rm_tree,
             path,
             profile,
             concurrency_limit,
@@ -160,6 +175,7 @@ class _Deletion(_TreeJobs):
         info: _Info,
         rm_file: _Request,
         rm_folder: _Request,
+        rm_tree: _Request | None,
         path: str | Sequence[str],
         profile: StorageProfile,
         concurrency_limit: asyncio.Semaphore,
@@ -169,15 +185,58 @@ class _Deletion(_TreeJobs):
         self.path = path
         self.rm_file = rm_file
         self.rm_folder = rm_folder
+        self.rm_tree = rm_tree
+        # The roots deleted whole, yielded with the first step.
+        self.whole: list[str] = []
         self.implicit_folders = bool(profile.implicit_folders)
         self.files_found = 0
         self.files_deleted = 0
         self.folders_deleted = 0
 
     async def prepare(self) -> _Roots:
+        """Find the roots, then delete whole the folders that can be: the rest are walked."""
         if not isinstance(self.path, str) or has_magic(self.path):
-            return await _expand(self.ls, self.info, self.path, self.concurrency_limit)
-        return _Roots([self.path])
+            roots = await _expand(self.ls, self.info, self.path, self.concurrency_limit)
+            known = True  # The glob found the folders to be folders.
+        else:
+            roots = _Roots([self.path])
+            known = False  # Of unknown kind, until asked.
+        if self.rm_tree is None or self.op.cancelling():
+            return roots
+        sources = list(roots.folders)
+        kinds = await asyncio.gather(*(self.delete_whole(s, known) for s in sources))
+        self.whole = [s for s, k in zip(sources, kinds, strict=True) if k == "whole"]
+        self.folders_deleted = len(self.whole)
+        files = [s for s, k in zip(sources, kinds, strict=True) if k == "file"]
+        return _Roots(
+            [s for s, k in zip(sources, kinds, strict=True) if k == "walk"],
+            [*roots.files, *files],
+            roots.errors,
+        )
+
+    async def delete_whole(self, folder: str, known: bool) -> str:
+        """Delete a root by one ``rm_tree``, and tell how it went: whole, file or walk.
+
+        A root of unknown kind is asked first, as ``rm_tree`` takes folders
+        only. A missing root, or a failed deletion, is walked instead: the walk
+        then raises, or shows the failure on the files.
+        """
+        try:
+            if not known:
+                async with self.concurrency_limit:
+                    if (await self.info(folder))["type"] != "directory":
+                        return "file"
+            async with self.concurrency_limit:
+                await self.rm_tree(folder)  # type: ignore[misc]
+        except Exception:
+            return "walk"
+        return "whole"
+
+    async def begin(
+        self, roots: _Roots, source: AsyncGenerator[_Listing] | None
+    ) -> list[Any]:
+        whole, self.whole = self.whole, []
+        return [*whole, *await super().begin(roots, source)]
 
     def state(self) -> RmState:
         return RmState(
