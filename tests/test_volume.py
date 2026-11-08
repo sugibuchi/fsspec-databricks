@@ -637,6 +637,15 @@ def test_volume_cp_file(
         volume_download(client, f"{test_dir}/3_large_copied.bin")
     ) == bytes_sig(large_data)
 
+    # Test copying it into a missing directory: the profile says the upload, multipart too, creates the parents.
+    fs.cp_file(
+        dbfs_url(f"{test_dir}/3_large.bin"),
+        dbfs_url(f"{test_dir}/5_new/nested/3_large_copied.bin"),
+    )
+    assert bytes_sig(
+        volume_download(client, f"{test_dir}/5_new/nested/3_large_copied.bin")
+    ) == bytes_sig(large_data)
+
     # Test copying a directory
     fs.cp_file(
         dbfs_url(f"{test_dir}/2_directory"),
