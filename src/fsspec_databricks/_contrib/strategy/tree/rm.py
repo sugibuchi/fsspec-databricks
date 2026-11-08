@@ -15,7 +15,7 @@ import asyncio
 from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
-from fsspec_alt_strategies_common.states import RmState
+from fsspec_alt_strategies.states import RmState
 
 from ..common.jobs import _Job, _Roots
 from ..common.operation import Operation
@@ -24,7 +24,7 @@ from ._jobs import _expand, _TreeJobs
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Sequence
 
-    from fsspec_alt_strategies_common.profile import StorageProfile
+    from fsspec_alt_strategies.profile import StorageProfile
 
     from ..common.types import _Info, _Ls, _Request
     from .walk import _Listing

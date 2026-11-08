@@ -16,7 +16,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from fsspec_alt_strategies_common.states import CpState
+from fsspec_alt_strategies.states import CpState
 
 from ..common.jobs import _Job
 from ..common.operation import Operation
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import Awaitable, Sequence
 
-    from fsspec_alt_strategies_common.profile import StorageProfile
+    from fsspec_alt_strategies.profile import StorageProfile
 
     from ..common.jobs import _Roots
     from ..common.types import _Info, _Ls, _Request
@@ -83,8 +83,8 @@ def tree_cp(
     The destination is described by the ``dst_`` operations and ``profile``.
     Within one storage, they are the source's own, and ``same_storage`` is
     True: a path copied onto itself, or under itself, is refused. Between two,
-    ``cp_file`` copies from one to the other, e.g. one made by
-    ``common.routing.streaming_copy``, and every byte goes through the caller.
+    ``cp_file`` copies from one to the other, e.g. the router's
+    ``_cross_fs_cp_file``, and every byte may go through the caller.
     A path may then go to the same path, or under it.
 
     The copies run concurrently, so the destination's paths are created in
@@ -195,7 +195,7 @@ def tree_cp(
     ...     "backup/",
     ...     ls=src._ls,
     ...     info=src._info,
-    ...     cp_file=streaming_copy(src.open_async, dst.open_async),
+    ...     cp_file=my_streaming_copy,
     ...     dst_info=dst._info,
     ...     dst_makedirs=dst._makedirs,
     ...     dst_rm_file=dst._rm_file,

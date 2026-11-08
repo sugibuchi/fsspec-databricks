@@ -24,8 +24,8 @@ from typing import TYPE_CHECKING, Any
 from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import DEFAULT_CALLBACK
 
-from fsspec_alt_strategies_common.monitor import Monitored
-from fsspec_alt_strategies_common.profile import StorageProfile
+from fsspec_alt_strategies.monitor import Monitored
+from fsspec_alt_strategies.profile import StorageProfile
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence

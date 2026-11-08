@@ -7,8 +7,7 @@ block of its operations. One inheriting the interface's `Monitored`, such as a
 `TreeFileSystem` or a wrapper, already does. Any other is wrapped as its entry
 in the known implementations says: none is chosen for a filesystem not there.
 
-This module depends on `wrapper` of `tree` or of `flat`, imported as an entry
-needs it: a copy may keep one family only.
+This module depends on `wrapper`.
 """
 
 from __future__ import annotations
@@ -17,32 +16,31 @@ from typing import TYPE_CHECKING, Any
 
 from fsspec.asyn import AsyncFileSystem
 
-from fsspec_alt_strategies_common.monitor import Monitored
-from fsspec_alt_strategies_common.profile import StorageProfile
-from fsspec_alt_strategies_common.wrapper import known_implementations
+from fsspec_alt_strategies.monitor import Monitored
+from fsspec_alt_strategies.profile import StorageProfile
+from fsspec_alt_strategies.wrapper import known_implementations
+
+from .wrapper import (
+    AsyncFlatWrapper,
+    AsyncTreeWrapper,
+    SyncFlatWrapper,
+    SyncTreeWrapper,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from fsspec.spec import AbstractFileSystem
 
-    from fsspec_alt_strategies_common.wrapper import KnownImplementation
+    from fsspec_alt_strategies.wrapper import KnownImplementation
 
 __all__ = ["monitored"]
 
 
 def _wrapper(kind: str, asynchronous: bool) -> Any:
-    """The wrapper class of a family, imported only when needed.
-
-    So a copy keeping only one family, tree or flat, still has `monitored`
-    for the filesystems of that family.
-    """
+    """The wrapper class of a family, async or not."""
     if kind == "tree":
-        from .tree.wrapper import AsyncTreeWrapper, SyncTreeWrapper  # noqa: PLC0415
-
         return AsyncTreeWrapper if asynchronous else SyncTreeWrapper
-    from .flat.wrapper import AsyncFlatWrapper, SyncFlatWrapper  # noqa: PLC0415
-
     return AsyncFlatWrapper if asynchronous else SyncFlatWrapper
 
 
@@ -55,8 +53,9 @@ def monitored(
 
     A filesystem inheriting `Monitored` is returned as it is. Any other is
     wrapped, as the entry of its class says, or of the nearest class it
-    inherits: as a `TreeFileSystem` or a `FlatFileSystem`, async or not, with
-    the entry's limits and profile. The wrapper is new, and may be dropped
+    inherits: as a `TreeFileSystem` or a `FlatFileSystem`, as its profile's
+    ``fs_type`` says, a tree if unknown, async or not, with the entry's limits
+    and profile. The wrapper is new, and may be dropped
     once used.
 
     A filesystem no entry names is wrapped only if ``wrap_unknown_fs``: as
@@ -105,19 +104,20 @@ def monitored(
             name = f"{type(fs).__module__}.{type(fs).__qualname__}"
             raise ValueError(f"No known implementation says how to wrap {name}")
         entry = {
-            "type": "tree",
+            "storage_profile": StorageProfile(fs_type="tree"),
             "async": isinstance(fs, AsyncFileSystem),
             "operation_concurrency": 1,
             "io_concurrency": 1,
-            "storage_profile": StorageProfile(),
         }
 
-    wrapper = _wrapper(entry["type"], entry["async"])
+    # A family unknown is a tree, the way right on any storage.
+    fs_type = entry["storage_profile"].fs_type or "tree"
+    wrapper = _wrapper(fs_type, entry["async"])
     options: dict[str, Any] = {
         "operation_concurrency": entry["operation_concurrency"],
         "io_concurrency": entry["io_concurrency"],
         "storage_profile": entry["storage_profile"],
     }
-    if entry["type"] == "flat":
+    if fs_type == "flat":
         options["rm_batch_size"] = entry["rm_batch_size"]
     return wrapper(fs, **options)

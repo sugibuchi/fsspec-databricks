@@ -9,7 +9,7 @@ any fsspec filesystem, as functions or as bases of a filesystem class.
 They are meant to be copied into a project, not installed. Each is imported
 from its module, so that a copy may leave out those it does not use. The
 interface they share, such as `OperationHandler` and `Monitor`, is not copied:
-it is the package ``fsspec_alt_strategies_common``, installed once, so that all
+it is the package ``fsspec_alt_strategies``, installed once, so that all
 copies in a project share it.
 
 `monitored`, which wraps a filesystem so that the monitors see its calls, is

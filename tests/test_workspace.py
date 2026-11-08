@@ -16,7 +16,7 @@ from databricks.sdk.service.workspace import (
     ObjectType,
 )
 from fsspec.asyn import sync
-from fsspec_alt_strategies_common.monitor import Monitor, monitoring
+from fsspec_alt_strategies.monitor import Monitor, monitoring
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.workspace import WorkspaceFileSystem

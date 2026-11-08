@@ -11,13 +11,13 @@
 | `src/fsspec_databricks/workspace.py` | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object.      |
 | `src/fsspec_databricks/dbfs.py`     | `DBFS`, the legacy DBFS.                                                         |
 | `src/fsspec_databricks/local.py`    | `DatabricksLocalFileSystem`, used inside a workspace, and its async wrapper.     |
-| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the tree strategies and the file objects.  |
+| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the strategies and the file objects.  |
 | `src/fsspec_databricks/path.py`     | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.               |
 | `src/fsspec_databricks/error.py`    | `OSError`s, and the mapping of the SDK's exceptions to them.                     |
 | `src/fsspec_databricks/utils.py`    | Timestamps, enums, and what a file mode allows.                                  |
 | `tests/`                            | The tests, a file per module, and the dummy API server.                          |
 
-The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies-common.
+The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies.
 
 All Python commands go through [uv](https://docs.astral.sh/uv/).
 
@@ -327,7 +327,7 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 ### Routing
 ### Routing
 
-`DatabricksFileSystem` subclasses the library's `AsyncRoutingFileSystem`, in `common/routing.py` of the copy. The library
+`DatabricksFileSystem` subclasses the library's `AsyncRoutingFileSystem`, in `router.py` of the copy. The library
 passes each call on, and `spec.py` only says where each path goes:
 
 - `_route(path)` gives the backend and its path: the local file system and the local path in a workspace with
@@ -557,18 +557,18 @@ Part sizes must be multiples of 256 KB. The constructor refuses other minimum an
 
 #### The copy of fsspec-alt-strategies
 
-`src/fsspec_databricks/_contrib/strategy/` is a copy of `packages/impl/src/fsspec_alt_strategies/` of
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch. It leaves out
-`flat/`. Its modules keep their license headers and relative imports, and ruff skips them.
+`src/fsspec_databricks/_contrib/strategy/` is a copy of `packages/impl/src/fsspec_alt_strategies_impl/` of
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch, whole: its
+`wrapper.py` needs `flat/` too. Its modules keep their license headers and relative imports, and ruff skips them.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies-common`, from the same repository's
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies`, from the same repository's
 `packages/common`.
 
 To refresh the copy:
 
-1. Copy `common/`, `files/`, `tree/`, `__init__.py` and `monitor.py` over the old ones.
+1. Copy the package's modules over the old ones, but `_version.py`.
    Delete the modules the library no longer has.
-2. Run `uv lock --upgrade-package fsspec-alt-strategies-common`, so that the interface matches.
+2. Run `uv lock --upgrade-package fsspec-alt-strategies`, so that the interface matches.
 3. Run the tests.
 
 ### Workspace files

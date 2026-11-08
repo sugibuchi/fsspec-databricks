@@ -24,7 +24,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from fsspec_alt_strategies_common.states import WalkState
+from fsspec_alt_strategies.states import WalkState
 
 from ..common.jobs import _Queue
 from ..common.operation import Operation

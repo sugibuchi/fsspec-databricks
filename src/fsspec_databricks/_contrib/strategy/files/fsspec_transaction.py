@@ -20,7 +20,7 @@ A `FileTransaction` holds the strategy, for one file:
 - `LocalBufferTransaction` writes to a local buffer, written to the file on
   commit. It suits any storage, holding the file's bytes locally until then.
 - `AdaptiveWritableTransaction` has an
-  `~fsspec_alt_strategies.files.adaptive.AdaptiveWritableFile` upload its
+  `~fsspec_alt_strategies_impl.files.adaptive.AdaptiveWritableFile` upload its
   parts, but complete the upload only on commit. It costs nothing more.
 
 A storage with a way of its own gets a subclass of `FileTransaction`.

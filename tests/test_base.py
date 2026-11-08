@@ -5,7 +5,7 @@ import time
 
 import pytest
 from databricks.sdk import WorkspaceClient
-from fsspec_alt_strategies_common import StorageProfile
+from fsspec_alt_strategies import StorageProfile
 
 from fsspec_databricks.base import BaseDatabricksFileSystem
 

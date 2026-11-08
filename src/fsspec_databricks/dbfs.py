@@ -11,7 +11,7 @@ from typing import Any
 from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.files import DbfsAPI, FileInfo
 from fsspec.asyn import sync
-from fsspec_alt_strategies_common.profile import StorageProfile
+from fsspec_alt_strategies.profile import StorageProfile
 
 from ._contrib.strategy.files.adaptive import (
     AdaptiveReadableFile,

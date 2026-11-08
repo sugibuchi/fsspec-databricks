@@ -12,7 +12,7 @@ from databricks.sdk.service.workspace import (
     ObjectInfo,
     ObjectType,
 )
-from fsspec_alt_strategies_common.profile import StorageProfile
+from fsspec_alt_strategies.profile import StorageProfile
 
 from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
 from ._contrib.strategy.files.fsspec_transaction import FileTransaction, TransactionFile

@@ -7,7 +7,7 @@ import fsspec
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat
-from fsspec_alt_strategies_common.monitor import Monitor, monitoring
+from fsspec_alt_strategies.monitor import Monitor, monitoring
 
 from fsspec_databricks import DatabricksFileSystem, use
 from tests.utils import (

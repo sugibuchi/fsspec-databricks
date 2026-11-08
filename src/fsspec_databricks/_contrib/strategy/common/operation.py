@@ -24,7 +24,7 @@ from __future__ import annotations
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from fsspec_alt_strategies_common.monitor import (
+from fsspec_alt_strategies.monitor import (
     CallCancelled,
     Monitor,
     OperationHandler,
@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
     from typing import Self
 
-    from fsspec_alt_strategies_common.monitor import Call
+    from fsspec_alt_strategies.monitor import Call
 
 
 __all__ = ["Operation"]

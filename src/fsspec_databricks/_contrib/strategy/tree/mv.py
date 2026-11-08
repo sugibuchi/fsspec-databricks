@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from fsspec_alt_strategies_common.states import MvState
+from fsspec_alt_strategies.states import MvState
 
 from ..common.jobs import _Job, _Roots
 from ..common.operation import Operation
@@ -28,7 +28,7 @@ from .cp import _CopyOrMove
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Sequence
 
-    from fsspec_alt_strategies_common.profile import StorageProfile
+    from fsspec_alt_strategies.profile import StorageProfile
 
     from ..common.types import _Info, _Ls, _Request
     from .walk import _Listing
@@ -79,8 +79,7 @@ def tree_mv(
     The destination is described by the ``dst_`` operations and ``profile``.
     Within one storage, they are the source's own, and ``same_storage`` is
     True. Between two, ``mv_file`` copies a file to the other storage, then
-    deletes it: e.g. ``common.routing.streaming_copy``'s copy followed by the
-    source's ``_rm_file``. A path may then go to the same path, or under it,
+    deletes it: e.g. the router's ``_cross_fs_mv_file``. A path may then go to the same path, or under it,
     and nothing is moved whole.
 
     Unlike fsspec's ``mv``, it keeps going past a failure, and reports each. A

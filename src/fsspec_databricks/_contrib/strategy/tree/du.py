@@ -14,7 +14,7 @@ from __future__ import annotations
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
-from fsspec_alt_strategies_common.states import DuState
+from fsspec_alt_strategies.states import DuState
 
 from ..common.operation import Operation
 from ..common.paths import _check_maxdepth

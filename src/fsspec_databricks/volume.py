@@ -28,7 +28,7 @@ from databricks.sdk.errors import BadRequest, NotFound
 from databricks.sdk.service.catalog import CatalogInfo, SchemaInfo, VolumeInfo
 from databricks.sdk.service.files import DirectoryEntry, GetMetadataResponse
 from fsspec.asyn import sync
-from fsspec_alt_strategies_common.profile import StorageProfile
+from fsspec_alt_strategies.profile import StorageProfile
 
 from ._contrib.strategy.files.adaptive import (
     AdaptiveReadableFile,

@@ -25,7 +25,7 @@ from contextlib import aclosing
 from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
-from fsspec_alt_strategies_common.states import GlobState
+from fsspec_alt_strategies.states import GlobState
 
 from ..common.operation import Operation
 from ..common.paths import _check_maxdepth, _trim

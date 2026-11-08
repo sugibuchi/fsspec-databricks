@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from fsspec.asyn import sync
 
-from fsspec_alt_strategies_common.monitor import Call
+from fsspec_alt_strategies.monitor import Call
 
 from ..common.filesystem import (
     _answer,
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
-    from fsspec_alt_strategies_common.profile import StorageProfile
+    from fsspec_alt_strategies.profile import StorageProfile
 
 
 __all__ = ["TreeFileSystem"]

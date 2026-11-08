@@ -40,7 +40,7 @@ dependencies = [
     "databricks-sdk>=0.156.0",
     "aiohttp>3.12",
     # The interface of the strategies copied into _contrib/strategy: see DEVELOPMENT.md.
-    "fsspec-alt-strategies-common @ git+https://github.com/sugibuchi/fsspec-alt-strategies@wip#subdirectory=packages/common",
+    "fsspec-alt-strategies @ git+https://github.com/sugibuchi/fsspec-alt-strategies@wip#subdirectory=packages/common",
 ]
 
 [project.urls]

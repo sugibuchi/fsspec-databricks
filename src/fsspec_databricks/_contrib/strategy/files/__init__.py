@@ -23,5 +23,5 @@ storage's own: not fsspec's ``_cat_file`` or ``_put_file``, which many
 filesystems implement with their file objects.
 
 Each module holds its classes: import them from there, e.g.
-``fsspec_alt_strategies.files.adaptive``. This package imports none of them.
+``fsspec_alt_strategies_impl.files.adaptive``. This package imports none of them.
 """

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from fsspec.utils import glob_translate
 
-from fsspec_alt_strategies_common.states import GlobState
+from fsspec_alt_strategies.states import GlobState
 
 from .jobs import _Queue
 from .paths import _trim
