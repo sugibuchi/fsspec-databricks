@@ -23,7 +23,7 @@ from fsspec_alt_strategies_common.states import MvState
 
 from ..common.jobs import _Job, _Roots
 from ..common.operation import Operation
-from .cp import _Transfer
+from .cp import _CopyOrMove
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Sequence
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from ..common.types import _Info, _Ls, _Request
     from .walk import _Listing
 
-__all__ = ["MvState", "tree_mv"]
+__all__ = ["MvState", "tree_local_mv", "tree_mv"]
 
 
 def tree_mv(
@@ -43,8 +43,10 @@ def tree_mv(
     ls: _Ls,
     info: _Info,
     mv_file: _Request,
-    makedirs: _Request,
     rm_folder: _Request,
+    dst_info: _Info,
+    dst_makedirs: _Request,
+    same_storage: bool,
     profile: StorageProfile,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], MvState]:
@@ -74,6 +76,13 @@ def tree_mv(
     folder is created at the destination before files are moved into it, and
     for each empty folder.
 
+    The destination is described by the ``dst_`` operations and ``profile``.
+    Within one storage, they are the source's own, and ``same_storage`` is
+    True. Between two, ``mv_file`` copies a file to the other storage, then
+    deletes it: e.g. ``common.routing.streaming_copy``'s copy followed by the
+    source's ``_rm_file``. A path may then go to the same path, or under it,
+    and nothing is moved whole.
+
     Unlike fsspec's ``mv``, it keeps going past a failure, and reports each. A
     file that failed to move stays where it was, and so do the folders above
     it. A storage refusing to overwrite yields a FileExistsError for each
@@ -83,7 +92,7 @@ def tree_mv(
     and rename nothing in one request. The moves then start after the first
     listing, not after the whole tree is listed twice.
 
-    With the profile's ``renames_folders=True``, ``mv_file`` moves a folder
+    Within one storage, with the profile's ``renames_folders=True``, ``mv_file`` moves a folder
     with all in it, in one request. Each folder root is then first moved whole
     by one ``mv_file``, where it can be. That wins by far on storages renaming
     a folder at once, such as Azure Data Lake Storage Gen2, HDFS or a local
@@ -99,20 +108,20 @@ def tree_mv(
     of the moves already sent. Closed, it waits for those moves without
     yielding them, as their outcome would otherwise be unknown. Iterating it
     raises FileNotFoundError if ``path1`` does not exist, or matches nothing,
-    and ValueError if ``path2`` is inside it.
+    and ValueError if ``path2`` is inside it within one storage.
 
     Requests: as `tree_cp`, with one ``mv_file`` per file instead of its
-    ``cp_file``, and one ``rm_folder`` per folder. With ``renames_folders``,
-    each folder root first costs an ``info`` of its target, unless ``path2``
-    was found missing already, a ``makedirs`` of its parent, and its
-    ``mv_file``: a root moved whole costs nothing more. Each request holds a
-    permit of ``concurrency_limit`` while it runs.
+    ``cp_file``, and one ``rm_folder`` per source folder. With
+    ``renames_folders``, each folder root first costs a ``dst_info`` of its
+    target, unless ``path2`` was found missing already, a ``dst_makedirs`` of
+    its parent, and its ``mv_file``: a root moved whole costs nothing more.
+    Each request holds a permit of ``concurrency_limit`` while it runs.
 
-    The profile's ``parents_required=False`` saves the ``makedirs`` of each
-    folder with files, as their moves create it. Its ``implicit_folders=True``
-    saves those, and the ``rm_folder`` of each source folder too, as a folder
-    goes with its last file. Either saves the ``makedirs`` before a folder
-    is moved whole.
+    The profile's ``parents_required=False`` saves the ``dst_makedirs`` of
+    each folder with files, as their moves create it. Its
+    ``implicit_folders=True`` saves those, and within one storage the
+    ``rm_folder`` of each source folder too, as a folder goes with its last
+    file. Either saves the ``dst_makedirs`` before a folder is moved whole.
 
     Parameters
     ----------
@@ -121,17 +130,19 @@ def tree_mv(
         ``ls`` takes paths.
     path2 : str
         Where to move it, as above.
-    ls, info, makedirs : callable
-        The storage's operations, as with `tree_cp`.
+    ls, info : callable
+        The source's operations, as with `tree_cp`.
     mv_file : callable
         Moves a file, called as ``mv_file(source, destination)``: e.g. the
         filesystem's ``_mv_file``. fsspec's own copies, then deletes. A storage
         renaming a path in one request overrides it so, and may move a folder
         with it too, as the profile's ``renames_folders`` declares.
     rm_folder : callable
-        Deletes an empty folder, as with `tree_rm`.
+        Deletes an empty source folder, as with `tree_rm`.
+    dst_info, dst_makedirs, same_storage : callable or bool
+        The destination's, as with `tree_cp`.
     profile : StorageProfile
-        What the storage does: ``StorageProfile()`` if it is unknown.
+        What the destination does: ``StorageProfile()`` if it is unknown.
     concurrency_limit : asyncio.Semaphore
         Held by each request while it runs. Share one to limit several
         operations, or files, together.
@@ -155,8 +166,10 @@ def tree_mv(
     ...     ls=fs._ls,
     ...     info=fs._info,
     ...     mv_file=fs._mv_file,
-    ...     makedirs=fs._makedirs,
     ...     rm_folder=fs._rmdir,
+    ...     dst_info=fs._info,
+    ...     dst_makedirs=fs._makedirs,
+    ...     same_storage=True,
     ...     profile=StorageProfile(),
     ...     concurrency_limit=asyncio.Semaphore(32),
     ... )
@@ -167,6 +180,7 @@ def tree_mv(
     >>> op.state.files_moved
     1234
     """
+    renames_folders = same_storage and bool(profile.renames_folders)
     return Operation(
         lambda op: _Move(
             path1,
@@ -174,20 +188,76 @@ def tree_mv(
             ls=ls,
             info=info,
             mv_file=mv_file,
-            makedirs=makedirs,
             rm_folder=rm_folder,
+            destination_info=dst_info,
+            makedirs=dst_makedirs,
+            same_storage=same_storage,
             profile=profile,
             concurrency_limit=concurrency_limit,
             op=op,
         ).outcomes(),
-        MvState(
-            folders_moved=0,
-            roots_renamed=0 if profile.renames_folders else None,
-        ),
+        MvState(folders_moved=0, roots_renamed=0 if renames_folders else None),
     )
 
 
-class _Move(_Transfer):
+def tree_local_mv(
+    path1: str | Sequence[str],
+    path2: str,
+    *,
+    ls: _Ls,
+    info: _Info,
+    mv_file: _Request,
+    makedirs: _Request,
+    rm_folder: _Request,
+    profile: StorageProfile,
+    concurrency_limit: asyncio.Semaphore,
+) -> Operation[tuple[str, str], MvState]:
+    """Move a folder and everything in it within one storage, as `tree_mv` does.
+
+    It is `tree_mv` with the destination's operations the source's own, and
+    ``same_storage=True``: the profile's ``renames_folders`` then moves
+    folders whole, and a path moved under itself is refused.
+
+    Parameters
+    ----------
+    path1 : str or sequence of str
+        The folder or file to move, a glob pattern, or a list of them.
+    path2 : str
+        Where to move it, as with `tree_mv`.
+    ls, info, mv_file, rm_folder : callable
+        The storage's operations, as with `tree_mv`.
+    makedirs : callable
+        The storage's, as `tree_mv`'s ``dst_makedirs``.
+    profile : StorageProfile
+        What the storage does: ``StorageProfile()`` if it is unknown.
+    concurrency_limit : asyncio.Semaphore
+        Held by each request while it runs.
+
+    Returns
+    -------
+    Operation
+        As `tree_mv`'s.
+
+    See Also
+    --------
+    tree_mv : The same, to another storage too.
+    """
+    return tree_mv(
+        path1,
+        path2,
+        ls=ls,
+        info=info,
+        mv_file=mv_file,
+        rm_folder=rm_folder,
+        dst_info=info,
+        dst_makedirs=makedirs,
+        same_storage=True,
+        profile=profile,
+        concurrency_limit=concurrency_limit,
+    )
+
+
+class _Move(_CopyOrMove):
     """The jobs of one `tree_mv`: a ``mv_file`` per file, deleting each folder emptied."""
 
     verb = "move"
@@ -200,14 +270,21 @@ class _Move(_Transfer):
         *,
         mv_file: _Request,
         rm_folder: _Request,
+        same_storage: bool,
         profile: StorageProfile,
         **kwargs: Any,
     ) -> None:
-        super().__init__(path1, path2, profile=profile, **kwargs)
+        super().__init__(
+            path1, path2, same_storage=same_storage, profile=profile, **kwargs
+        )
 
         self.mv_file = mv_file
         self.rm_folder = rm_folder
-        self.renames_folders = bool(profile.renames_folders)
+
+        # The profile is the destination's: only within one storage does it
+        # tell how the source renames, or deletes its folders.
+        self.renames_folders = same_storage and bool(profile.renames_folders)
+        self.implicit_folders = same_storage and self.implicit_folders
         self.folders_moved = 0
 
         # The roots moved whole, yielded with the first step.
@@ -259,7 +336,7 @@ class _Move(_Transfer):
         if target not in self.missing:
             try:
                 async with self.concurrency_limit:
-                    await self.info(target)
+                    await self.destination_info(target)
             except FileNotFoundError:
                 pass  # Free: the root can go there whole.
             except Exception:

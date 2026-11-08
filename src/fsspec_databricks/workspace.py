@@ -81,7 +81,9 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
     deletes each directory by the API's own recursive delete, `_rm_tree`.
     """
 
-    storage_profile = StorageProfile(implicit_folders=False, renames_files=False)
+    storage_profile = StorageProfile(
+        fs_type="tree", implicit_folders=False, renames_files=False
+    )
     """Directories are objects of their own, and the Workspace API has no move."""
 
     def __init__(

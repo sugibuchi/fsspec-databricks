@@ -69,7 +69,7 @@ class DBFS(BaseDatabricksFileSystem):
     deletes each directory by the API's own recursive delete, `_rm_tree`.
     """
 
-    storage_profile = StorageProfile(renames_folders=True)
+    storage_profile = StorageProfile(fs_type="tree", renames_folders=True)
     """The API's move moves a directory with all in it, in one request."""
 
     def __init__(

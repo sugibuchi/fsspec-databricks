@@ -343,12 +343,13 @@ The library's router does the rest:
   tree strategies, which monitors see as calls to the backend, with the router in `Call.via`.
 - A path or pattern at the root is walked by fsspec's own methods, over `_roots`.
 - A change of the root raises `PermissionError`.
-- A recursive copy or move between two backends is `tree_transfer`, which the router's `_transfer` gives, under one
-  call of the router. Each file is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
-- A move between backends deletes each source file once it is copied, then the source folders.
+- A recursive copy or move between two backends is `tree_cp` or `tree_mv`, as each backend's profile declares
+  `fs_type="tree"`, under one call of the router. Each file is streamed through `open_async`, 8 MB at a time,
+  `transfer_concurrency` files at a time.
+- A move between backends deletes each source file once it is copied, and the source folders left empty.
 
 No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
-`_server_copy`, and a copy within one backend is its own only when both paths route to it.
+`_cross_fs_cp_file`, and a copy within one backend is its own only when both paths route to it.
 
 Whether legacy DBFS is enabled is checked once:
 

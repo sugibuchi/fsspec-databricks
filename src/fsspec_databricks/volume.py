@@ -134,7 +134,7 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
     `_contrib.strategy`. Its files call the Files API with aiohttp, the rest the SDK.
     """
 
-    storage_profile = StorageProfile()
+    storage_profile = StorageProfile(fs_type="tree")
     """Nothing is declared: the Files API has no server-side copy or rename."""
 
     io_concurrency: int = 24

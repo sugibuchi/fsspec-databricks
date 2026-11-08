@@ -4,12 +4,15 @@
 
 `AsyncRoutingFileSystem` is the base of filesystems spanning several storages
 under one namespace, e.g. a cloud's volumes or containers, each with its own
-filesystem. It knows no family: each inner filesystem runs its own strategies,
-and a copy across two storages runs the strategy its subclass's ``_transfer``
-picks. `streaming_copy`, the copy of a file it falls back on, streams the
-data through the two storages' files.
+filesystem. Each inner filesystem runs its own strategies. A copy or move
+across two storages runs the source's family's strategy, as its profile's
+``fs_type`` says, each file by ``_cross_fs_cp_file`` or ``_cross_fs_mv_file``.
+`streaming_copy`, the copy of a file they fall back on, streams the data
+through the two storages' files.
 
-This module depends on `filesystem`, `operation`, `paths` and `types`.
+So this module, unlike the rest of `common`, depends on the families: on `cp`
+and `mv` of `tree` and `flat`, and on `filesystem`, `operation`, `paths` and
+`types` of `common`.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import os
 from abc import abstractmethod
-from contextlib import aclosing, suppress
+from contextlib import aclosing
 from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
@@ -47,8 +50,6 @@ if TYPE_CHECKING:
     )
 
     from fsspec.callbacks import Callback
-
-    from fsspec_alt_strategies_common.states import CpState
 
     from .operation import Operation
     from .types import _Request
@@ -104,7 +105,7 @@ def streaming_copy(
 
     See Also
     --------
-    tree_transfer, flat_transfer : The copies taking it.
+    tree_cp, flat_cp : The copies taking it, between two storages.
 
     Examples
     --------
@@ -161,11 +162,13 @@ class AsyncRoutingFileSystem(
 
     A copy or move between two paths of one storage is the inner filesystem's
     own: both paths route to the same inner filesystem. Between two storages, it is
-    the strategy ``_transfer`` returns, e.g. `tree_transfer`, given a
-    ``copy_file`` trying ``_server_copy``, then streaming the data. Where it
-    returns None, as it does unless overridden, it is fsspec's own copy, a
-    file at a time. A move between two storages deletes each source file once its
-    copy succeeds, then the source folders left empty.
+    the strategy of the source's family, as its profile's ``fs_type`` says:
+    `tree_cp` or `tree_mv`, `flat_cp` or `flat_mv`. Each file goes by
+    ``_cross_fs_cp_file`` or ``_cross_fs_mv_file``, which stream the data
+    unless a subclass overrides them, e.g. with a server-side copy. A source
+    of unknown ``fs_type`` is copied by fsspec's own copy, a file at a time.
+    A move between two storages deletes each source file once its copy
+    succeeds, and the source folders left empty.
 
     Inner filesystems are async, on the router's loop: a sync one raises
     TypeError, and is to be wrapped, e.g. in a `SyncTreeWrapper`. A subclass
@@ -289,42 +292,43 @@ class AsyncRoutingFileSystem(
 
         raise FileNotFoundError(path)
 
-    async def _server_copy(
-        self, fs1: AsyncFileSystem, path1: str, fs2: AsyncFileSystem, path2: str
-    ) -> bool:
-        """Copy a file between two storages without the data passing through here.
-
-        A subclass overrides it with the cloud's server-side copy, e.g. a copy
-        from a URL. It returns False when the copy cannot be done so, e.g.
-        between two clouds, and the file is then streamed. It raises when the
-        copy fails otherwise. Here, it always returns False.
-        """
-        return False
-
-    def _transfer(
+    async def _cross_fs_cp_file(
         self,
-        fs1: AsyncFileSystem,
-        path1: str | list[str],
-        fs2: AsyncFileSystem,
-        path2: str,
-        *,
-        copy_file: _Request,
-    ) -> Operation[tuple[str, str], CpState] | None:
-        """The recursive copy of ``path1`` in ``fs1`` to ``path2`` in ``fs2``, or None.
+        src_fs: AsyncFileSystem,
+        src_path: str,
+        dest_fs: AsyncFileSystem,
+        dest_path: str,
+    ) -> None:
+        """Copy a file from one storage to another, the paths the inner filesystems'.
 
-        The router knows no family, so the strategy is the subclass's to pick,
-        as it knows its inner filesystems: e.g. `tree_transfer` between two
-        `TreeFileSystem`s, given ``fs1``'s ``_ls`` and ``_info``, ``fs2``'s
-        ``_info``, ``_makedirs`` and ``_rm_file``, its profile from
-        `storage_profile_of`, and ``copy_file``. ``copy_file`` holds a permit
-        of ``transfer_limit``, so the strategy's ``concurrency_limit`` must be
-        another semaphore, e.g. ``fs1.operation_limit``.
-
-        The operation is returned not yet started. The paths are the inner
-        filesystems' own. Here, it returns None: the copy is fsspec's own, a
-        file at a time.
+        Here, the data is streamed through the router, by `streaming_copy`. A
+        subclass overrides it with the cloud's server-side copy, e.g. a copy
+        from a URL, and falls back on this one where that cannot be done, e.g.
+        between two clouds. It runs holding a permit of ``transfer_limit``.
         """
-        return None
+        block_size = getattr(src_fs, "transfer_size", None)
+        stream = streaming_copy(
+            src_fs.open_async,
+            dest_fs.open_async,
+            **({"block_size": block_size} if block_size else {}),
+        )
+        await stream(src_path, dest_path)
+
+    async def _cross_fs_mv_file(
+        self,
+        src_fs: AsyncFileSystem,
+        src_path: str,
+        dest_fs: AsyncFileSystem,
+        dest_path: str,
+    ) -> None:
+        """Move a file from one storage to another, the paths the inner filesystems'.
+
+        Here, it is ``_cross_fs_cp_file``, then the source's ``_rm_file``: a
+        source whose copy failed is kept. It runs holding a permit of
+        ``transfer_limit``.
+        """
+        await self._cross_fs_cp_file(src_fs, src_path, dest_fs, dest_path)
+        await src_fs._rm_file(src_path)
 
     def _backend(
         self, key: Hashable, make: Callable[[], AsyncFileSystem]
@@ -368,8 +372,7 @@ class AsyncRoutingFileSystem(
             the path is above the storages.
         """
         target = self._target(path)
-        profile = getattr(target[0], "storage_profile", None) if target else None
-        return profile if isinstance(profile, StorageProfile) else StorageProfile()
+        return _profile(target[0]) if target else StorageProfile()
 
     # Routing.
 
@@ -663,7 +666,7 @@ class AsyncRoutingFileSystem(
             # fsspec's copy gives folders too, which each filesystem makes.
             await self._on(fs2, inner2, path2, fs2._makedirs(inner2, exist_ok=True))
         else:
-            copy_file = self._copy_file(fs1, fs2)
+            copy_file = self._across(fs1, fs2)
             await self._on(fs1, inner1, path1, copy_file(inner1, inner2))
 
     async def _mv_file(self, path1: str, path2: str, **kwargs: Any) -> None:
@@ -673,8 +676,8 @@ class AsyncRoutingFileSystem(
         if fs1 is fs2:
             await self._on(fs1, inner1, path1, fs1._mv_file(inner1, inner2, **kwargs))
         else:
-            copy_file = self._copy_file(fs1, fs2, delete=True)
-            await self._on(fs1, inner1, path1, copy_file(inner1, inner2))
+            mv_file = self._across(fs1, fs2, move=True)
+            await self._on(fs1, inner1, path1, mv_file(inner1, inner2))
 
     async def open_async(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
         return await self._forward(path, "open_async", mode, **kwargs)
@@ -926,11 +929,7 @@ class AsyncRoutingFileSystem(
             elif (
                 recursive
                 and maxdepth is None
-                and (
-                    op := self._transfer(
-                        fs1, sources, fs2, inner2, copy_file=self._copy_file(fs1, fs2)
-                    )
-                )
+                and (op := self._cross_fs_cp(fs1, sources, fs2, inner2))
             ):
                 errors = await self._transferred(
                     op, fs1, sources, fs2, inner2, outers, path2, callback
@@ -1007,15 +1006,7 @@ class AsyncRoutingFileSystem(
             elif (
                 recursive
                 and maxdepth is None
-                and (
-                    op := self._transfer(
-                        fs1,
-                        sources,
-                        fs2,
-                        inner2,
-                        copy_file=self._copy_file(fs1, fs2, delete=True),
-                    )
-                )
+                and (op := self._cross_fs_mv(fs1, sources, fs2, inner2))
             ):
                 errors = await self._transferred(
                     op,
@@ -1029,13 +1020,6 @@ class AsyncRoutingFileSystem(
                     delete=True,
                 )
                 _raise(errors, "Moving")
-
-                # The folders left, now empty, as a move leaves none. A flat
-                # storage's went with their files: none is found.
-                with suppress(FileNotFoundError):
-                    await self._on(
-                        fs1, sources, outer, fs1._rm(sources, recursive=True)
-                    )
             else:
                 await super(AsyncRoutingFileSystem, self)._copy(
                     outer, path2, recursive, "raise", maxdepth, **kwargs
@@ -1044,9 +1028,130 @@ class AsyncRoutingFileSystem(
 
         await self._each(await self._grouped(path1), mv, "Moving", clashes)
 
+    def _cross_fs_cp(
+        self,
+        fs1: AsyncFileSystem,
+        path1: str | list[str],
+        fs2: AsyncFileSystem,
+        path2: str,
+    ) -> Operation[tuple[str, str], Any] | None:
+        """The recursive copy from ``fs1`` to ``fs2``, by the source's family, or None.
+
+        The family is the source's profile's ``fs_type``: None when unknown, and
+        fsspec's own copy then runs. Each file goes by ``_cross_fs_cp_file``.
+        The operation is returned not yet started.
+        """
+        fs_type = _profile(fs1).fs_type
+        if fs_type is None:
+            return None
+
+        # A family's strategies are imported only when used, so that a copy may
+        # leave out the other family.
+        destination = self._destination(fs1, fs2)
+        if fs_type == "tree":
+            from ..tree.cp import tree_cp  # noqa: PLC0415
+
+            return tree_cp(
+                path1,
+                path2,
+                ls=fs1._ls,
+                cp_file=self._across(fs1, fs2),
+                dst_rm_file=fs2._rm_file,
+                **destination,
+            )
+        if fs_type == "flat":
+            from ..flat.cp import flat_cp  # noqa: PLC0415
+
+            return flat_cp(
+                path1,
+                path2,
+                ils=fs1._ils,  # type: ignore[attr-defined]
+                cp_file=self._across(fs1, fs2),
+                dst_rm_file=fs2._rm_file,
+                **destination,
+            )
+        return None
+
+    def _cross_fs_mv(
+        self,
+        fs1: AsyncFileSystem,
+        path1: str | list[str],
+        fs2: AsyncFileSystem,
+        path2: str,
+    ) -> Operation[tuple[str, str], Any] | None:
+        """The recursive move from ``fs1`` to ``fs2``, by the source's family, or None.
+
+        As `_cross_fs_cp`, each file by ``_cross_fs_mv_file``. A flat source
+        copies each key by ``_cross_fs_cp_file`` instead, and deletes the keys
+        copied in batches, by its ``_rm_files``.
+        """
+        fs_type = _profile(fs1).fs_type
+        if fs_type is None:
+            return None
+
+        # A family's strategies are imported only when used, so that a copy may
+        # leave out the other family.
+        destination = self._destination(fs1, fs2)
+        if fs_type == "tree":
+            from ..tree.mv import tree_mv  # noqa: PLC0415
+
+            return tree_mv(
+                path1,
+                path2,
+                ls=fs1._ls,
+                mv_file=self._across(fs1, fs2, move=True),
+                rm_folder=fs1._rmdir,
+                **destination,
+            )
+        if fs_type == "flat":
+            from ..flat.mv import flat_mv  # noqa: PLC0415
+
+            return flat_mv(
+                path1,
+                path2,
+                ils=fs1._ils,  # type: ignore[attr-defined]
+                cp_file=self._across(fs1, fs2),
+                rm_files=fs1._rm_files,  # type: ignore[attr-defined]
+                batch_size=fs1.rm_batch_size,  # type: ignore[attr-defined]
+                dst_rm_file=fs2._rm_file,
+                **destination,
+            )
+        return None
+
+    def _destination(
+        self, fs1: AsyncFileSystem, fs2: AsyncFileSystem
+    ) -> dict[str, Any]:
+        """What a copy or move from ``fs1`` to ``fs2`` takes of both, but the listing.
+
+        Each file holds a permit of ``transfer_limit``, so the strategy's
+        ``concurrency_limit`` is the source's own: the same semaphore would
+        deadlock.
+        """
+        return {
+            "info": fs1._info,
+            "dst_info": fs2._info,
+            "dst_makedirs": fs2._makedirs,
+            "same_storage": False,
+            "profile": _profile(fs2),
+            "concurrency_limit": fs1.operation_limit,  # type: ignore[attr-defined]
+        }
+
+    def _across(
+        self, fs1: AsyncFileSystem, fs2: AsyncFileSystem, *, move: bool = False
+    ) -> _Request:
+        """A file's copy, or move, from ``fs1`` to ``fs2``, under ``transfer_limit``."""
+        hook = self._cross_fs_mv_file if move else self._cross_fs_cp_file
+
+        async def request(path1: str, path2: str) -> None:
+            with routing(self):
+                async with self.transfer_limit:
+                    await hook(fs1, path1, fs2, path2)
+
+        return request
+
     async def _transferred(
         self,
-        op: Operation[tuple[str, str], CpState],
+        op: Operation[tuple[str, str], Any],
         fs1: AsyncFileSystem,
         path1: str | list[str],
         fs2: AsyncFileSystem,
@@ -1056,7 +1161,7 @@ class AsyncRoutingFileSystem(
         callback: Any,
         delete: bool = False,
     ) -> list[Exception]:
-        """Run the copy `_transfer` gave between two storages: the errors.
+        """Run a copy or move between two storages: the errors.
 
         The call is the router's own, watched by the monitors as such.
         """
@@ -1068,35 +1173,6 @@ class AsyncRoutingFileSystem(
             )
 
         return errors
-
-    def _copy_file(
-        self, fs1: AsyncFileSystem, fs2: AsyncFileSystem, delete: bool = False
-    ) -> _Request:
-        """The ``copy_file`` between two storages: `_server_copy`, or else streaming.
-
-        With ``delete``, the source is deleted once copied, so that a move
-        leaves no file in both places for longer than needed.
-        """
-        stream = streaming_copy(
-            fs1.open_async,
-            fs2.open_async,
-            **(
-                {"block_size": fs1.transfer_size}
-                if hasattr(fs1, "transfer_size")
-                else {}
-            ),
-        )
-
-        async def copy_file(path1: str, path2: str) -> None:
-            with routing(self):
-                async with self.transfer_limit:
-                    if not await self._server_copy(fs1, path1, fs2, path2):
-                        await stream(path1, path2)
-
-                if delete:
-                    await fs1._rm_file(path1)
-
-        return copy_file
 
     # fsspec makes sync methods only from the async ones it knows: _mv and
     # _rmdir are not.
@@ -1130,3 +1206,9 @@ def _put_file(
             while chunk := local.read(fs.blocksize):
                 f.write(chunk)
                 callback.relative_update(len(chunk))
+
+
+def _profile(fs: Any) -> StorageProfile:
+    """A filesystem's `storage_profile`, or `StorageProfile()` if it has none."""
+    profile = getattr(fs, "storage_profile", None)
+    return profile if isinstance(profile, StorageProfile) else StorageProfile()

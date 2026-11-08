@@ -12,6 +12,7 @@ This module depends on `filesystem`, and `wrapper` of `common`.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..common.wrapper import _AsyncFileSystemWrapper, _SyncFileSystemWrapper
@@ -84,7 +85,8 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
             fs,
             operation_concurrency=operation_concurrency,
             io_concurrency=io_concurrency,
-            storage_profile=storage_profile,
+            # A wrapper is a tree filesystem, whatever it wraps.
+            storage_profile=replace(storage_profile, fs_type="tree"),
             **kwargs,
         )
 
@@ -152,6 +154,7 @@ class SyncTreeWrapper(_SyncFileSystemWrapper, TreeFileSystem):
             fs,
             operation_concurrency=operation_concurrency,
             io_concurrency=io_concurrency,
-            storage_profile=storage_profile,
+            # A wrapper is a tree filesystem, whatever it wraps.
+            storage_profile=replace(storage_profile, fs_type="tree"),
             **kwargs,
         )

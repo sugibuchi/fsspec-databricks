@@ -4,7 +4,8 @@
 
 `tree_cp` is an alternative to fsspec's recursive ``copy``. fsspec's lists the
 whole tree first, then copies each path. `tree_cp` copies each folder's files
-as soon as the folder is listed.
+as soon as the folder is listed. The destination may be another storage:
+within one, it is the same storage's operations given twice.
 
 This module depends on `_jobs`, and `jobs`, `operation` and `placement` of
 `common`.
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from ..common.types import _Info, _Ls, _Request
     from .walk import _Listing
 
-__all__ = ["CpState", "tree_cp"]
+__all__ = ["CpState", "tree_cp", "tree_local_cp"]
 
 
 def tree_cp(
@@ -42,8 +43,10 @@ def tree_cp(
     ls: _Ls,
     info: _Info,
     cp_file: _Request,
-    makedirs: _Request,
-    rm_file: _Request,
+    dst_info: _Info,
+    dst_makedirs: _Request,
+    dst_rm_file: _Request,
+    same_storage: bool,
     profile: StorageProfile,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], CpState]:
@@ -77,6 +80,13 @@ def tree_cp(
     created at the destination before files are copied into it, and for each
     empty folder.
 
+    The destination is described by the ``dst_`` operations and ``profile``.
+    Within one storage, they are the source's own, and ``same_storage`` is
+    True: a path copied onto itself, or under itself, is refused. Between two,
+    ``cp_file`` copies from one to the other, e.g. one made by
+    ``common.routing.streaming_copy``, and every byte goes through the caller.
+    A path may then go to the same path, or under it.
+
     The copies run concurrently, so the destination's paths are created in
     another order than the source's. A storage listing in creation order
     shows it.
@@ -87,25 +97,28 @@ def tree_cp(
 
     It wins over fsspec's ``copy`` on storages that list one folder per
     request. The copies then start after the first listing, not after the
-    whole tree is listed.
+    whole tree is listed. Between two storages, it wins over fsspec's way too,
+    a ``get`` to local files then a ``put``: the data needs no local disk.
 
     Once cancelled, it starts no new listing or copy, and yields the outcomes
     of the copies already sent. Closed, it waits for those copies without
     yielding them. Iterating it raises FileNotFoundError if ``path1`` does not
-    exist, or matches nothing, and ValueError if ``path2`` is inside it.
+    exist, or matches nothing, and ValueError if ``path2`` is inside it within
+    one storage.
 
-    Requests: one ``info`` for ``path2``, unless it ends with "/" or ``path1``
-    is a pattern or a list. Patterns, or a list, add the requests of their
-    `tree_glob`. One ``ls`` per folder, one ``cp_file`` per file, and one
-    ``makedirs`` per destination folder with files or empty. A storage
-    refusing to overwrite costs an ``info``, an ``rm_file`` and a ``cp_file``
-    more per file it refused. The ``info`` checks it is a file, as
-    ``rm_file`` is given only paths known to be files. Each request holds a permit of ``concurrency_limit`` while it
-    runs.
+    Requests: one ``dst_info`` for ``path2``, unless it ends with "/" or
+    ``path1`` is a pattern or a list. Patterns, or a list, add the requests of
+    their `tree_glob`. One ``ls`` per folder, one ``cp_file`` per file, and
+    one ``dst_makedirs`` per destination folder with files or empty. A
+    destination refusing to overwrite costs a ``dst_info``, a ``dst_rm_file``
+    and a ``cp_file`` more per file it refused. The ``dst_info`` checks it is
+    a file, as ``dst_rm_file`` is given only paths known to be files. Each
+    request holds a permit of ``concurrency_limit`` while it runs, a
+    ``cp_file`` between two storages too.
 
     The profile's ``parents_required=False``, or ``implicit_folders=True``,
-    saves the ``makedirs`` of each folder with files, as their copies create
-    it.
+    saves the ``dst_makedirs`` of each folder with files, as their copies
+    create it.
 
     Parameters
     ----------
@@ -121,19 +134,26 @@ def tree_cp(
         Describes a path, called as ``info(path)``: e.g. the filesystem's
         ``_info``.
     cp_file : callable
-        Copies a file, called as ``cp_file(source, destination)``: e.g. the
-        filesystem's ``_cp_file``.
-    makedirs : callable
-        Creates a folder and its parents, called as
-        ``makedirs(path, exist_ok=True)``: e.g. the filesystem's ``_makedirs``.
-    rm_file : callable
-        Deletes a file, called as ``rm_file(path)``: e.g. the filesystem's
-        ``_rm_file``. Only a storage refusing to overwrite needs it.
+        Copies a file to the destination, called as
+        ``cp_file(source, destination)``: e.g. the filesystem's ``_cp_file``.
+    dst_info : callable
+        Describes a destination path, called as ``dst_info(path)``: e.g. the
+        filesystem's ``_info``.
+    dst_makedirs : callable
+        Creates a destination folder and its parents, called as
+        ``dst_makedirs(path, exist_ok=True)``: e.g. the filesystem's
+        ``_makedirs``.
+    dst_rm_file : callable
+        Deletes a destination file, called as ``dst_rm_file(path)``: e.g. the
+        filesystem's ``_rm_file``. Only a storage refusing to overwrite needs
+        it.
+    same_storage : bool
+        Whether the destination is the source's storage.
     profile : StorageProfile
-        What the storage does: ``StorageProfile()`` if it is unknown.
+        What the destination does: ``StorageProfile()`` if it is unknown.
     concurrency_limit : asyncio.Semaphore
-        Held by each request while it runs. Share one to limit several
-        operations, or files, together.
+        Held by each request while it runs, on either storage. Share one to
+        limit several operations, or files, together.
 
     Returns
     -------
@@ -154,8 +174,10 @@ def tree_cp(
     ...     ls=fs._ls,
     ...     info=fs._info,
     ...     cp_file=fs._cp_file,
-    ...     makedirs=fs._makedirs,
-    ...     rm_file=fs._rm_file,
+    ...     dst_info=fs._info,
+    ...     dst_makedirs=fs._makedirs,
+    ...     dst_rm_file=fs._rm_file,
+    ...     same_storage=True,
     ...     profile=StorageProfile(),
     ...     concurrency_limit=asyncio.Semaphore(32),
     ... )
@@ -165,6 +187,22 @@ def tree_cp(
     ...             print("failed:", copied)
     >>> op.state.files_copied
     1234
+
+    Between two storages, the data streamed through the caller:
+
+    >>> cp = tree_cp(
+    ...     "data/2024",
+    ...     "backup/",
+    ...     ls=src._ls,
+    ...     info=src._info,
+    ...     cp_file=streaming_copy(src.open_async, dst.open_async),
+    ...     dst_info=dst._info,
+    ...     dst_makedirs=dst._makedirs,
+    ...     dst_rm_file=dst._rm_file,
+    ...     same_storage=False,
+    ...     profile=StorageProfile(),
+    ...     concurrency_limit=asyncio.Semaphore(32),
+    ... )
     """
     return Operation(
         lambda op: _Copy(
@@ -173,8 +211,10 @@ def tree_cp(
             ls=ls,
             info=info,
             cp_file=cp_file,
-            makedirs=makedirs,
-            rm_file=rm_file,
+            destination_info=dst_info,
+            makedirs=dst_makedirs,
+            rm_file=dst_rm_file,
+            same_storage=same_storage,
             profile=profile,
             concurrency_limit=concurrency_limit,
             op=op,
@@ -183,7 +223,68 @@ def tree_cp(
     )
 
 
-class _Transfer(_Placing, _TreeJobs):
+def tree_local_cp(
+    path1: str | Sequence[str],
+    path2: str,
+    *,
+    ls: _Ls,
+    info: _Info,
+    cp_file: _Request,
+    makedirs: _Request,
+    rm_file: _Request,
+    profile: StorageProfile,
+    concurrency_limit: asyncio.Semaphore,
+) -> Operation[tuple[str, str], CpState]:
+    """Copy a folder and everything in it within one storage, as `tree_cp` does.
+
+    It is `tree_cp` with the destination's operations the source's own, and
+    ``same_storage=True``: a path copied onto itself, or under itself, is
+    refused.
+
+    Parameters
+    ----------
+    path1 : str or sequence of str
+        The folder or file to copy, a glob pattern, or a list of them.
+    path2 : str
+        Where to copy it, as with `tree_cp`.
+    ls, info : callable
+        The storage's operations, as with `tree_cp`.
+    cp_file : callable
+        Copies a file within the storage, called as
+        ``cp_file(source, destination)``: e.g. the filesystem's ``_cp_file``.
+    makedirs, rm_file : callable
+        The storage's operations, as `tree_cp`'s ``dst_makedirs`` and
+        ``dst_rm_file``.
+    profile : StorageProfile
+        What the storage does: ``StorageProfile()`` if it is unknown.
+    concurrency_limit : asyncio.Semaphore
+        Held by each request while it runs.
+
+    Returns
+    -------
+    Operation
+        As `tree_cp`'s.
+
+    See Also
+    --------
+    tree_cp : The same, to another storage too.
+    """
+    return tree_cp(
+        path1,
+        path2,
+        ls=ls,
+        info=info,
+        cp_file=cp_file,
+        dst_info=info,
+        dst_makedirs=makedirs,
+        dst_rm_file=rm_file,
+        same_storage=True,
+        profile=profile,
+        concurrency_limit=concurrency_limit,
+    )
+
+
+class _CopyOrMove(_Placing, _TreeJobs):
     """The jobs of a copy or a move: a folder made where needed, and one per file.
 
     A file's job waits for its destination folder, when the storage needs it.
@@ -200,19 +301,20 @@ class _Transfer(_Placing, _TreeJobs):
         *,
         ls: _Ls,
         info: _Info,
+        destination_info: _Info,
         makedirs: _Request,
+        same_storage: bool,
         profile: StorageProfile,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
-        destination_info: _Info | None = None,
     ) -> None:
         super().__init__(ls, info, concurrency_limit, op)
 
         self.path1 = path1
         self.path2 = path2
 
-        # makedirs and the profile are the destination's: ls and info, unless
-        # destination_info is given, describe both storages.
+        # ls and info are the source's. destination_info, makedirs and the
+        # profile are the destination's.
         self.makedirs = makedirs
 
         # Unknown, folders are made first. Implicit folders need none.
@@ -221,7 +323,7 @@ class _Transfer(_Placing, _TreeJobs):
         )
         self.implicit_folders = bool(profile.implicit_folders)
 
-        self._placing(destination_info, same_storage=destination_info is None)
+        self._placing(destination_info, same_storage=same_storage)
 
         self.files_found = 0
         self.files_done = 0
@@ -295,7 +397,7 @@ class _Transfer(_Placing, _TreeJobs):
         return [error]
 
 
-class _Copy(_Transfer):
+class _Copy(_CopyOrMove):
     """The jobs of one `tree_cp`: a ``cp_file`` per file."""
 
     def __init__(
@@ -316,10 +418,10 @@ class _Copy(_Transfer):
             try:
                 await self.cp_file(source, destination)
             except FileExistsError:
-                # The storage refuses to overwrite, which fsspec's copy does. A
-                # folder there is no file to replace: rm_file takes files only.
-                # The job holds its permit already.
-                if (await self.info(destination))["type"] == "directory":
+                # The destination refuses to overwrite, which fsspec's copy
+                # does. A folder there is no file to replace: rm_file takes
+                # files only. The job holds its permit already.
+                if (await self.destination_info(destination))["type"] == "directory":
                     raise
 
                 await self.rm_file(destination)

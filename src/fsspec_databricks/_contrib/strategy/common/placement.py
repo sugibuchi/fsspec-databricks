@@ -41,16 +41,13 @@ class _Placing:
     path2: str
     info: _Info
 
-    def _placing(
-        self, destination_info: _Info | None = None, *, same_storage: bool = True
-    ) -> None:
-        """Start placing paths.
+    def _placing(self, destination_info: _Info, *, same_storage: bool) -> None:
+        """Start placing paths, ``destination_info`` describing the destination's.
 
-        A copy between two storages passes the destination's ``info``, and
-        ``same_storage=False``: a path may then go to the same path, or under
-        it, as that is another storage's.
+        Between two storages, ``same_storage`` is False: a path may then go to
+        the same path, or under it, as that is another storage's.
         """
-        self.destination_info = destination_info or self.info
+        self.destination_info = destination_info
         self.same_storage = same_storage
 
         self.prefix = ""
