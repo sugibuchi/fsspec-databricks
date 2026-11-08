@@ -30,7 +30,7 @@ costs twice:
 A subclass overriding ``_iexpand`` with the storage's own listing by prefix, e.g.
 from its SDK, streams it page by page, and lists only the prefix.
 
-This module depends on `sync_client`, `filesystem` of `tree` and of `flat`,
+This module depends on `sync_client` of `common`, `filesystem` of `tree` and of `flat`,
 and `files.fsspec_async`.
 """
 
@@ -41,9 +41,9 @@ import contextlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from .common.sync_client import SyncClientSupport
 from .files.fsspec_async import SyncFileAdapter
 from .flat.filesystem import FlatFileSystem
-from .sync_client import SyncClientSupport
 from .tree.filesystem import TreeFileSystem
 
 if TYPE_CHECKING:

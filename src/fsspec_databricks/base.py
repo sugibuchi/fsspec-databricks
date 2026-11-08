@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
 
-from ._contrib.strategy.sync_client import SyncClientSupport
+from ._contrib.strategy.common.sync_client import SyncClientSupport
 from ._contrib.strategy.tree.filesystem import TreeFileSystem
 from .error import file_exists_error, not_a_directory_error
 from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
