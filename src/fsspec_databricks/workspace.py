@@ -130,10 +130,8 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
 
         workspace_path = _parse(path)
         with error_mapping(path):
-            status = await self._sdk(
-                "workspace.get_status",
-                workspace_path,
-                lambda c: c.workspace.get_status(workspace_path),
+            status = await self._run_in_thread(
+                self.client.workspace.get_status, workspace_path
             )
         return _map_info(status, detail=True)
 
@@ -145,11 +143,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
 
         workspace_path = _parse(path)
         with error_mapping(path):
-            listing = self._sdk_iter(
-                "workspace.list",
-                workspace_path,
-                lambda c: c.workspace.list(workspace_path),
-            )
+            listing = self._iter_in_thread(self.client.workspace.list, workspace_path)
             async for entry in listing:
                 yield _map_info(entry, True)
 
@@ -172,32 +166,28 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
         file_path1 = _parse(path1)
         file_path2 = _parse(path2)
 
-        def download(c):
-            with c.workspace.download(file_path1, format=export_format) as f:
+        def download(path, format):
+            # In one thread: the download's stream is read as it is opened.
+            with self.client.workspace.download(path, format=format) as f:
                 return f.read()
 
         with error_mapping(path1):
-            data = await self._sdk("workspace.download", file_path1, download)
+            data = await self._run_in_thread(download, file_path1, export_format)
         with error_mapping(path2):
-            await self._sdk(
-                "workspace.upload",
+            await self._run_in_thread(
+                self.client.workspace.upload,
                 file_path2,
-                lambda c: c.workspace.upload(
-                    file_path2,
-                    data,
-                    format=import_format,
-                    language=language,
-                    overwrite=True,
-                ),
+                data,
+                format=import_format,
+                language=language,
+                overwrite=True,
             )
 
     async def _delete(self, path: str, recursive: bool) -> None:
         workspace_path = _parse(path)
         with error_mapping(path):
-            await self._sdk(
-                "workspace.delete",
-                workspace_path,
-                lambda c: c.workspace.delete(workspace_path, recursive=recursive),
+            await self._run_in_thread(
+                self.client.workspace.delete, workspace_path, recursive=recursive
             )
 
     async def _rm_file(self, path, **kwargs):
@@ -226,11 +216,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
     async def _create_directory(self, path):
         workspace_path = _parse(path)
         with error_mapping(path):
-            await self._sdk(
-                "workspace.mkdirs",
-                workspace_path,
-                lambda c: c.workspace.mkdirs(workspace_path),
-            )
+            await self._run_in_thread(self.client.workspace.mkdirs, workspace_path)
 
     ### File I/O
     def _file_info(self, path: str) -> dict[str, Any] | None:

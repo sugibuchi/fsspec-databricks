@@ -378,8 +378,8 @@ The router needs async backends. The local file system is sync, so the library's
 
 `BaseDatabricksFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
-- `_sdk` runs an SDK call in a thread. Each backend has `operation_concurrency` threads of its own, made on first
-  use, from the library's `SyncClientSupport` mixin.
+- `_run_in_thread` runs an SDK call in a thread, given the SDK's bound method and its arguments. Each backend has
+  `operation_concurrency` threads of its own, made on first use, from the library's `SyncClientSupport` mixin.
 - `close()` shuts the threads down, as does collecting the file system.
 - `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
 - `operation_concurrency` and `io_concurrency` default to 16 and 8.
@@ -448,11 +448,11 @@ The recursive operations are the library's tree strategies: `find`, `walk`, `du`
 and `mv`.
 
 Each backend lists a folder with `_ils`, an async iterator, and its `_ls` lists with it. `_ils` takes the SDK's
-paged listing a batch at a time, with `_sdk_iter` in `base.py`, in the file system's threads. So the strategies act on
+paged listing a batch at a time, with `_iter_in_thread` in `base.py`, in the file system's threads. So the strategies act on
 a folder's first page while the next ones are fetched: a folder of many files is never held whole.
 
 fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
-those. The SDK's calls block, so they run in the file system's own threads, with `_sdk`. The Workspace and DBFS
+those. The SDK's calls block, so they run in the file system's own threads, with `_run_in_thread`. The Workspace and DBFS
 backends work the same way.
 
 The APIs called depend on the depth of the path:
@@ -642,7 +642,7 @@ Logging follows s3fs and gcsfs. Each module has a logger of its name, under `fss
 installed.
 
 - Each request to Databricks, except range reads, is one DEBUG line: its API or HTTP method, the path and the outcome.
-- `_sdk` logs the SDK's calls, and `volume.py` logs its own HTTP requests.
+- `BaseDatabricksFileSystem._run_in_thread` logs the SDK's calls, and `volume.py` logs its own HTTP requests.
 - Reads of ranges are not logged: a read makes many. Their retries are still WARNINGs.
 - Retries and aborted uploads are WARNINGs.
 - The fallback from the storage proxy is DEBUG: outside Databricks, the proxy is normally absent.

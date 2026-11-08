@@ -64,7 +64,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   names returned back with `from_local_path`.
 - Every backend must be async. The local file system is wrapped in the library's `SyncTreeWrapper`.
 - Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `BaseDatabricksFileSystem` in `base.py`,
-  and call the SDK in threads with `_sdk`.
+  and call the SDK in threads with `_run_in_thread`, passing the SDK's bound method and its arguments.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
 - `VolumeFileSystem` is an async fsspec file system on fsspec's loop. Its aiohttp session is created on the loop using
@@ -83,7 +83,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
 - Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on the dummy server.
 - Logging follows s3fs and gcsfs. Each module has `logging.getLogger(__name__)`, and the library installs no handlers.
-- Log one DEBUG line per request to Databricks, where it leaves the process: `_sdk` in `base.py`, and Volumes' HTTP
+- Log one DEBUG line per request to Databricks, where it leaves the process: `_run_in_thread` in `base.py`, and Volumes' HTTP
   helpers in `volume.py`. Range reads are not logged. Keep it cheap, with lazy `%` formatting.
 - Log retries and aborted uploads at WARNING. Log nothing else: the library's monitors report operations.
 

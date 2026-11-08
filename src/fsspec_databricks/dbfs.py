@@ -5,6 +5,7 @@ import contextlib
 import contextvars
 import functools
 import logging
+from collections.abc import Callable
 from io import UnsupportedOperation
 from typing import Any
 
@@ -13,6 +14,7 @@ from databricks.sdk.service.files import DbfsAPI, FileInfo
 from fsspec.asyn import sync
 from fsspec_alt_strategies.profile import StorageProfile
 
+from ._contrib.strategy.common.sync_client import SyncClientSupport
 from ._contrib.strategy.files.adaptive import (
     AdaptiveReadableFile,
     AdaptiveWritableFile,
@@ -114,7 +116,7 @@ class DBFS(BaseDatabricksFileSystem):
 
     ### Whether the workspace has legacy DBFS
     def _get_legacy_dbfs_enabled(self) -> bool:
-        """Ask the workspace setting `disable_legacy_dbfs`, blocking: one request, logged as `_sdk` logs."""
+        """Ask the workspace setting `disable_legacy_dbfs`, blocking: one request, logged as `_run_in_thread` logs."""
         api = "settings.get_public_workspace_setting"
         try:
             setting = self.client.workspace_settings_v2.get_public_workspace_setting(
@@ -167,27 +169,21 @@ class DBFS(BaseDatabricksFileSystem):
         if not await self._is_legacy_dbfs_enabled():
             raise file_not_found_error(path)
 
-    async def _sdk(self, api, path, func):
-        # Every request but range reads goes through here, so the check comes first.
-        await self._check_legacy_dbfs(path)
-        return await super()._sdk(api, path, func)
-
     ### File/directory information
+    # Each request checks the setting first: `_info` checks it for the methods calling it first.
     async def _info(self, path, **kwargs):
         dbfs_path = parse_dbfs_path(path)
+        await self._check_legacy_dbfs(path)
         with error_mapping(path):
-            status = await self._sdk(
-                "dbfs.get_status", dbfs_path, lambda c: c.dbfs.get_status(dbfs_path)
-            )
+            status = await self._run_in_thread(self.client.dbfs.get_status, dbfs_path)
         return map_info(status, detail=True)
 
     async def _ils(self, path, **kwargs):
         """List a folder a page at a time, as the SDK's listing fetches them."""
         dbfs_path = parse_dbfs_path(path)
+        await self._check_legacy_dbfs(path)
         with error_mapping(path):
-            async for entry in self._sdk_iter(
-                "dbfs.list", dbfs_path, lambda c: c.dbfs.list(dbfs_path)
-            ):
+            async for entry in self._iter_in_thread(self.client.dbfs.list, dbfs_path):
                 yield map_info(entry, True)
 
     ### File/directory operations
@@ -198,26 +194,24 @@ class DBFS(BaseDatabricksFileSystem):
 
         src, dst = parse_dbfs_path(path1), parse_dbfs_path(path2)
         with error_mapping(path1):
-            await self._sdk(
-                "dbfs.copy",
-                src,
-                lambda c: c.dbfs.copy(src, dst, recursive=False, overwrite=True),
+            await self._run_in_thread(
+                self.client.dbfs.copy, src, dst, recursive=False, overwrite=True
             )
 
     async def _mv_file(self, path1, path2, **kwargs):
         """Move a file, or a directory with all in it, with the API's move: one request."""
         src, dst = parse_dbfs_path(path1), parse_dbfs_path(path2)
+        await self._check_legacy_dbfs(path1)
         with error_mapping(path1):
-            await self._sdk("dbfs.move", src, lambda c: c.dbfs.move(src, dst))
+            await self._run_in_thread(self.client.dbfs.move, src, dst)
 
     async def _delete(self, path: str, recursive: bool) -> None:
         dbfs_path = parse_dbfs_path(path)
+        await self._check_legacy_dbfs(path)
         with error_mapping(path):
             # The API's own delete: the SDK's refuses directories unless recursive.
-            await self._sdk(
-                "dbfs.delete",
-                dbfs_path,
-                lambda c: DbfsAPI.delete(c.dbfs, dbfs_path, recursive=recursive),
+            await self._run_in_thread(
+                DbfsAPI.delete, self.client.dbfs, dbfs_path, recursive=recursive
             )
 
     async def _rm_file(self, path, **kwargs):
@@ -245,10 +239,9 @@ class DBFS(BaseDatabricksFileSystem):
 
     async def _create_directory(self, path):
         dbfs_path = parse_dbfs_path(path)
+        await self._check_legacy_dbfs(path)
         with error_mapping(path):
-            await self._sdk(
-                "dbfs.mkdirs", dbfs_path, lambda c: c.dbfs.mkdirs(dbfs_path)
-            )
+            await self._run_in_thread(self.client.dbfs.mkdirs, dbfs_path)
 
     ### File I/O
     async def _check_open(self, path: str, mode: str) -> int | None:
@@ -374,10 +367,13 @@ class DbfsReadableFile(AdaptiveReadableFile):
         while offset < end:
             length = min(end - offset, _max_request_size)
             with error_mapping(self.path):
-                response = await self.fs._run_in_thread(
-                    lambda o=offset, n=length: self.fs.client.dbfs.read(
-                        self._dbfs_path, offset=o, length=n
-                    )
+                # The mixin's own, not logging: range reads are not logged, as a read makes many.
+                response = await SyncClientSupport._run_in_thread(
+                    self.fs,
+                    self.fs.client.dbfs.read,
+                    self._dbfs_path,
+                    offset=offset,
+                    length=length,
                 )
             if not response.bytes_read:
                 # The file was truncated meanwhile: the rest is missing.
@@ -426,23 +422,24 @@ class DbfsWritableFile(AdaptiveWritableFile):
         self._dbfs_path = parse_dbfs_path(path)
         self._handle: int | None = None
 
-    async def _call(self, api: str, func: Any) -> Any:
+    async def _call(self, func: Callable[..., Any], *args, **kwargs) -> Any:
+        """Call the SDK in the file system's threads, once the workspace is known to have legacy DBFS."""
+        await self.fs._check_legacy_dbfs(self.path)
         with error_mapping(self.path):
-            return await self.fs._sdk(api, self._dbfs_path, func)
+            return await self.fs._run_in_thread(func, *args, **kwargs)
 
     async def _upload_all(self, data: bytes) -> None:
         contents = base64.b64encode(data).decode()
         await self._call(
-            "dbfs.put",
-            lambda c: c.dbfs.put(
-                self._dbfs_path, contents=contents, overwrite=self.overwrite
-            ),
+            self.fs.client.dbfs.put,
+            self._dbfs_path,
+            contents=contents,
+            overwrite=self.overwrite,
         )
 
     async def _start_multipart_upload(self) -> None:
         created = await self._call(
-            "dbfs.create",
-            lambda c: c.dbfs.create(self._dbfs_path, overwrite=self.overwrite),
+            self.fs.client.dbfs.create, self._dbfs_path, overwrite=self.overwrite
         )
         self._handle = created.handle
 
@@ -450,12 +447,10 @@ class DbfsWritableFile(AdaptiveWritableFile):
         self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> None:
         block = base64.b64encode(data).decode()
-        await self._call(
-            "dbfs.add-block", lambda c: c.dbfs.add_block(self._handle, block)
-        )
+        await self._call(self.fs.client.dbfs.add_block, self._handle, block)
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        await self._call("dbfs.close", lambda c: c.dbfs.close(self._handle))
+        await self._call(self.fs.client.dbfs.close, self._handle)
 
     async def _abort_multipart_upload(self) -> None:
         if self._handle is None:
@@ -464,11 +459,10 @@ class DbfsWritableFile(AdaptiveWritableFile):
         handle, self._handle = self._handle, None
         logger.warning("Aborting upload: path=%s", self.path)
         try:
-            await self._call("dbfs.close", lambda c: c.dbfs.close(handle))
+            await self._call(self.fs.client.dbfs.close, handle)
         finally:
             await self._call(
-                "dbfs.delete",
-                lambda c: DbfsAPI.delete(c.dbfs, self._dbfs_path, recursive=False),
+                DbfsAPI.delete, self.fs.client.dbfs, self._dbfs_path, recursive=False
             )
 
 

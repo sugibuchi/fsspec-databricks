@@ -299,26 +299,20 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
             if catalog is None:
                 return dict(volumes_root_info)
             elif schema is None:
-                info = await self._sdk(
-                    "catalogs.get",
-                    catalog,
-                    lambda c: c.catalogs.get(catalog, include_browse=include_browse),
+                info = await self._run_in_thread(
+                    self.client.catalogs.get, catalog, include_browse=include_browse
                 )
             elif volume is None:
-                info = await self._sdk(
-                    "schemas.get",
+                info = await self._run_in_thread(
+                    self.client.schemas.get,
                     f"{catalog}.{schema}",
-                    lambda c: c.schemas.get(
-                        f"{catalog}.{schema}", include_browse=include_browse
-                    ),
+                    include_browse=include_browse,
                 )
             elif path_in_volume == "/":
-                info = await self._sdk(
-                    "volumes.read",
+                info = await self._run_in_thread(
+                    self.client.volumes.read,
                     f"{catalog}.{schema}.{volume}",
-                    lambda c: c.volumes.read(
-                        f"{catalog}.{schema}.{volume}", include_browse=include_browse
-                    ),
+                    include_browse=include_browse,
                 )
             else:
                 # Files first: they are asked about more often than directories
@@ -330,18 +324,12 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
 
     async def _file_info(self, full_path: str) -> dict[str, Any]:
         """Info of a file in a volume, with one API call. Raises `NotFound` for other paths."""
-        metadata = await self._sdk(
-            "files.get_metadata", full_path, lambda c: c.files.get_metadata(full_path)
-        )
+        metadata = await self._run_in_thread(self.client.files.get_metadata, full_path)
         return _map_info(metadata, detail=True, path=full_path)
 
     async def _directory_info(self, full_path: str) -> dict[str, Any]:
         """Info of a directory in a volume, with one API call. Raises `NotFound` for other paths."""
-        await self._sdk(
-            "files.get_directory_metadata",
-            full_path,
-            lambda c: c.files.get_directory_metadata(full_path),
-        )
+        await self._run_in_thread(self.client.files.get_directory_metadata, full_path)
         return {
             "name": full_path.rstrip("/"),
             "size": None,
@@ -390,13 +378,13 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
             return
 
         catalog, schema, volume, _, full_path = _parse(path)
-        api, name, listing = _listing(
-            path, catalog, schema, volume, full_path, include_browse
+        func, args, kwargs = _listing(
+            self.client, catalog, schema, volume, full_path, include_browse
         )
         listed = False
         with error_mapping(path):
             try:
-                async for entry in self._sdk_iter(api, name, listing):
+                async for entry in self._iter_in_thread(func, *args, **kwargs):
                     listed = True
                     yield _map_info(entry, detail=True)
             except (NotFound, BadRequest):
@@ -427,9 +415,7 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
 
         with error_mapping(path):
             try:
-                await self._sdk(
-                    "files.delete", full_path, lambda c: c.files.delete(full_path)
-                )
+                await self._run_in_thread(self.client.files.delete, full_path)
             except (NotFound, BadRequest):
                 if await self._isdir(path):
                     raise is_a_directory_error(path) from None
@@ -450,11 +436,7 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
 
         with error_mapping(path):
             try:
-                await self._sdk(
-                    "files.delete_directory",
-                    full_path,
-                    lambda c: c.files.delete_directory(full_path),
-                )
+                await self._run_in_thread(self.client.files.delete_directory, full_path)
             except BadRequest as e:
                 if "is not empty" in str(e):
                     raise not_empty_error(path) from e
@@ -467,11 +449,7 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
                 path, "Catalogs, schemas and volumes are not created as directories"
             )
         with error_mapping(path):
-            await self._sdk(
-                "files.create_directory",
-                full_path,
-                lambda c: c.files.create_directory(full_path),
-            )
+            await self._run_in_thread(self.client.files.create_directory, full_path)
 
     ### File I/O
     async def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
@@ -1152,28 +1130,16 @@ __all__ = [
 ]
 
 
-def _listing(path, catalog, schema, volume, full_path, include_browse):
-    """The SDK listing of a path: its API and the name both logged, and the call making it."""
+def _listing(client, catalog, schema, volume, full_path, include_browse):
+    """The SDK listing of a path: the SDK's method, and its positional and keyword arguments."""
     if catalog is None:
-        return (
-            "catalogs.list",
-            path,
-            lambda c: c.catalogs.list(include_browse=include_browse),
-        )
+        return client.catalogs.list, (), {"include_browse": include_browse}
     if schema is None:
-        return (
-            "schemas.list",
-            catalog,
-            lambda c: c.schemas.list(catalog, include_browse=include_browse),
-        )
+        return client.schemas.list, (catalog,), {"include_browse": include_browse}
     if volume is None:
         return (
-            "volumes.list",
-            f"{catalog}.{schema}",
-            lambda c: c.volumes.list(catalog, schema, include_browse=include_browse),
+            client.volumes.list,
+            (catalog, schema),
+            {"include_browse": include_browse},
         )
-    return (
-        "files.list_directory_contents",
-        full_path,
-        lambda c: c.files.list_directory_contents(full_path),
-    )
+    return client.files.list_directory_contents, (full_path,), {}

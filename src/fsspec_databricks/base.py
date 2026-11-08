@@ -2,7 +2,7 @@ import atexit
 import contextlib
 import logging
 import weakref
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from itertools import islice
 from typing import Any, TypeVar
 
@@ -40,6 +40,11 @@ def _cleanup(ref):
 
 def _register_cleanup(fs):
     atexit.register(_cleanup, weakref.ref(fs))
+
+
+def _next_batch(entries: Iterator[T]) -> list[T]:
+    """Take the next entries of an SDK listing, fetching its pages as it comes to them."""
+    return list(islice(entries, _LISTING_BATCH))
 
 
 class DatabricksClientSupport:
@@ -106,7 +111,7 @@ class BaseDatabricksFileSystem(
     """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
 
     A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
-    they run in threads with `_sdk`.
+    they run in threads with `_run_in_thread`, which logs each.
     """
 
     protocol = scheme
@@ -164,23 +169,23 @@ class BaseDatabricksFileSystem(
         with contextlib.suppress(Exception):
             self.close()
 
-    async def _sdk(
-        self, api: str, path: str, func: Callable[[WorkspaceClient], T]
-    ) -> T:
-        """Call the blocking Databricks SDK in one of the file system's own threads, so that the event loop goes on.
+    async def _run_in_thread(self, func: Callable[..., T], /, *args, **kwargs) -> T:
+        """Run a blocking call in the file system's own threads, logging it as one request to Databricks.
 
-        `api` and `path` name the request in the debug log.
+        The log names the call and its first argument, the path of most SDK calls.
         """
+        api = getattr(func, "__qualname__", func)
+        path = args[0] if args else None
         try:
-            result = await self._run_in_thread(lambda: func(self.client))
+            result = await super()._run_in_thread(func, *args, **kwargs)
         except Exception as e:
             logger.debug("%s: path=%s, failed=%s", api, path, type(e).__name__)
             raise
         logger.debug("%s: path=%s, ok", api, path)
         return result
 
-    async def _sdk_iter(
-        self, api: str, path: str, func: Callable[[WorkspaceClient], Iterable[T]]
+    async def _iter_in_thread(
+        self, func: Callable[..., Iterable[T]], /, *args, **kwargs
     ) -> AsyncIterator[T]:
         """Iterate an SDK listing, a batch at a time, each taken in the file system's own threads.
 
@@ -188,10 +193,8 @@ class BaseDatabricksFileSystem(
         come, and a folder of many entries is never held whole: the strategies act on the first page while the next
         ones are fetched.
         """
-        entries = iter(await self._sdk(api, path, func))
-        while batch := await self._sdk(
-            api, path, lambda _: list(islice(entries, _LISTING_BATCH))
-        ):
+        entries = iter(await self._run_in_thread(func, *args, **kwargs))
+        while batch := await self._run_in_thread(_next_batch, entries):
             for entry in batch:
                 yield entry
 
