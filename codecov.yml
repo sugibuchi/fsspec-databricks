@@ -1,0 +1,10 @@
+# CI measures coverage from the offline tests only: code reached only by the
+# live tests counts as uncovered. So coverage informs, and never fails a PR.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true

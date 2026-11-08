@@ -285,6 +285,28 @@ inside and outside Databricks. It sends each call to the backend of its path:
 On a Databricks cluster, `DATABRICKS_RUNTIME_VERSION` is set. `DatabricksFileSystem` then serves every path from the
 local file system, unless `use_local_fs_in_workspace=False`.
 
+### Strategies from fsspec-alt-strategies
+
+The recursive operations and the file objects come from
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), a library of filesystem-independent
+strategies for fsspec. Each backend implements only the primitives of its API, and the library does the rest:
+
+- **Tree strategies:** each backend subclasses `TreeFileSystem`, as all three APIs list one directory per request.
+  `find`, `du`, `glob`, `rm`, `copy` and `mv` list many directories at once, and act on files while the listing goes
+  on. A listing streams in pages, so a huge directory is never held whole.
+- **Storage profiles:** each backend declares what its API does in a `StorageProfile`, e.g. whether an upload creates
+  the parent directories. The strategies then skip the requests it makes needless.
+- **Router:** `DatabricksFileSystem` is an `AsyncRoutingFileSystem`. It sends each path to its backend, and copies or
+  moves files between backends with the source's strategy.
+- **File objects:** Volume and DBFS files are adaptive files, whose blocks and parts grow with sequential access. Transactions
+  hold a file's writes back until fsspec's transaction commits.
+- **Monitors:** the operations behind fsspec's methods report their progress to the monitors of the interface
+  package, and can be cancelled.
+
+The strategies are copied into the package rather than installed, so that a release of the library never changes this
+package's behaviour. Their shared interface, `fsspec-alt-strategies`, is installed. "The copy of fsspec-alt-strategies"
+below says how the copy is kept.
+
 ### The SDK for metadata, HTTP for Volume data
 
 Listings, metadata and changes go through the Databricks SDK. Volume file contents go through the Files API directly,
