@@ -16,7 +16,6 @@ from ._contrib.strategy.tree.transfer import tree_transfer
 from ._contrib.strategy.tree.wrapper import SyncTreeWrapper
 from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
 from .dbfs import DBFS
-from .error import file_not_found_error
 from .local import DatabricksLocalFileSystem
 from .path import (
     FileSystemType,
@@ -335,19 +334,14 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     def legacy_dbfs_enabled(self) -> bool:
         """Whether legacy DBFS is enabled in the workspace.
 
-        With the local file system, it is enabled when its local mount exists: no API is called.
+        With the local file system, it is enabled when its local mount exists: no API is called. Otherwise, the
+        legacy DBFS backend asks the workspace setting once. The first call then blocks until it answers, so never
+        call it on the event loop.
         """
+        if not self._uses_local_fs:
+            return self._legacy_fs.legacy_dbfs_enabled
         if self._legacy_dbfs_enabled is None:
-            if self._uses_local_fs:
-                self._legacy_dbfs_enabled = os.path.isdir(self.legacy_dbfs_local_root)
-            else:
-                disabled = (
-                    self.client.workspace_settings_v2.get_public_workspace_setting(
-                        "disable_legacy_dbfs"
-                    ).effective_boolean_val.value
-                )
-                self._legacy_dbfs_enabled = not disabled
-
+            self._legacy_dbfs_enabled = os.path.isdir(self.legacy_dbfs_local_root)
         return self._legacy_dbfs_enabled
 
     @property
@@ -367,11 +361,8 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        # Only legacy DBFS paths need the workspace setting. The first asks it in a blocking call,
-        # on the loop too, and the answer is cached for the instance.
-        elif self.legacy_dbfs_enabled:
-            return self._legacy_fs, path
-        raise file_not_found_error(path)
+        # The backend refuses the paths of a workspace without legacy DBFS, asking the setting in its threads.
+        return self._legacy_fs, path
 
     def _outer(self, fs: AsyncFileSystem, path: str) -> str:
         if self._uses_local_fs:
@@ -379,13 +370,16 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
         return path
 
     async def _roots(self, path: str) -> list[dict[str, Any]]:
-        if not await asyncio.to_thread(lambda: self.legacy_dbfs_enabled):
-            return [dict(volumes_root_info), dict(workspace_root_info)]
-        # The root of legacy DBFS, which holds the mounts of the other backends.
         if self._uses_local_fs:
+            # A stat of the mount, which may be slow, off the loop.
+            enabled = await asyncio.to_thread(lambda: self.legacy_dbfs_enabled)
             fs, inner = self._local_tree, self.legacy_dbfs_local_root
         else:
             fs, inner = self._legacy_fs, "/"
+            enabled = await fs._is_legacy_dbfs_enabled()
+        if not enabled:
+            return [dict(volumes_root_info), dict(workspace_root_info)]
+        # The root of legacy DBFS, which holds the mounts of the other backends.
         return [self._entry(fs, e) for e in await fs._ls(inner, detail=True)]
 
     async def _root_info(self, path: str) -> dict[str, Any]:

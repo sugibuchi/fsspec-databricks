@@ -243,6 +243,16 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
 
     async def _run_in_thread(self, func: Callable[..., T], /, *args, **kwargs) -> T:
         """Run a blocking call in one of `operation_concurrency` threads of the file system's own, unlogged."""
+        loop = asyncio.get_running_loop()
+        # The context passes, e.g. the monitors of the operation.
+        return await loop.run_in_executor(
+            self._thread_pool(),
+            contextvars.copy_context().run,
+            functools.partial(func, *args, **kwargs),
+        )
+
+    def _thread_pool(self) -> ThreadPoolExecutor:
+        """The `operation_concurrency` threads of the file system's own, made on first use."""
         executor = self._executor
         if executor is None:
             executor = ThreadPoolExecutor(
@@ -252,13 +262,7 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
             # Collecting the file system shuts the threads down, without the finalizer keeping it alive.
             weakref.finalize(self, executor.shutdown, wait=False, cancel_futures=True)
             self._executor = executor
-        loop = asyncio.get_running_loop()
-        # The context passes, e.g. the monitors of the operation.
-        return await loop.run_in_executor(
-            executor,
-            contextvars.copy_context().run,
-            functools.partial(func, *args, **kwargs),
-        )
+        return executor
 
     def created(self, path):
         return self.info(path)["created"]

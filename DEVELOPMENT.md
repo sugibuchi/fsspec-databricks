@@ -355,9 +355,10 @@ Whether legacy DBFS is enabled is checked once:
 - with the local file system, by whether `legacy_dbfs_local_root` exists;
 - otherwise, from the workspace setting `disable_legacy_dbfs`.
 
-`_route` is sync, so it asks the workspace setting in a blocking call when it first routes a legacy DBFS path. The
-answer is cached on the instance. On the event loop, that first call blocks the loop for one SDK request. `_roots`
-asks it in a thread instead.
+`_route` asks nothing: it routes every legacy DBFS path to the DBFS backend. The backend asks the workspace setting
+before its first request, in its own threads. Concurrent first requests wait for the same one. The answer is cached on
+the instance, and a copy asks again. Without legacy DBFS, every path of the backend raises `FileNotFoundError`. `_roots`
+uses the same cached answer. Only the sync property `legacy_dbfs_enabled` blocks, when it asks first.
 
 The backends are created on first use with the router's `_backend`, with the file system's client, config and
 options. `close()` closes them.

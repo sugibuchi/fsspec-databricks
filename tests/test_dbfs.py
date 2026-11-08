@@ -1,6 +1,7 @@
 """Tests of `DBFS`, through the SDK over HTTP: on the dummy server, and on the live workspace when it enables legacy
 DBFS."""
 
+import asyncio
 import errno
 from random import randbytes
 
@@ -349,6 +350,44 @@ def test_dbfs_router_without_legacy_dbfs(dummy_client, dummy):
     with pytest.raises(FileNotFoundError):
         fs.info("dbfs:/tmp")
     assert sorted(fs.ls("/", detail=False)) == ["/Volumes", "/Workspace"]
+    # The backend refuses its paths itself, sending no DBFS request.
+    with pytest.raises(FileNotFoundError):
+        DBFS(client=dummy_client).info("/tmp")
+    assert dummy.requests_to("/api/2.0/dbfs/get-status") == []
+
+
+_setting = "/api/2.1/settings/disable_legacy_dbfs"
+
+
+def test_dbfs_router_asks_setting_once(dummy_client, dummy):
+    """The setting is asked once per instance, in the backend's threads, by concurrent first calls too."""
+
+    async def run():
+        fs = DatabricksFileSystem(client=dummy_client, asynchronous=True)
+        await asyncio.gather(*(fs._info("/") for _ in range(2)))
+        for _ in range(3):
+            with pytest.raises(FileNotFoundError):
+                await fs._info("dbfs:/missing")
+        await asyncio.gather(*(fs._exists(f"/missing{i}") for i in range(5)))
+        return fs
+
+    dummy.requests.clear()
+    asyncio.run(run())
+    assert len(dummy.requests_to(_setting)) == 1
+
+    # A new instance asks again.
+    asyncio.run(run())
+    assert len(dummy.requests_to(_setting)) == 2
+
+
+def test_dbfs_setting_not_asked_for_other_backends(dummy_client, dummy):
+    """Volume and Workspace paths never ask the legacy DBFS setting."""
+    fs = DatabricksFileSystem(client=dummy_client)
+    dummy.requests.clear()
+    for path in ["/Volumes/c/s/v/missing", "/Workspace/missing"]:
+        with pytest.raises(FileNotFoundError):
+            fs.info(path)
+    assert dummy.requests_to(_setting) == []
 
 
 ### The adaptive files' requests, on the dummy server, which refuses over 1 MB per read, put and add-block

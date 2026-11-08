@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import concurrent.futures
 import contextlib
+import contextvars
 import functools
 import logging
 from io import UnsupportedOperation
@@ -24,6 +26,7 @@ from .base import DatabricksTreeFileSystem
 from .error import (
     error_mapping,
     file_exists_error,
+    file_not_found_error,
     is_a_directory_error,
     not_a_directory_error,
     not_empty_error,
@@ -105,6 +108,69 @@ class DBFS(DatabricksTreeFileSystem):
             io_concurrency=io_concurrency,
             **storage_options,
         )
+        # The workspace setting, asked before the first request: runtime attributes, so a copy asks again.
+        self._legacy_dbfs_enabled: bool | None = None
+        self._legacy_dbfs_request: concurrent.futures.Future[bool] | None = None
+
+    ### Whether the workspace has legacy DBFS
+    def _get_legacy_dbfs_enabled(self) -> bool:
+        """Ask the workspace setting `disable_legacy_dbfs`, blocking: one request, logged as `_sdk` logs."""
+        api = "settings.get_public_workspace_setting"
+        try:
+            setting = self.client.workspace_settings_v2.get_public_workspace_setting(
+                "disable_legacy_dbfs"
+            )
+        except Exception as e:
+            logger.debug(
+                "%s: name=disable_legacy_dbfs, failed=%s", api, type(e).__name__
+            )
+            raise
+        logger.debug("%s: name=disable_legacy_dbfs, ok", api)
+        return not setting.effective_boolean_val.value
+
+    def _legacy_dbfs_future(self) -> concurrent.futures.Future[bool]:
+        """The one request of the setting, in the file system's threads, shared by concurrent first callers.
+
+        A concurrent future, not an asyncio one, so that callers on any loop, or none, wait for the same request.
+        """
+        future = self._legacy_dbfs_request
+        if future is None or (future.done() and future.exception() is not None):
+            # A failed request is asked again by the next caller.
+            future = self._thread_pool().submit(
+                contextvars.copy_context().run, self._get_legacy_dbfs_enabled
+            )
+            self._legacy_dbfs_request = future
+        return future
+
+    async def _is_legacy_dbfs_enabled(self) -> bool:
+        """Whether legacy DBFS is enabled, asked once without blocking the loop."""
+        if self._legacy_dbfs_enabled is None:
+            # Shielded: a cancelled caller leaves the request to the others.
+            enabled = await asyncio.shield(
+                asyncio.wrap_future(self._legacy_dbfs_future())
+            )
+            self._legacy_dbfs_enabled = enabled
+        return self._legacy_dbfs_enabled
+
+    @property
+    def legacy_dbfs_enabled(self) -> bool:
+        """Whether legacy DBFS is enabled in the workspace.
+
+        The first call asks the workspace setting and blocks until it answers. Never call it on the event loop.
+        """
+        if self._legacy_dbfs_enabled is None:
+            self._legacy_dbfs_enabled = self._legacy_dbfs_future().result()
+        return self._legacy_dbfs_enabled
+
+    async def _check_legacy_dbfs(self, path: str) -> None:
+        """Refuse every path of a workspace without legacy DBFS, as missing."""
+        if not await self._is_legacy_dbfs_enabled():
+            raise file_not_found_error(path)
+
+    async def _sdk(self, api, path, func):
+        # Every request but range reads goes through here, so the check comes first.
+        await self._check_legacy_dbfs(path)
+        return await super()._sdk(api, path, func)
 
     ### File/directory information
     async def _info(self, path, **kwargs):
@@ -300,6 +366,8 @@ class DbfsReadableFile(AdaptiveReadableFile):
         self._dbfs_path = parse_dbfs_path(path)
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
+        # Opening checked it already: answered from the cache, unless the file was made directly.
+        await self.fs._check_legacy_dbfs(self.path)
         chunks = []
         offset = start
         while offset < end:

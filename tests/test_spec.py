@@ -198,7 +198,7 @@ def test_dbx_fs_copies_between_backends(routed):
 def test_dbx_fs_root_without_legacy_dbfs(routed):
     """Without legacy DBFS, the root holds the Volumes and Workspace roots, and cannot be changed."""
     fs, _, dbfs = routed
-    fs._legacy_dbfs_enabled = False
+    fs._legacy_fs._legacy_dbfs_enabled = False
     assert fs.ls("/", detail=False) == ["/Volumes", "/Workspace"]
     assert fs.info("dbfs:/")["type"] == "directory"
     assert not fs.exists(dbfs)
