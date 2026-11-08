@@ -99,11 +99,12 @@ jobs:
         cloud: [aws, azure, gcp]
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      # The environment's DATABRICKS_AUTH_TYPE chooses identity federation.
-      # Without it, the client secret is used, and with it never passed.
-      DATABRICKS_AUTH_TYPE: ${{ vars.DATABRICKS_AUTH_TYPE || 'oauth-m2m' }}
+      # Each environment holds the settings of its own authentication, e.g.
+      # DATABRICKS_AUTH_TYPE for identity federation, or a client secret.
+      # Those it lacks come empty, and the script running the tests unsets them.
+      DATABRICKS_AUTH_TYPE: ${{ vars.DATABRICKS_AUTH_TYPE }}
       DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ !vars.DATABRICKS_AUTH_TYPE && secrets.DATABRICKS_CLIENT_SECRET || '' }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       DATABRICKS_TOKEN_AUDIENCE: ${{ vars.DATABRICKS_TOKEN_AUDIENCE }}
       ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
       VOLUME_ROOT: ${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}

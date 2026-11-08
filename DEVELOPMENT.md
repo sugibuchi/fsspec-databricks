@@ -81,7 +81,8 @@ Without the options, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS
 | `test_utils.py`     | `utils.py`                                      |
 
 A backend test takes the `client` fixture, or one built on it. It runs once per API chosen: on the dummy server, and
-on the live workspace, skipped without working credentials. The live DBFS tests also skip when the workspace disables
+on the live workspace. Live tests are opt in, and once asked for, a workspace that cannot be reached is an error, not
+a skip. The live DBFS tests also skip when the workspace disables
 legacy DBFS. No test workspace enables it, so DBFS is tested on the dummy server only.
 
 Some tests make sense on one side only:
@@ -211,7 +212,7 @@ The variable `DATABRICKS_AUTH_TYPE` chooses how the tests authenticate:
 
 | `DATABRICKS_AUTH_TYPE` | Authentication                                   | Also needs                                                      |
 |------------------------|--------------------------------------------------|-----------------------------------------------------------------|
-| Not set                | The service principal's client secret            | `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (secrets) |
+| Not set                | What the SDK resolves, e.g. a client secret      | `DATABRICKS_CLIENT_ID` and `DATABRICKS_CLIENT_SECRET` (secrets) |
 | `github-oidc`          | Databricks federation policy                     | `DATABRICKS_CLIENT_ID` (secret), `DATABRICKS_TOKEN_AUDIENCE`    |
 | `github-oidc-azure`    | Federated credential of a Microsoft Entra ID app | `ARM_CLIENT_ID`, the app's ID                                   |
 
@@ -226,7 +227,8 @@ the issuer `https://token.actions.githubusercontent.com`.
 - **`github-oidc-azure`**: a federated credential on the Entra ID app, with the audience `api://AzureADTokenExchange`.
   The app is the workspace's service principal. This needs no access to the account console.
 
-With federation, the client secret is not passed to the tests, even if the environment still has one.
+Keep only the settings of the environment's own authentication: the SDK refuses a configuration that matches several.
+A service principal authenticating with a client secret needs the OAuth scope `all-apis`.
 
 At the repository level, the secret `CODECOV_TOKEN` is the repository's upload token for
 [Codecov](https://about.codecov.io/).

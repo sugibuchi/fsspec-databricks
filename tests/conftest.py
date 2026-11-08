@@ -231,9 +231,10 @@ def dummy(api, dummy_api):
 
 @pytest.fixture(scope="session")
 def live_client():
-    """A `WorkspaceClient` of the live workspace, or a skip without working credentials.
+    """A `WorkspaceClient` of the live workspace.
 
-    In CI, a live run without working credentials is an error: a skip would pass unseen.
+    Live tests are opt in, with `--api` or `FSSPEC_DATABRICKS_TEST_API`. Once asked for, a workspace that cannot be
+    reached is an error, not a skip that would pass unseen.
     """
     try:
         client = WorkspaceClient()
@@ -241,9 +242,7 @@ def live_client():
     except (
         Exception
     ) as e:  # The SDK raises ValueError, among others, without a configuration.
-        if os.environ.get("CI"):
-            pytest.fail(f"No live Databricks workspace: {e}", pytrace=False)
-        pytest.skip(f"No live Databricks workspace: {e}")
+        pytest.fail(f"No live Databricks workspace: {e}", pytrace=False)
     return client
 
 

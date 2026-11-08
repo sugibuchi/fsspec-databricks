@@ -3,6 +3,13 @@
 # github-oidc exchanges a new token for each request, while file-oidc caches the exchanged token.
 set -euo pipefail
 
+# A variable or secret the environment does not have comes as an empty string: unset, the SDK resolves without it.
+for name in DATABRICKS_AUTH_TYPE DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET DATABRICKS_TOKEN_AUDIENCE ARM_CLIENT_ID; do
+  if [[ -z "${!name:-}" ]]; then
+    unset "$name"
+  fi
+done
+
 if [[ "${DATABRICKS_AUTH_TYPE:-}" != "github-oidc" ]]; then
   exec "$@"
 fi
