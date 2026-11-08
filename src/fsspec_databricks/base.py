@@ -11,7 +11,6 @@ from typing import Any, TypeVar
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
-from fsspec.spec import AbstractFileSystem
 
 from ._contrib.strategy.tree.filesystem import TreeFileSystem
 from .error import file_exists_error, not_a_directory_error
@@ -98,63 +97,6 @@ class DatabricksClientSupport:
             else:
                 self._active_client = WorkspaceClient(config=self.config)
         return self._active_client
-
-
-class AbstractDatabricksFileSystem(DatabricksClientSupport, AbstractFileSystem):
-    """Base class of the synchronous Databricks file systems: the client, closing and the protocol."""
-
-    protocol = scheme
-    root_marker = "/"
-
-    def __init__(
-        self,
-        client: WorkspaceClient | None = None,
-        config: Config | None = None,
-        config_params: dict[str, Any] | None = None,
-        **storage_options,
-    ):
-        """Initialize the file system.
-
-        Parameters
-        ----------
-        client : WorkspaceClient, optional
-            A Databricks SDK `WorkspaceClient` to call the APIs with.
-        config : Config, optional
-            A Databricks SDK `Config` to authenticate with.
-        config_params : dict[str, Any], optional
-            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
-        **storage_options
-            Standard fsspec storage options.
-        """
-        # No Databricks file system caches listings.
-        super().__init__(use_listings_cache=False, **storage_options)
-
-        self._init_client(client, config, config_params)
-
-        _register_cleanup(self)
-
-    def close(self):
-        """Close the file system and release any resources."""
-        if not self.closed:
-            self._close_client()
-
-    def __enter__(self):
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    def __del__(self):
-        self.close()
-
-    @classmethod
-    def _strip_protocol(cls, path):
-        return strip_scheme(path)
-
-    def unstrip_protocol(self, name: str) -> str:
-        return unstrip_scheme(name)
 
 
 class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
@@ -322,7 +264,6 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
 
 
 __all__ = [
-    "AbstractDatabricksFileSystem",
     "DatabricksClientSupport",
     "DatabricksTreeFileSystem",
     "root_dir_info",

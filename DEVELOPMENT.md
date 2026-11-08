@@ -74,7 +74,7 @@ The options combine, e.g. `--api=live --fs=volume`. A test id names its backends
 | File                | Tests of                                          |
 |---------------------|---------------------------------------------------|
 | `test_spec.py`      | `DatabricksFileSystem` and its routing            |
-| `test_base.py`      | `AbstractDatabricksFileSystem`                    |
+| `test_base.py`      | `DatabricksTreeFileSystem` and the client mixin   |
 | `test_volume.py`    | `VolumeFileSystem` and its file objects           |
 | `test_workspace.py` | `WorkspaceFileSystem`                             |
 | `test_dbfs.py`      | `DBFS`                                            |
@@ -373,8 +373,7 @@ The router needs async backends. The local file system is sync, so the library's
 - `close()`, also called at exit and on garbage collection;
 - the `dbfs` protocol: `_strip_protocol` and `unstrip_protocol` use `path.py`.
 
-`AbstractDatabricksFileSystem` is a synchronous fsspec file system with the mixin, for file systems without a library
-base. `DatabricksFileSystem` takes the mixin with the library's `AsyncRoutingFileSystem` instead.
+`DatabricksFileSystem` takes the mixin with the library's `AsyncRoutingFileSystem`.
 
 `DatabricksTreeFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 

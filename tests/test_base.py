@@ -7,25 +7,18 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from fsspec_alt_strategies_common import StorageProfile
 
-from fsspec_databricks.base import (
-    AbstractDatabricksFileSystem,
-    DatabricksTreeFileSystem,
-)
-
-
-class DummyDatabricksFileSystem(AbstractDatabricksFileSystem):
-    pass
+from fsspec_databricks.base import DatabricksTreeFileSystem
 
 
 class DummyTreeFileSystem(DatabricksTreeFileSystem):
-    # The threads need none of the primitives.
+    # The client and the threads need none of the primitives.
     storage_profile = StorageProfile()
     _cp_file = _info = _ls = _open = _rm_file = _rmdir = open_async = None
 
 
-def test_abstract_dbx_fs_init(dummy_client: WorkspaceClient):
+def test_tree_fs_client(dummy_client: WorkspaceClient):
     client = dummy_client
-    fs = DummyDatabricksFileSystem(config_params={"a": "b"})
+    fs = DummyTreeFileSystem(config_params={"a": "b"})
 
     assert fs.config is not None
     assert fs.client is not None
@@ -33,7 +26,7 @@ def test_abstract_dbx_fs_init(dummy_client: WorkspaceClient):
     assert fs._client is None
     assert fs._config_params == {"a": "b"}
 
-    fs = DummyDatabricksFileSystem(config=client.config)
+    fs = DummyTreeFileSystem(config=client.config)
     assert fs.config is client.config
     assert fs.client is not None
     assert fs.client is not client
@@ -41,7 +34,7 @@ def test_abstract_dbx_fs_init(dummy_client: WorkspaceClient):
     assert fs._client is None
     assert fs._config_params == {}
 
-    fs = DummyDatabricksFileSystem(client=client)
+    fs = DummyTreeFileSystem(client=client)
     assert fs.config is client.config
     assert fs.client is client
     assert fs._config is None
@@ -49,8 +42,8 @@ def test_abstract_dbx_fs_init(dummy_client: WorkspaceClient):
     assert fs._config_params == {}
 
 
-def test_abstract_dbx_fs_close():
-    fs = DummyDatabricksFileSystem()
+def test_tree_fs_close():
+    fs = DummyTreeFileSystem()
     _ = fs.config
     _ = fs.client
 
@@ -71,15 +64,15 @@ def test_abstract_dbx_fs_close():
             pass
 
 
-def test_abstract_dbx_fs_serialization():
-    fs = DummyDatabricksFileSystem()
+def test_tree_fs_serialization():
+    fs = DummyTreeFileSystem()
     _ = fs.config
     _ = fs.client
 
     serialized = pickle.dumps(fs)
     fs2 = pickle.loads(serialized)
 
-    assert isinstance(fs2, DummyDatabricksFileSystem)
+    assert isinstance(fs2, DummyTreeFileSystem)
     assert fs is not fs2
     assert fs.config is not fs2.config
     assert fs.client is not fs2.client

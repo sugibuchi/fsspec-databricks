@@ -21,10 +21,7 @@ from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
 from fsspec.asyn import get_loop, sync
 
-from fsspec_databricks.base import (
-    AbstractDatabricksFileSystem,
-    DatabricksTreeFileSystem,
-)
+from fsspec_databricks.base import DatabricksTreeFileSystem
 from fsspec_databricks.spec import DatabricksFileSystem
 from fsspec_databricks.volume import VolumeFileSystem
 
@@ -62,7 +59,6 @@ def pytest_configure(config):
     load_dotenv()
     logging.getLogger("databricks.sdk").setLevel(logging.INFO)
     logging.getLogger("urllib3").setLevel(logging.INFO)
-    AbstractDatabricksFileSystem.cachable = False
     DatabricksTreeFileSystem.cachable = False
     VolumeFileSystem.cachable = False
     DatabricksFileSystem.cachable = False
