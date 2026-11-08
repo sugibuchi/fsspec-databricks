@@ -134,8 +134,20 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
     `_contrib.strategy`. Its files call the Files API with aiohttp, the rest the SDK.
     """
 
-    storage_profile = StorageProfile(fs_type="tree")
-    """Only the tree family is declared: the Files API has no server-side copy or rename."""
+    storage_profile = StorageProfile(
+        fs_type="tree",
+        parents_required=False,
+        implicit_folders=False,
+        renames_files=False,
+        renames_folders=False,
+    )
+    """What the Files API does.
+
+    - It lists one directory per request, so the tree strategies suit it.
+    - An upload creates the file's missing parent directories, as checked on a live workspace.
+    - Directories are objects of their own: an empty one exists, and is deleted by a request of its own.
+    - It has no server-side copy or rename, of files or directories.
+    """
 
     io_concurrency: int = 24
     """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""

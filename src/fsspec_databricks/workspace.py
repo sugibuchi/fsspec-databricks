@@ -82,9 +82,19 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
     """
 
     storage_profile = StorageProfile(
-        fs_type="tree", implicit_folders=False, renames_files=False
+        fs_type="tree",
+        parents_required=True,
+        implicit_folders=False,
+        renames_files=False,
+        renames_folders=False,
     )
-    """Directories are objects of their own, and the Workspace API has no move."""
+    """What the Workspace API does.
+
+    - It lists one directory per request, so the tree strategies suit it.
+    - An import into a missing directory fails: the parents are made first, by `mkdirs`.
+    - Directories are objects of their own: an empty one exists, and is deleted by a request of its own.
+    - It has no move, of files or directories.
+    """
 
     def __init__(
         self,

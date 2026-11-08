@@ -68,8 +68,20 @@ class DBFS(BaseDatabricksFileSystem):
     deletes each directory by the API's own recursive delete, `_rm_tree`.
     """
 
-    storage_profile = StorageProfile(fs_type="tree", renames_folders=True)
-    """The API's move moves a directory with all in it, in one request."""
+    storage_profile = StorageProfile(
+        fs_type="tree",
+        parents_required=False,
+        implicit_folders=False,
+        renames_files=True,
+        renames_folders=True,
+    )
+    """What the legacy DBFS API does.
+
+    - It lists one directory per request, so the tree strategies suit it.
+    - Writing a file creates its missing parent directories, as `mkdirs` does.
+    - Directories are objects of their own: an empty one exists.
+    - Its move renames a file, or a directory with all in it, in one request.
+    """
 
     def __init__(
         self,
