@@ -36,11 +36,8 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
 | `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                       | `8`     |
 
-On a workspace without legacy DBFS, a DBFS path raises the API's refusal as `PermissionError`. `ls("/")` then lists
-`/Volumes` and `/Workspace`.
-
 Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
-`16` and `8`. Their files are transferred whole or one block at a time, so `io_concurrency` does not limit them.
+`16` and `8`. Workspace files are transferred whole, so `io_concurrency` does not limit them.
 
 Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
 
@@ -57,13 +54,13 @@ logging.getLogger("fsspec_databricks").setLevel(logging.DEBUG)
 
 Retries and aborted uploads are logged as warnings.
 
-Operations, such as `find`, `rm` or `copy`, are reported by the monitors of `fsspec_alt_strategies_common`. For
-example, `LoggingMonitor` logs the operations run in a `monitoring` block:
+Operations, such as `find`, `rm` or `copy`, are reported by the monitors of `fsspec_alt_strategies`, a dependency.
+For example, `LoggingMonitor` logs the operations run in a `monitoring` block:
 
 ```python
 import logging
 
-from fsspec_alt_strategies_common import LoggingMonitor, monitoring
+from fsspec_alt_strategies import LoggingMonitor, monitoring
 
 logger = logging.getLogger("my_app")
 
@@ -360,6 +357,10 @@ with fs.open("dbfs:/mnt/my-mount/data.csv", "rb") as f:
 
 - A move is the API's own, one request even for a folder.
 - `rmdir` refuses a folder that is not empty.
-- Files are read and written in order: `ab`, `r+b` and seeking are not supported.
+- Reads fetch ranges of up to 1 MB concurrently, limited by `io_concurrency`.
+- Files are written in order: `ab` and `r+b` are not supported.
+- On a workspace without legacy DBFS, DBFS paths raise `PermissionError`, and `ls("/")` lists `/Volumes` and
+  `/Workspace`.
 
-Databricks has deprecated legacy DBFS. Legacy DBFS support is tested mostly on a dummy server, as most workspaces disable it.
+Databricks has deprecated legacy DBFS. Its support is tested offline only, on a simulated API, as no test workspace
+enables it.

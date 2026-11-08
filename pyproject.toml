@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fsspec-databricks"
 dynamic = ["version"]
-description = "`fsspec`-based file system interface for Databricks file system\"s\""
+description = "An fsspec file system for Databricks: Unity Catalog Volumes, Workspace files and legacy DBFS"
 authors = [
     { name = "Tsuyoshi SUGIBUCHI", email = "sugibuchi@gmail.com" }
 ]
@@ -36,7 +36,7 @@ classifiers = [
 
 
 dependencies = [
-    "fsspec",
+    "fsspec>=2024.6.0",
     "databricks-sdk>=0.156.0",
     "aiohttp>3.12",
     # The interface of the strategies copied into _contrib/strategy: see DEVELOPMENT.md.
@@ -75,9 +75,6 @@ source = [
 source = "vcs"
 raw-options = { 'version_scheme' = 'post-release' }
 
-[tool.hatch.metadata]
-# The interface of the copied strategies comes from git.
-allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
 # Files for development only

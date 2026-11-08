@@ -310,7 +310,6 @@ class DbfsReadableFile(AdaptiveReadableFile):
         self._dbfs_path = parse_dbfs_path(path)
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
-        # Opening checked it already: answered from the cache, unless the file was made directly.
         chunks = []
         offset = start
         while offset < end:
@@ -372,7 +371,7 @@ class DbfsWritableFile(AdaptiveWritableFile):
         self._handle: int | None = None
 
     async def _call(self, func: Callable[..., Any], *args, **kwargs) -> Any:
-        """Call the SDK in the file system's threads, once the workspace is known to have legacy DBFS."""
+        """Call the SDK in the file system's threads, its errors mapped to `OSError`s."""
         with error_mapping(self.path):
             return await self.fs._run_in_thread(func, *args, **kwargs)
 

@@ -76,9 +76,8 @@ for authentication.
 | `dbfs:/Workspace/path`                                 | Workspace files                             |
 | `dbfs:/path`, any other                                | Legacy DBFS                                 |
 
-POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and `/path`. Databricks maps `/Workspace`
-to Workspace files only in workspaces with legacy DBFS disabled. See
-[Databricks' documentation](https://docs.databricks.com/aws/en/files/).
+POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and `/path`. See
+[Databricks' documentation](https://docs.databricks.com/aws/en/files/) for these paths.
 
 ---
 
@@ -88,7 +87,7 @@ to Workspace files only in workspaces with legacy DBFS disabled. See
 * `databricks-sdk`: 0.156.0 or later
 * `fsspec`: 2024.6.0 or later
 * `aiohttp`: 3.12.0 or later
-* Tested on Databricks Free Edition, Azure Databricks and Databricks on Google Cloud
+* Tested live on Databricks Free Edition on AWS, Azure Databricks and Databricks on Google Cloud
 
 ---
 
@@ -98,8 +97,7 @@ to Workspace files only in workspaces with legacy DBFS disabled. See
 
 * Writing Volume files uses the Files API's multipart upload. The Databricks REST reference does not document it, but
   the official Databricks SDK for Python uses it, as an experimental feature.
-* Databricks on AWS is not tested.
-* Legacy DBFS is not tested.
+* Legacy DBFS is tested offline only, on a simulated API: no test workspace enables it.
 
 ---
 

@@ -135,7 +135,7 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
     """
 
     storage_profile = StorageProfile(fs_type="tree")
-    """Nothing is declared: the Files API has no server-side copy or rename."""
+    """Only the tree family is declared: the Files API has no server-side copy or rename."""
 
     io_concurrency: int = 24
     """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""
@@ -428,8 +428,8 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
                 path, "Catalogs, schemas and volumes are not deleted as directories"
             )
 
-        # Checked first, as the old precondition did: deleting a missing directory
-        # succeeds on some clouds, e.g. AWS, where rmdir must raise FileNotFoundError.
+        # Checked first: deleting a missing directory succeeds on some clouds, e.g.
+        # AWS, where rmdir must raise FileNotFoundError.
         info = await self._info(path)
         if info["type"] != "directory":
             raise not_a_directory_error(path)
