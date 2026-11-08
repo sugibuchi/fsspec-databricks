@@ -1,3 +1,10 @@
+"""Fixtures and options of the tests.
+
+`--api` chooses where the backend tests run: on the dummy server, on the live workspace, or both. `--fs` chooses the
+backends tested. Without them, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS` choose, from the
+environment or `.env`. A test of a backend takes `client`, or a fixture built on it, and runs once per API chosen.
+"""
+
 import asyncio
 import logging
 import os
@@ -12,22 +19,141 @@ import pyarrow.parquet as pq
 import pytest
 from aiohttp import ClientSession
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.errors import NotFound
 from dotenv import load_dotenv
+from fsspec.asyn import get_loop, sync
 
-from fsspec_databricks.base import AbstractDatabricksFileSystem
-from fsspec_databricks.path import parse_volume_path
+from fsspec_databricks.base import BaseDatabricksFileSystem
+from fsspec_databricks.spec import DatabricksFileSystem
+from fsspec_databricks.volume import VolumeFileSystem
 
-from .dummy_api import dummy_context, serve_app
+from .dummy_api import dummy_storage, serve_app
+from .utils import (
+    legacy_dbfs_disabled,
+    prepare_dbfs_test_root,
+    prepare_volume_test_root,
+    prepare_workspace_test_root,
+)
 
 log = logging.getLogger(__name__)
+
+_apis = {"dummy": ["dummy"], "live": ["live"], "both": ["dummy", "live"]}
+_backends = ("volume", "workspace", "dbfs")
+_no_config_file = os.devnull + ".none"
+
+
+def pytest_addoption(parser):
+    # Without the options, the environment chooses, .env included: read when used, as .env is loaded after this.
+    parser.addoption(
+        "--api",
+        choices=sorted(_apis),
+        default=None,
+        help="Where the backend tests run: the dummy server, the live workspace, or both. "
+        "Default: $FSSPEC_DATABRICKS_TEST_API, else dummy.",
+    )
+    parser.addoption(
+        "--fs",
+        action="append",
+        default=None,
+        help="The backends tested, comma-separated or repeated: volume, workspace, dbfs. "
+        "Default: $FSSPEC_DATABRICKS_TEST_FS, else all.",
+    )
 
 
 def pytest_configure(config):
     load_dotenv()
     logging.getLogger("databricks.sdk").setLevel(logging.INFO)
     logging.getLogger("urllib3").setLevel(logging.INFO)
-    AbstractDatabricksFileSystem.cachable = False
+    BaseDatabricksFileSystem.cachable = False
+    VolumeFileSystem.cachable = False
+    DatabricksFileSystem.cachable = False
+    config.addinivalue_line("markers", "dummy_only: runs on the dummy server only")
+    config.addinivalue_line("markers", "live_only: runs on the live workspace only")
+    config.addinivalue_line(
+        "markers", "backend(*names): the backends a test needs: volume, workspace, dbfs"
+    )
+
+
+def _selected_api(config) -> str:
+    chosen = config.getoption("--api") or os.environ.get(
+        "FSSPEC_DATABRICKS_TEST_API", "dummy"
+    )
+    if chosen not in _apis:
+        raise pytest.UsageError(
+            f"Unknown FSSPEC_DATABRICKS_TEST_API: {chosen}, not one of {', '.join(sorted(_apis))}"
+        )
+    return chosen
+
+
+def _selected_backends(config) -> set[str]:
+    values = config.getoption("--fs") or [
+        os.environ.get("FSSPEC_DATABRICKS_TEST_FS", "")
+    ]
+    names = {n.strip() for v in values for n in v.split(",")}
+    names.discard("")
+    unknown = names - set(_backends)
+    if unknown:
+        raise pytest.UsageError(
+            f"Unknown --fs or FSSPEC_DATABRICKS_TEST_FS backends: {', '.join(sorted(unknown))}"
+        )
+    return names or set(_backends)
+
+
+def pytest_generate_tests(metafunc):
+    """Parametrize each backend test by its APIs, and tag it with its backends, both shown in its id."""
+    names = [n for m in metafunc.definition.iter_markers("backend") for n in m.args]
+    if names:
+        metafunc.parametrize("backend", ["+".join(names)], indirect=True)
+
+    if "api" not in metafunc.fixturenames:
+        return
+    chosen = _selected_api(metafunc.config)
+    only = None
+    if metafunc.definition.get_closest_marker("live_only"):
+        only = "live"
+    if metafunc.definition.get_closest_marker("dummy_only") or (
+        "dummy" in metafunc.fixturenames
+    ):
+        only = "dummy"
+    if only and only not in _apis[chosen]:
+        reason = f"{only} only, not --api={chosen}"
+        values = [pytest.param(only, marks=pytest.mark.skip(reason=reason))]
+    else:
+        values = [only] if only else _apis[chosen]
+    metafunc.parametrize("api", values, scope="session")
+
+
+def pytest_collection_modifyitems(config, items):
+    selected = _selected_backends(config)
+    keep, drop = [], []
+    for item in items:
+        names = {n for m in item.iter_markers("backend") for n in m.args}
+        (drop if names - selected else keep).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
+
+
+@pytest.fixture(autouse=True)
+def backend(request):
+    """The backends of the test, from its `backend` marker, so that its id names them."""
+    return getattr(request, "param", None)
+
+
+@pytest.fixture(autouse=True)
+def _api_environment(request, monkeypatch):
+    """Point default clients at the dummy server, unless the test runs live, so that no test needs credentials."""
+    if "api" in request.fixturenames and request.getfixturevalue("api") == "live":
+        return
+    url = request.getfixturevalue("dummy_api")
+    for name in list(os.environ):
+        if name.startswith("DATABRICKS_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("DATABRICKS_HOST", url)
+    monkeypatch.setenv("DATABRICKS_TOKEN", "dummy")
+    monkeypatch.setenv("DATABRICKS_AUTH_TYPE", "pat")
+    monkeypatch.setenv("DATABRICKS_CONFIG_FILE", _no_config_file)
+    # The dummy answers the probe: the storage proxy is unavailable unless a test says otherwise.
+    monkeypatch.setattr(VolumeFileSystem, "_storage_proxy_hostname", url)
 
 
 def _event_loop(thread_name: str):
@@ -48,27 +174,20 @@ def _event_loop(thread_name: str):
             loop.close()
 
     thread = Thread(name=thread_name, target=run, daemon=True)
-    log.debug("Starting thread for event loop: %s", thread_name)
     thread.start()
     ready.wait(timeout=5.0)
 
     if not loop or not loop.is_running():
         raise RuntimeError(f"Event loop in thread {thread_name} failed to start")
 
-    log.debug("Event loop in thread %s is ready: %s", thread_name, loop)
-
     try:
         yield loop
     finally:
         if loop and not loop.is_closed():
-            log.debug("Stopping event loop in thread: %s", thread_name)
             loop.call_soon_threadsafe(loop.stop)
-        log.debug("Waiting for event loop thread %s to stop", thread_name)
         thread.join(timeout=5.0)
         if thread.is_alive():
             raise RuntimeError(f"Event loop thread {thread_name} failed to stop")
-        else:
-            log.debug("Event loop thread %s has stopped", thread_name)
 
 
 @pytest.fixture(scope="session")
@@ -76,44 +195,101 @@ def server_event_loop():
     yield from _event_loop("server-event-loop")
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def client_event_loop():
-    yield from _event_loop("client-event-loop")
+    """fsspec's event loop, which the file systems and their files run on."""
+    return get_loop()
 
 
 @pytest.fixture(scope="session")
 def dummy_api(server_event_loop):
+    """The URL of the dummy server."""
     yield from serve_app(server_event_loop)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
+def dummy_client(dummy_api):
+    """A `WorkspaceClient` of the dummy server."""
+    return WorkspaceClient(
+        host=dummy_api, token="dummy", auth_type="pat", config_file=_no_config_file
+    )
+
+
+@pytest.fixture
+def dummy(api, dummy_api):
+    """The dummy server's state, with its switches and the requests it served, reset after the test.
+
+    A test taking it runs on the dummy server only.
+    """
+    storage = dummy_storage()
+    storage.requests.clear()
+    try:
+        yield storage
+    finally:
+        storage.reset()
+
+
+@pytest.fixture(scope="session")
+def live_client():
+    """A `WorkspaceClient` of the live workspace.
+
+    Live tests are opt in, with `--api` or `FSSPEC_DATABRICKS_TEST_API`. Once asked for, a workspace that cannot be
+    reached is an error, not a skip that would pass unseen.
+    """
+    # The SDK asks for the scope all-apis unless given others, and has no environment variable for them. A secret
+    # limited to some scopes refuses all-apis: FSSPEC_DATABRICKS_TEST_SCOPES names them, comma or space separated.
+    scopes = os.environ.get("FSSPEC_DATABRICKS_TEST_SCOPES") or None
+    try:
+        client = WorkspaceClient(scopes=scopes)
+        client.current_user.me()
+    except (
+        Exception
+    ) as e:  # The SDK raises ValueError, among others, without a configuration.
+        pytest.fail(f"No live Databricks workspace: {e}", pytrace=False)
+    return client
+
+
+@pytest.fixture(scope="session")
+def client(api, request) -> WorkspaceClient:
+    """The client of the API the test runs on: the dummy server's, or the live workspace's."""
+    return request.getfixturevalue(f"{api}_client")
+
+
+@pytest.fixture(scope="session")
+def volume_test_root(client):
+    return prepare_volume_test_root(client)
+
+
+@pytest.fixture(scope="session")
+def workspace_test_root(client):
+    return prepare_workspace_test_root(client)
+
+
+@pytest.fixture(scope="session")
+def dbfs_client(client, api) -> WorkspaceClient:
+    """The client, or a skip when the workspace disables legacy DBFS."""
+    if legacy_dbfs_disabled(client):
+        pytest.skip(f"The {api} workspace disables legacy DBFS")
+    return client
+
+
+@pytest.fixture(scope="session")
+def dbfs_test_root(dbfs_client):
+    return prepare_dbfs_test_root(dbfs_client)
+
+
+@pytest.fixture
 def aiohttp_session(dummy_api, client_event_loop):
-    """A function-scoped aiohttp ClientSession connected to the dummy API server."""
+    """A function-scoped aiohttp ClientSession on fsspec's loop, for the dummy server."""
 
     async def _create():
         return ClientSession()
 
-    session = asyncio.run_coroutine_threadsafe(_create(), client_event_loop).result()
+    session = sync(client_event_loop, _create)
     try:
         yield session
     finally:
-        asyncio.run_coroutine_threadsafe(session.close(), client_event_loop).result()
-
-
-@pytest.fixture(scope="function")
-def dummy_api_context(dummy_api):
-    context = dummy_context()
-    try:
-        yield context
-    finally:
-        context.files.clear()
-        context.multipart_upload_sessions.clear()
-        context.resumable_upload_sessions.clear()
-        context.get_file_errors.clear()
-
-        context.check_signed_url = False
-        context.upload_mode = "multipart"
-        context.abort_supported = True
+        sync(client_event_loop, session.close)
 
 
 @pytest.fixture(scope="session")
@@ -136,85 +312,3 @@ def dummy_table_parquet(dummy_table):
         data = f.read()
 
     return data
-
-
-@pytest.fixture(scope="session")
-def client():
-    return WorkspaceClient()
-
-
-default_volume_test_root = "/Volumes/fsspec_databricks_test/fsspec_dbx_test/test/local"
-
-
-@pytest.fixture(scope="session")
-def volume_test_root(client):
-    path = os.getenv(
-        "FSSPEC_DATABRICKS_VOLUME_TEST_ROOT",
-        default_volume_test_root,
-    )
-
-    path = "/" + path.strip("/")
-
-    # Changed f-string logging to lazy-format
-    log.info("Preparing volume test root: %s", path)
-
-    catalog, schema, volume, _, fullpath = parse_volume_path(path)
-
-    # Check existing of the UC volume for tests
-    client.volumes.read(f"{catalog}.{schema}.{volume}")
-
-    try:
-        client.files.get_directory_metadata(fullpath)
-    except NotFound:
-        # Directory does not exist, create it
-        client.files.create_directory(fullpath)
-        # Changed f-string logging to lazy-format
-        log.info("Volume test root has been created: %s", path)
-        return path
-
-    for i in client.files.list_directory_contents(directory_path=fullpath):
-        try:
-            client.dbfs.delete(i.path, recursive=True)
-        except NotFound:  # Strange but NotFound sometimes thrown on Databricks on GCP
-            if i.is_directory:
-                client.files.delete_directory(i.path)
-            else:
-                client.files.delete(i.path)
-
-    # Changed f-string logging to lazy-format
-    log.info("Volume test root has been cleaned: %s", path)
-
-    return path
-
-
-default_workspace_test_root = "/fsspec-databricks-test/local"
-
-
-@pytest.fixture(scope="session")
-def workspace_test_root(client):
-    path = os.getenv(
-        "FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT",
-        default_workspace_test_root,
-    )
-
-    path = "/" + path.strip("/")
-
-    # Changed f-string logging to lazy-format
-    log.info("Preparing workspace test root: %s", path)
-
-    try:
-        client.workspace.get_status(path)
-    except NotFound:
-        # Directory does not exist, create it
-        client.workspace.mkdirs(path)
-        # Changed f-string logging to lazy-format
-        log.info("Workspace test root has been created: %s", path)
-        return path
-
-    for i in client.workspace.list(path):
-        client.workspace.delete(i.path, recursive=True)
-
-    # Changed f-string logging to lazy-format
-    log.info("Workspace test root has been cleaned: %s", path)
-
-    return path

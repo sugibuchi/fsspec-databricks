@@ -1,6 +1,6 @@
+"""Tests of `WorkspaceFileSystem`, through the SDK over HTTP: on the dummy server, and on the live workspace."""
+
 import errno
-import inspect
-import logging
 import pickle
 from datetime import UTC, datetime, timedelta
 from random import randbytes
@@ -15,60 +15,14 @@ from databricks.sdk.service.workspace import (
     Language,
     ObjectType,
 )
+from fsspec.asyn import sync
+from fsspec_alt_strategies.monitor import Monitor, monitoring
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.workspace import WorkspaceFileSystem
-from tests.utils import bytes_sig
+from tests.utils import bytes_sig, init_workspace_test_dir, workspace_download
 
-log = logging.getLogger(__name__)
-
-
-def init_test_dir(
-    client: WorkspaceClient,
-    test_root: str,
-    fs_class: type | None = None,
-    name: str | None = None,
-    items: dict[str, dict | tuple] | None = None,
-) -> str:
-    """Initialize a test directory in the Databricks workspace with the given items."""
-    name = name or inspect.stack()[1].function
-
-    if fs_class:
-        test_dir = f"{test_root}/{name}_{fs_class.__name__}"
-    else:
-        test_dir = f"{test_root}/{name}"
-
-    try:
-        log.debug("Checking test dir: path=%s", test_dir)
-        client.workspace.get_status(test_dir)
-        log.debug("Deleting test dir: path=%s", test_dir)
-        client.workspace.delete(test_dir, recursive=True)
-        log.debug("Deleted test dir: path=%s", test_dir)
-    except ResourceDoesNotExist:
-        pass
-
-    log.debug("Creating test dir: path=%s", test_dir)
-    client.workspace.mkdirs(test_dir)
-    log.debug("Created test dir: path=%s", test_dir)
-
-    def init(path: str, _items: dict[str, dict | tuple]):
-        for n, i in _items.items():
-            item_path = f"{path}/{n}"
-            if isinstance(i, dict):
-                client.workspace.mkdirs(item_path)
-                init(item_path, i)
-            else:
-                content, fmt, language = i
-                client.workspace.upload(
-                    item_path, content, format=fmt, language=language
-                )
-
-    if items:
-        log.debug("Creating files/directories in the test dir: path=%s", test_dir)
-        init(test_dir, items)
-        log.debug("Created files/directories in the test dir: path=%s", test_dir)
-
-    return test_dir
+pytestmark = pytest.mark.backend("workspace")
 
 
 def dbfs_url(path: str) -> str:
@@ -80,36 +34,23 @@ def stripped_dbfs_url(path: str) -> str:
 
 
 def status(client: WorkspaceClient, path: str):
-    """Get the status of the file or directory at the given path in the Databricks workspace."""
     return client.workspace.get_status(path)
 
 
-def download(client: WorkspaceClient, path: str) -> bytes:
-    """Download the file at the given path from the Databricks workspace."""
-    with client.workspace.download(path, format=ExportFormat.AUTO) as f:
-        return f.read()
-
-
-def nb_download(client: WorkspaceClient, path: str) -> bytes:
-    """Download the notebook at the given path from the Databricks workspace."""
-    with client.workspace.download(path, format=ExportFormat.SOURCE) as f:
-        return f.read()
-
-
-def test_workspace_fs_init(client: WorkspaceClient):
+def test_workspace_init():
     with WorkspaceFileSystem() as _:
         # No additional params. Just test creation of new instance
         pass
 
 
-def test_workspace_fs_close():
-    fs = WorkspaceFileSystem(verbose_debug_log=True)
+def test_workspace_close():
+    fs = WorkspaceFileSystem()
 
     fs.close()
     assert fs.closed
 
 
-def test_workspace_fs_serialization():
+def test_workspace_serialization():
     fs = WorkspaceFileSystem()
 
     serialized = pickle.dumps(fs)
@@ -126,17 +67,17 @@ def test_workspace_fs_serialization():
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_info(
+def test_workspace_info(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nSELECT * FROM TEST"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -197,17 +138,17 @@ def test_workspace_fs_info(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_ls(
+def test_workspace_ls(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\npython"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -272,14 +213,14 @@ def test_workspace_fs_ls(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_exists(
+def test_workspace_exists(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -307,17 +248,17 @@ def test_workspace_fs_exists(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_cp_file(
+def test_workspace_cp_file(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -333,7 +274,7 @@ def test_workspace_fs_cp_file(
         dbfs_url(f"{test_dir}/1_data.bin"),
         dbfs_url(f"{test_dir}/1_data_copied.bin"),
     )
-    copied_data = download(client, f"{test_dir}/1_data_copied.bin")
+    copied_data = workspace_download(client, f"{test_dir}/1_data_copied.bin")
 
     assert bytes_sig(data) == bytes_sig(copied_data)
 
@@ -342,7 +283,9 @@ def test_workspace_fs_cp_file(
         dbfs_url(f"{test_dir}/2_notebook"),
         dbfs_url(f"{test_dir}/2_notebook_copied"),
     )
-    copied_notebook = nb_download(client, f"{test_dir}/2_notebook_copied")
+    copied_notebook = workspace_download(
+        client, f"{test_dir}/2_notebook_copied", ExportFormat.SOURCE
+    )
 
     assert notebook == copied_notebook
 
@@ -370,18 +313,18 @@ def test_workspace_fs_cp_file(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_copy(
+def test_workspace_copy(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data1 = randbytes(12345)
     data2 = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -409,10 +352,11 @@ def test_workspace_fs_copy(
         (f"{test_dir}/directory_copied", ObjectType.DIRECTORY),
     ]
 
-    items = [
+    # Sorted: the API lists in creation order, and the copy creates concurrently.
+    items = sorted(
         (i.path, i.object_type, i.language)
         for i in client.workspace.list(f"{test_dir}/directory_copied")
-    ]
+    )
     assert items == [
         (f"{test_dir}/directory_copied/1_data.bin", ObjectType.FILE, None),
         (
@@ -446,17 +390,17 @@ def test_workspace_fs_copy(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_rm(
+def test_workspace_rm(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -495,14 +439,14 @@ def test_workspace_fs_rm(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_mkdir(
+def test_workspace_mkdir(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
-    test_dir = init_test_dir(client, workspace_test_root, fs_class)
+    test_dir = init_workspace_test_dir(client, workspace_test_root, fs_class)
 
     fs.mkdir(dbfs_url(f"{test_dir}/test_dir"))
 
@@ -528,14 +472,14 @@ def test_workspace_fs_mkdir(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_makedirs(
+def test_workspace_makedirs(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
-    test_dir = init_test_dir(client, workspace_test_root, fs_class)
+    test_dir = init_workspace_test_dir(client, workspace_test_root, fs_class)
 
     fs.makedirs(dbfs_url(f"{test_dir}/parent_dir/dir"))
     status1 = status(client, f"{test_dir}/parent_dir/dir")
@@ -564,14 +508,14 @@ def test_workspace_fs_makedirs(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_rmdir(
+def test_workspace_rmdir(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -606,17 +550,17 @@ def test_workspace_fs_rmdir(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_open_r(
+def test_workspace_open_r(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -651,17 +595,17 @@ def test_workspace_fs_open_r(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_open_w(
+def test_workspace_open_w(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -676,7 +620,7 @@ def test_workspace_fs_open_w(
     with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
         f.write(written_data)
 
-    read_data = download(client, f"{test_dir}/1_data.bin")
+    read_data = workspace_download(client, f"{test_dir}/1_data.bin")
     assert bytes_sig(written_data) == bytes_sig(read_data)
 
     written_notebook = b"# Databricks notebook source\nval a"
@@ -702,7 +646,9 @@ def test_workspace_fs_open_w(
         f.write(written_notebook)
 
     read_status = status(client, f"{test_dir}/2_notebook")
-    read_notebook = nb_download(client, f"{test_dir}/2_notebook")
+    read_notebook = workspace_download(
+        client, f"{test_dir}/2_notebook", ExportFormat.SOURCE
+    )
     assert read_status.object_type == ObjectType.NOTEBOOK
     assert read_status.language == Language.SCALA
     assert written_notebook == read_notebook
@@ -711,7 +657,7 @@ def test_workspace_fs_open_w(
     with fs.open(dbfs_url(f"{test_dir}/3_data.bin"), mode="wb") as f:
         f.write(written_data)
 
-    read_data = download(client, f"{test_dir}/3_data.bin")
+    read_data = workspace_download(client, f"{test_dir}/3_data.bin")
     assert bytes_sig(written_data) == bytes_sig(read_data)
 
     # Overwrite existing notebook
@@ -719,7 +665,9 @@ def test_workspace_fs_open_w(
         f.write(written_notebook)
 
     read_status = status(client, f"{test_dir}/4_notebook")
-    read_notebook = nb_download(client, f"{test_dir}/4_notebook")
+    read_notebook = workspace_download(
+        client, f"{test_dir}/4_notebook", ExportFormat.SOURCE
+    )
     assert read_status.object_type == ObjectType.NOTEBOOK
     # Keep the language of the existing notebook
     assert read_status.language == Language.PYTHON
@@ -734,7 +682,9 @@ def test_workspace_fs_open_w(
         f.write(written_notebook)
 
     read_status = status(client, f"{test_dir}/4_notebook")
-    read_notebook = nb_download(client, f"{test_dir}/4_notebook")
+    read_notebook = workspace_download(
+        client, f"{test_dir}/4_notebook", ExportFormat.SOURCE
+    )
     assert read_status.object_type == ObjectType.NOTEBOOK
     # Keep the language of the existing notebook
     assert read_status.language == Language.SCALA
@@ -752,17 +702,17 @@ def test_workspace_fs_open_w(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_open_a(
+def test_workspace_open_a(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -777,7 +727,7 @@ def test_workspace_fs_open_a(
     with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="ab") as f:
         f.write(written_data)
 
-    read_data = download(client, f"{test_dir}/1_data.bin")
+    read_data = workspace_download(client, f"{test_dir}/1_data.bin")
     assert bytes_sig(written_data) == bytes_sig(read_data)
 
     written_notebook = b"# Databricks notebook source\nval a"
@@ -803,7 +753,9 @@ def test_workspace_fs_open_a(
         f.write(written_notebook)
 
     read_status = status(client, f"{test_dir}/2_notebook")
-    read_notebook = nb_download(client, f"{test_dir}/2_notebook")
+    read_notebook = workspace_download(
+        client, f"{test_dir}/2_notebook", ExportFormat.SOURCE
+    )
     assert read_status.object_type == ObjectType.NOTEBOOK
     assert read_status.language == Language.SCALA
     assert written_notebook == read_notebook
@@ -812,7 +764,7 @@ def test_workspace_fs_open_a(
     with fs.open(dbfs_url(f"{test_dir}/3_data.bin"), mode="ab") as f:
         f.write(written_data)
 
-    read_data = download(client, f"{test_dir}/3_data.bin")
+    read_data = workspace_download(client, f"{test_dir}/3_data.bin")
     assert bytes_sig(data + written_data) == bytes_sig(read_data)
 
     # Append to existing notebook
@@ -821,7 +773,9 @@ def test_workspace_fs_open_a(
         f.write(append_lines)
 
     read_status = status(client, f"{test_dir}/4_notebook")
-    read_notebook = nb_download(client, f"{test_dir}/4_notebook")
+    read_notebook = workspace_download(
+        client, f"{test_dir}/4_notebook", ExportFormat.SOURCE
+    )
     assert read_status.object_type == ObjectType.NOTEBOOK
     assert read_status.language == Language.PYTHON
     assert notebook + append_lines == read_notebook
@@ -838,17 +792,17 @@ def test_workspace_fs_open_a(
         DatabricksFileSystem,
     ],
 )
-def test_workspace_fs_open_x(
+def test_workspace_open_x(
     client: WorkspaceClient,
     fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
     workspace_test_root: str,
 ):
-    fs = fs_class(client=client, verbose_debug_log=True)
+    fs = fs_class(client=client)
 
     data = randbytes(12345)
     notebook = b"# Databricks notebook source\nspark"
 
-    test_dir = init_test_dir(
+    test_dir = init_workspace_test_dir(
         client,
         workspace_test_root,
         fs_class,
@@ -881,7 +835,7 @@ def test_workspace_fs_open_x(
     written_data = randbytes(54321)
     with fs.open(dbfs_url(f"{test_dir}/4_data.bin"), mode="xb") as f:
         f.write(written_data)
-    assert bytes_sig(download(client, f"{test_dir}/4_data.bin")) == bytes_sig(
+    assert bytes_sig(workspace_download(client, f"{test_dir}/4_data.bin")) == bytes_sig(
         written_data
     )
 
@@ -893,4 +847,217 @@ def test_workspace_fs_open_x(
         language="scala",
     ) as f:
         f.write(written_notebook)
-    assert nb_download(client, f"{test_dir}/5_notebook") == written_notebook
+    assert (
+        workspace_download(client, f"{test_dir}/5_notebook", ExportFormat.SOURCE)
+        == written_notebook
+    )
+
+
+@pytest.mark.parametrize("fs_class", [WorkspaceFileSystem, DatabricksFileSystem])
+def test_workspace_transaction(
+    client: WorkspaceClient,
+    fs_class: type[WorkspaceFileSystem | DatabricksFileSystem],
+    workspace_test_root: str,
+):
+    test_dir = init_workspace_test_dir(client, workspace_test_root, fs_class)
+    fs = fs_class(client=client)
+    data = randbytes(54321)
+
+    # Commit uploads the files, none before.
+    with fs.transaction:
+        with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
+            f.write(data)
+        with pytest.raises(ResourceDoesNotExist):
+            client.workspace.get_status(f"{test_dir}/1_data.bin")
+    assert bytes_sig(workspace_download(client, f"{test_dir}/1_data.bin")) == bytes_sig(
+        data
+    )
+
+    # An exception leaves nothing.
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open(dbfs_url(f"{test_dir}/2_data.bin"), mode="wb") as f:
+            f.write(data)
+        raise ValueError("dummy")
+    with pytest.raises(ResourceDoesNotExist):
+        client.workspace.get_status(f"{test_dir}/2_data.bin")
+
+
+### Requests, on the dummy server
+
+
+class Calls(Monitor):
+    """Records the calls whose operations it is told of."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def started(self, call, state, op):
+        self.calls.append(call)
+
+
+NOTEBOOK = b"# Databricks notebook source\n# nb"
+
+
+@pytest.fixture
+def tree(client, workspace_test_root, dummy, request):
+    """A test directory of files, a notebook and folders, and a `WorkspaceFileSystem`, with no request recorded."""
+    test_dir = init_workspace_test_dir(
+        client,
+        workspace_test_root,
+        items={
+            "data.bin": (b"data", ImportFormat.RAW, None),
+            "empty": {},
+            "dir": {
+                "a.bin": (b"a", ImportFormat.RAW, None),
+                "nb": (NOTEBOOK, ImportFormat.SOURCE, Language.PYTHON),
+                "sub": {"b.bin": (b"b", ImportFormat.RAW, None)},
+            },
+        },
+    )
+    with WorkspaceFileSystem(client=client) as fs:
+        dummy.requests.clear()
+        yield fs, test_dir
+
+
+def _requests(dummy, endpoint):
+    return [r.params for r in dummy.requests_to(f"/api/2.0/workspace/{endpoint}")]
+
+
+def test_workspace_root(client):
+    fs = WorkspaceFileSystem(client=client)
+    assert fs.info("/")["type"] == "directory"
+    assert fs.ls("/", detail=False) == ["/Workspace"]
+    with pytest.raises(FileNotFoundError):
+        fs.info("/Volumes/c/s/v")
+
+
+def test_workspace_find_runs_tree_strategy(tree, dummy):
+    """`find` is the tree strategy: one listing per folder, seen by monitors."""
+    fs, test_dir = tree
+    monitor = Calls()
+    with monitoring(monitor):
+        found = fs.find(f"/Workspace{test_dir}/dir")
+
+    assert found == [
+        f"/Workspace{test_dir}/dir/a.bin",
+        f"/Workspace{test_dir}/dir/nb",
+        f"/Workspace{test_dir}/dir/sub/b.bin",
+    ]
+    assert [(c.fs, c.method) for c in monitor.calls] == [(fs, "find")]
+    assert sorted(p["path"] for p in _requests(dummy, "list")) == [
+        f"{test_dir}/dir",
+        f"{test_dir}/dir/sub",
+    ]
+
+
+def test_workspace_rm_recursive_is_native(tree, dummy):
+    """A recursive `rm` without patterns is the API's own recursive delete: one request."""
+    fs, test_dir = tree
+    fs.rm(f"/Workspace{test_dir}/dir", recursive=True)
+
+    assert _requests(dummy, "delete") == [
+        {"path": f"{test_dir}/dir", "recursive": True}
+    ]
+    assert not fs.exists(f"/Workspace{test_dir}/dir")
+
+
+def test_workspace_rm_glob_runs_tree_strategy(tree, dummy):
+    fs, test_dir = tree
+    fs.rm(f"/Workspace{test_dir}/dir/*.bin", recursive=True)
+
+    assert not fs.exists(f"/Workspace{test_dir}/dir/a.bin")
+    assert fs.exists(f"/Workspace{test_dir}/dir/nb")
+    assert {"path": f"{test_dir}/dir/a.bin", "recursive": False} in _requests(
+        dummy, "delete"
+    )
+
+
+def test_workspace_rm_refuses_directories(tree, dummy):
+    fs, test_dir = tree
+    with pytest.raises(IsADirectoryError):
+        fs.rm(f"/Workspace{test_dir}/empty")
+    with pytest.raises(IsADirectoryError):
+        fs.rm_file(f"/Workspace{test_dir}/empty")
+    with pytest.raises(NotADirectoryError):
+        fs.makedirs(f"/Workspace{test_dir}/data.bin", exist_ok=True)
+
+    assert _requests(dummy, "delete") == []
+
+
+def test_workspace_copy_exports_notebooks_as_source(tree, dummy):
+    fs, test_dir = tree
+    fs.copy(f"/Workspace{test_dir}/dir", f"/Workspace{test_dir}/copy", recursive=True)
+
+    nb = fs.info(f"/Workspace{test_dir}/copy/nb")
+    assert (nb["object_type"], nb["language"]) == ("NOTEBOOK", "PYTHON")
+    exports = [p for p in _requests(dummy, "export") if p["path"].endswith("/nb")]
+    assert [p["format"] for p in exports] == ["SOURCE"]
+
+
+def test_workspace_open_import_params(tree, dummy):
+    """New files are imported RAW without overwrite, existing notebooks as SOURCE in their language."""
+    fs, test_dir = tree
+    with fs.open(f"/Workspace{test_dir}/new.bin", "xb") as f:
+        f.write(b"new")
+    with fs.open(f"/Workspace{test_dir}/dir/nb", "wb") as f:
+        f.write(b"# Databricks notebook source\n# changed")
+
+    imports = [
+        {k: p.get(k) for k in ("path", "format", "language", "overwrite")}
+        for p in _requests(dummy, "import")
+    ]
+    assert imports == [
+        {
+            "path": f"{test_dir}/new.bin",
+            "format": "RAW",
+            "language": None,
+            "overwrite": None,
+        },
+        {
+            "path": f"{test_dir}/dir/nb",
+            "format": "SOURCE",
+            "language": "PYTHON",
+            "overwrite": "true",
+        },
+    ]
+
+
+def test_workspace_file_size_limit(tree, dummy):
+    fs, test_dir = tree
+    with (
+        pytest.raises(OSError) as e,
+        fs.open(f"/Workspace{test_dir}/big.bin", "wb") as f,
+    ):
+        f.write(b"x" * (10 * 1024 * 1024 + 1))
+    assert e.value.errno == errno.EFBIG
+    assert not fs.exists(f"/Workspace{test_dir}/big.bin")
+
+
+def test_workspace_open_async(tree):
+    fs, test_dir = tree
+
+    async def read():
+        f = await fs.open_async(f"/Workspace{test_dir}/data.bin")
+        async with f:
+            assert f.size == 4
+            f.seek(2)
+            return await f.read()
+
+    assert sync(fs.loop, read) == b"ta"
+
+
+def test_workspace_transaction_uploads_on_commit(tree, dummy):
+    """A file written in a transaction is uploaded on commit only, and never on discard."""
+    fs, test_dir = tree
+    with fs.transaction:
+        with fs.open(f"/Workspace{test_dir}/data.bin", "ab") as f:
+            f.write(b"+more")
+        assert _requests(dummy, "import") == []
+    assert fs.cat_file(f"/Workspace{test_dir}/data.bin") == b"data+more"
+
+    dummy.requests.clear()
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open(f"/Workspace{test_dir}/lost.bin", "wb") as f:
+            f.write(b"lost")
+        raise ValueError("dummy")
+    assert _requests(dummy, "import") == []

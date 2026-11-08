@@ -4,11 +4,9 @@ from .spec import DatabricksFileSystem
 
 
 def use():
-    """Register the DatabricksFileSystem implementation with fsspec
-    as the default file system implementation for "dbfs" URL scheme.
+    """Register `DatabricksFileSystem` with fsspec for the "dbfs" protocol.
 
-    This function overrides the registration of `DatabricksFileSystem`
-    class bundled with fsspec.
+    It replaces fsspec's own `DatabricksFileSystem`, which supports legacy DBFS only.
     """
     register_implementation("dbfs", DatabricksFileSystem, clobber=True)
 

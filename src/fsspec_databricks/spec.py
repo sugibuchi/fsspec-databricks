@@ -1,67 +1,52 @@
-import atexit
+import asyncio
+import contextlib
 import json
 import os
-import shutil
+from typing import Any
 
 from databricks.sdk import AuthorizationDetail, CredentialsStrategy, WorkspaceClient
 from databricks.sdk.config import Config
 from databricks.sdk.service.workspace import Language
-from fsspec.spec import AbstractFileSystem
+from fsspec.asyn import AsyncFileSystem
+from fsspec_alt_strategies.profile import StorageProfile
 
-from .base import AbstractDatabricksFileSystem, root_dir_info
+from ._contrib.strategy.router import AsyncRoutingFileSystem
+from ._contrib.strategy.wrapper import SyncTreeWrapper
+from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
 from .dbfs import DBFS
-from .error import file_not_found_error
 from .local import DatabricksLocalFileSystem
 from .path import (
     FileSystemType,
     from_local_path,
     fs_type,
     scheme,
+    strip_scheme,
     to_local_path,
-    volumes_root,
-    workspace_root,
+    unstrip_scheme,
 )
+from .utils import write_mode
 from .volume import VolumeFileSystem, volumes_root_info
 from .workspace import NotebookFormat, WorkspaceFileSystem, workspace_root_info
 
 
-class DatabricksFileSystem(AbstractDatabricksFileSystem):
-    """File system for accessing Databricks Workspace files, Unity Catalog Volumes, and the legacy DBFS."""
+class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
+    """File system for Unity Catalog Volumes, Workspace files and legacy DBFS.
+
+    It routes each call to the backend serving the path: `VolumeFileSystem`, `WorkspaceFileSystem` or `DBFS`, or
+    the local file system inside a workspace.
+    """
 
     protocol = scheme
+    root_marker = "/"
 
-    volume_fs_max_read_concurrency: int = 24
-    """The maximum number of concurrent file read operations on a Unity Catalog Volume file."""
-
-    volume_fs_min_read_block_size: int = 1024 * 1024
-    """The minimum data size to read for each read operation on a Unity Catalog Volume file."""
-
-    volume_fs_max_read_block_size: int = 4 * 1024 * 1024
-    """The maximum data size to read for each read operation on a Unity Catalog Volume file."""
-
-    volume_fs_max_write_concurrency: int = 24
-    """The maximum number of concurrent file write operations on a Unity Catalog Volume file."""
-
-    volume_fs_min_write_block_size: int = 5 * 1024 * 1024
-    """The minimum data size to write for each write operation on a Unity Catalog Volume file."""
-
-    volume_fs_max_write_block_size: int = 16 * 1024 * 1024
-    """The maximum data size to write for each write operation on a Unity Catalog Volume file."""
-
-    volume_min_multipart_upload_size: int = 5 * 1024 * 1024
-    """The minimum file size to use multipart upload for uploading files to Unity Catalog Volume."""
-
-    volume_fs_connection_pool_size: int = 100
-    """The maximum number of connections in the aiohttp connection pool for the Unity Catalog Volume file system."""
+    transfer_concurrency: int = 8
+    """The files copied between two backends at a time."""
 
     use_local_fs_in_workspace: bool = True
-    """Whether to access files from the local file system rather than the remote Databricks API when running within a Databricks workspace. Defaults to True."""
+    """Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks workspace."""
 
     legacy_dbfs_local_root: str = "/dbfs"
-    """The local path where Databricks mounts the legacy DBFS when running within a Databricks workspace."""
-
-    cross_fs_copy_block_size: int = 1024 * 1024
-    """The block size to use when copying files between different file systems (e.g. from Workspace to Volume). """
+    """The local path where Databricks mounts legacy DBFS in a workspace."""
 
     def __init__(
         self,
@@ -99,27 +84,20 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         custom_headers: dict | None = None,
         # Additional parameters
         client: WorkspaceClient | None = None,
-        ## Options for Unity Catalog Volume file system
-        volume_fs_max_read_concurrency: int | None = None,
-        volume_fs_min_read_block_size: int | None = None,
-        volume_fs_max_read_block_size: int | None = None,
-        volume_fs_max_write_concurrency: int | None = None,
-        volume_fs_min_write_block_size: int | None = None,
-        volume_fs_max_write_block_size: int | None = None,
-        volume_min_multipart_upload_size: int | None = None,
-        volume_fs_connection_pool_size: int | None = None,
+        ## Options of the backends
+        operation_concurrency: int | None = None,
+        io_concurrency: int | None = None,
+        transfer_concurrency: int | None = None,
         ## Fallback to local file system when running on Databricks
         use_local_fs_in_workspace: bool | None = None,
-        ## Logging option
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
         """Initialize the DatabricksFileSystem.
 
+        The parameters up to `custom_headers` are those of the Databricks SDK's `WorkspaceClient` and `Config`.
+
         Parameters
         ----------
-        *args
-            Standard fsspec filesystem options.
         host
             See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
         account_id
@@ -154,38 +132,49 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
             See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
         group_id
             The ID of the account group to authenticate as. See the Databricks SDK `Config` class.
+        google_credentials
+            See `Google Cloud native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html>`_.
+        google_service_account
+            See `Google Cloud native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html>`_.
         workspace_id
-            The ID of the workspace to connect. Required on unified hosts serving multiple workspaces. See the Databricks SDK `Config` class.
-        custom_headers
-            Custom HTTP headers to add to every request sent by the Databricks SDK.
-        debug_headers
-            See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
+            The ID of the workspace to connect to. Required on unified hosts serving several workspaces. See the
+            Databricks SDK `Config` class.
         debug_truncate_bytes
             See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
+        debug_headers
+            See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
+        product
+            The product name sent in the user agent. See the Databricks SDK `Config` class.
+        product_version
+            The product version sent in the user agent. See the Databricks SDK `Config` class.
+        credentials_strategy
+            A custom credentials strategy. See the Databricks SDK `Config` class.
+        credentials_provider
+            The former name of `credentials_strategy`. See the Databricks SDK `Config` class.
+        token_audience
+            The audience of OIDC tokens. See the Databricks SDK `Config` class.
         config
-            An optional pre-configured Databricks SDK `Config` object. If provided, it will be used for authentication.
+            A Databricks SDK `Config` to authenticate with, instead of the parameters above.
+        scopes
+            The OAuth scopes to request. See the Databricks SDK `Config` class.
+        authorization_details
+            The OAuth authorization details to request. See the Databricks SDK `Config` class.
+        custom_headers
+            HTTP headers added to every request sent by the Databricks SDK.
         client
-            An optional pre-configured Databricks SDK `WorkspaceClient` object. If provided, it will be used for accessing the Databricks Workspace API.
-        volume_fs_max_read_concurrency : int, optional
-            The maximum number of concurrent file read operations on a Unity Catalog Volume file.
-        volume_fs_min_read_block_size : int, optional
-            The minimum data size to read for each read operation on a Unity Catalog Volume file.
-        volume_fs_max_read_block_size : int, optional
-            The maximum data size to read for each read operation on a Unity Catalog Volume file.
-        volume_fs_max_write_concurrency : int, optional
-            The maximum number of concurrent file write operations on a Unity Catalog Volume file.
-        volume_fs_min_write_block_size : int, optional
-            The minimum data size to write for each write operation on a Unity Catalog Volume file.
-        volume_fs_max_write_block_size : int, optional
-            The maximum data size to write for each write operation on a Unity Catalog Volume file.
-        volume_min_multipart_upload_size:
-            The minimum file size to use multipart upload for uploading files to Unity Catalog Volume.
-        volume_fs_connection_pool_size : int, optional
-            The maximum number of connections in the aiohttp connection pool for the Unity Catalog Volume file system.
-        use_local_fs_in_workspace
-            Access files from the local file system rather than the remote Databricks API when running within a Databricks workspace.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
+            A Databricks SDK `WorkspaceClient` to call the APIs with. It is not picklable.
+        operation_concurrency : int, optional
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`. Each
+            backend has its own default.
+        io_concurrency : int, optional
+            The maximum number of concurrent transfers of the files opened, shared by all of them. Each backend has
+            its own default.
+        transfer_concurrency : int, optional
+            The maximum number of files copied or moved between two backends at a time, e.g. from Workspace files
+            to a Volume. Defaults to 8.
+        use_local_fs_in_workspace : bool, optional
+            Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks
+            workspace. Defaults to True.
         **storage_options
             Standard fsspec storage options.
         """
@@ -227,128 +216,88 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         }
 
         super().__init__(
-            client=client,
-            config=config,
-            config_params=config_params,
-            verbose_debug_log=verbose_debug_log,
+            transfer_concurrency=transfer_concurrency or self.transfer_concurrency,
+            # No Databricks file system caches listings.
+            use_listings_cache=False,
             **storage_options,
         )
+        self._init_client(client, config, config_params)
 
         self._storage_options = storage_options
 
-        if volume_fs_max_read_concurrency is not None:
-            self.volume_fs_max_read_concurrency = volume_fs_max_read_concurrency
-        if volume_fs_min_read_block_size is not None:
-            self.volume_fs_min_read_block_size = volume_fs_min_read_block_size
-        if volume_fs_max_read_block_size is not None:
-            self.volume_fs_max_read_block_size = volume_fs_max_read_block_size
-
-        if volume_fs_max_write_concurrency is not None:
-            self.volume_fs_max_write_concurrency = volume_fs_max_write_concurrency
-        if volume_fs_min_write_block_size is not None:
-            self.volume_fs_min_write_block_size = volume_fs_min_write_block_size
-        if volume_fs_max_write_block_size is not None:
-            self.volume_fs_max_write_block_size = volume_fs_max_write_block_size
-        if volume_min_multipart_upload_size is not None:
-            self.volume_min_multipart_upload_size = volume_min_multipart_upload_size
-        if volume_fs_connection_pool_size is not None:
-            self.volume_fs_connection_pool_size = volume_fs_connection_pool_size
+        self._operation_concurrency = operation_concurrency
+        self._io_concurrency = io_concurrency
         if use_local_fs_in_workspace is not None:
             self.use_local_fs_in_workspace = use_local_fs_in_workspace
 
         self.__local_fs: DatabricksLocalFileSystem | None = None
-        self.__workspace_fs: WorkspaceFileSystem | None = None
-        self.__volume_fs: VolumeFileSystem | None = None
-        self.__legacy_fs: DBFS | None = None
 
         self._running_in_workspace: bool | None = None
         self._legacy_dbfs_enabled: bool | None = None
 
-        atexit.register(self.close)
+        _register_cleanup(self)
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        return strip_scheme(path)
+
+    def unstrip_protocol(self, name: str) -> str:
+        return unstrip_scheme(name)
 
     def close(self):
-        """Close the file system and all underlying file system instances."""
+        """Close the file system and its backends."""
         try:
-            errors = []
-
-            def _close(fs):
-                try:
-                    if fs:
-                        fs.close()
-                except Exception as e:
-                    errors.append(e)
-
-            _close(self.__workspace_fs)
-            _close(self.__volume_fs)
-            _close(self.__legacy_fs)
-
-            if errors:
-                raise RuntimeError(
-                    f"Errors occurred while closing file system: {errors}"
-                )
+            if not self.closed:
+                self._close_client()
         finally:
-            self.__workspace_fs = None
-            self.__volume_fs = None
-            self.__legacy_fs = None
             self.__local_fs = None
-            super().close()
+            AsyncRoutingFileSystem.close(self)
+
+    def __enter__(self):
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        with contextlib.suppress(Exception):
+            self.close()
+
+    ### The backends, created on first use
+    def _api_backend(self, key: str, cls: type) -> AsyncFileSystem:
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+        return self._backend(
+            key,
+            lambda: cls(
+                client=self.client,
+                config=self.config,
+                operation_concurrency=self._operation_concurrency,
+                io_concurrency=self._io_concurrency,
+                **self._storage_options,
+            ),
+        )
 
     @property
     def _volume_fs(self) -> VolumeFileSystem:
-        """Get or create the UnityCatalogVolumeFileSystem instance."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__volume_fs is None:
-            self.__volume_fs = VolumeFileSystem(
-                client=self.client,
-                config=self.config,
-                max_read_concurrency=self.volume_fs_max_read_concurrency,
-                min_read_block_size=self.volume_fs_min_read_block_size,
-                max_read_block_size=self.volume_fs_max_read_block_size,
-                max_write_concurrency=self.volume_fs_max_write_concurrency,
-                min_write_block_size=self.volume_fs_min_write_block_size,
-                max_write_block_size=self.volume_fs_max_write_block_size,
-                min_multipart_upload_size=self.volume_min_multipart_upload_size,
-                connection_pool_size=self.volume_fs_connection_pool_size,
-                verbose_debug_log=self.verbose_debug_log,
-                **self._storage_options,
-            )
-        return self.__volume_fs
+        """The Volume backend, created on first use."""
+        return self._api_backend("volume", VolumeFileSystem)
 
     @property
     def _workspace_fs(self) -> WorkspaceFileSystem:
-        """Get or create the DatabricksWorkspaceFileSystem instance."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__workspace_fs is None:
-            self.__workspace_fs = WorkspaceFileSystem(
-                client=self.client,
-                config=self.config,
-                verbose_debug_log=self.verbose_debug_log,
-                **self._storage_options,
-            )
-        return self.__workspace_fs
+        """The Workspace backend, created on first use."""
+        return self._api_backend("workspace", WorkspaceFileSystem)
 
     @property
     def _legacy_fs(self) -> DBFS:
-        """Get or create the LegacyDBFS instance."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__legacy_fs is None:
-            self.__legacy_fs = DBFS(
-                client=self.client,
-                config=self.config,
-                verbose_debug_log=self.verbose_debug_log,
-                **self._storage_options,
-            )
-        return self.__legacy_fs
+        """The legacy DBFS backend, created on first use."""
+        return self._api_backend("legacy", DBFS)
 
     @property
     def _local_fs(self) -> DatabricksLocalFileSystem:
-        """Get or create the local file system instance."""
+        """The local file system, created on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
 
@@ -357,29 +306,40 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         return self.__local_fs
 
     @property
+    def _local_tree(self) -> SyncTreeWrapper:
+        """The local file system as the async backend the router needs."""
+        local = self._local_fs
+        return self._backend(
+            "local",
+            lambda: SyncTreeWrapper(
+                local,
+                operation_concurrency=self._operation_concurrency
+                or DBFS.operation_concurrency,
+                io_concurrency=self._io_concurrency or DBFS.io_concurrency,
+                # FUSE mounts, e.g. of Volumes, may not rename folders: nothing is declared.
+                storage_profile=StorageProfile(),
+            ),
+        )
+
+    @property
     def running_in_workspace(self) -> bool:
-        """Whether the code is running within a Databricks workspace."""
+        """Whether the code runs in a Databricks workspace."""
         if self._running_in_workspace is None:
             self._running_in_workspace = "DATABRICKS_RUNTIME_VERSION" in os.environ
         return self._running_in_workspace
 
     @property
     def legacy_dbfs_enabled(self) -> bool:
-        """Whether access to the legacy DBFS file system is enabled.
+        """Whether legacy DBFS is enabled in the workspace.
 
-        With the local file system, it is enabled when its local mount exists, without calling the API.
+        With the local file system, it is enabled when its local mount exists: no API is called. Otherwise, the
+        legacy DBFS backend asks the workspace setting once. The first call then blocks until it answers, so never
+        call it on the event loop. Nothing internal asks it outside the local file system.
         """
+        if not self._uses_local_fs:
+            return self._legacy_fs.legacy_dbfs_enabled
         if self._legacy_dbfs_enabled is None:
-            if self._uses_local_fs:
-                self._legacy_dbfs_enabled = os.path.isdir(self.legacy_dbfs_local_root)
-            else:
-                disabled = (
-                    self.client.workspace_settings_v2.get_public_workspace_setting(
-                        "disable_legacy_dbfs"
-                    ).effective_boolean_val.value
-                )
-                self._legacy_dbfs_enabled = not disabled
-
+            self._legacy_dbfs_enabled = os.path.isdir(self.legacy_dbfs_local_root)
         return self._legacy_dbfs_enabled
 
     @property
@@ -387,145 +347,46 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         """Whether files are accessed from the local file system."""
         return self.running_in_workspace and self.use_local_fs_in_workspace
 
-    def _resolve(self, path: str) -> tuple[AbstractFileSystem, str]:
-        """Return the file system for the path, and the path to pass to it."""
-        if self._uses_local_fs:
-            return self._local_fs, to_local_path(path, self.legacy_dbfs_local_root)
+    ### Routing, for AsyncRoutingFileSystem
+    def _route(self, path: str) -> tuple[AsyncFileSystem, str] | None:
+        if path.rstrip("/") == "":
+            return None  # The root spans the backends: _roots lists it.
 
         t = fs_type(path)
+        if self._uses_local_fs:
+            return self._local_tree, to_local_path(path, self.legacy_dbfs_local_root)
         if t == FileSystemType.Workspace:
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        elif t == FileSystemType.Legacy and self.legacy_dbfs_enabled:
-            return self._legacy_fs, path
-        else:
-            raise file_not_found_error(path)
+        # On a workspace without legacy DBFS, the API refuses the paths: the backend raises its 403 as PermissionError.
+        return self._legacy_fs, path
 
-    def _from_local_info(self, info: dict) -> dict:
-        """Map the name in a local file's info back to its POSIX path in Databricks."""
+    def _outer(self, fs: AsyncFileSystem, path: str) -> str:
         if self._uses_local_fs:
-            return {
-                **info,
-                "name": from_local_path(info["name"], self.legacy_dbfs_local_root),
-            }
+            return from_local_path(path, self.legacy_dbfs_local_root)
+        return path
+
+    async def _roots(self, path: str) -> list[dict[str, Any]]:
+        if self._uses_local_fs:
+            # A stat of the mount, which may be slow, off the loop.
+            if not await asyncio.to_thread(lambda: self.legacy_dbfs_enabled):
+                return [dict(volumes_root_info), dict(workspace_root_info)]
+            fs, inner = self._local_tree, self.legacy_dbfs_local_root
+            listing = await fs._ls(inner, detail=True)
         else:
-            return info
+            # No setting asked: the API refuses the listing of a workspace without legacy DBFS.
+            fs = self._legacy_fs
+            try:
+                listing = await fs._ls("/", detail=True)
+            except PermissionError:
+                return [dict(volumes_root_info), dict(workspace_root_info)]
+        # The root of legacy DBFS, which holds the mounts of the other backends.
+        return [self._entry(fs, e) for e in listing]
 
-    ### File/directory information
-    def ls(self, path, detail=True, **kwargs):
-        if not self.legacy_dbfs_enabled and self._strip_protocol(path) == "/":
-            return (
-                [volumes_root_info, workspace_root_info]
-                if detail
-                else [volumes_root, workspace_root]
-            )
-
-        fs, p = self._resolve(path)
-        items = fs.ls(p, detail=detail, **kwargs)
-        if not self._uses_local_fs:
-            return items
-        elif detail:
-            return [self._from_local_info(i) for i in items]
-        else:
-            return [from_local_path(i, self.legacy_dbfs_local_root) for i in items]
-
-    def info(self, path, **kwargs):
-        if not self.legacy_dbfs_enabled and self._strip_protocol(path) == "/":
-            return root_dir_info
-
-        fs, p = self._resolve(path)
-        return self._from_local_info(fs.info(p, **kwargs))
-
-    def exists(self, path, **kwargs) -> bool:
-        fs, p = self._resolve(path)
-        return fs.exists(p, **kwargs)
-
-    def isdir(self, path) -> bool:
-        if self._strip_protocol(path) == "/":
-            return True
-
-        try:
-            fs, p = self._resolve(path)
-        except FileNotFoundError:
-            return False
-        return fs.isdir(p)
-
-    def isfile(self, path) -> bool:
-        if self._strip_protocol(path) == "/":
-            return False
-
-        try:
-            fs, p = self._resolve(path)
-        except FileNotFoundError:
-            return False
-        return fs.isfile(p)
-
-    def created(self, path):
-        fs, p = self._resolve(path)
-        return fs.created(p)
-
-    def modified(self, path):
-        fs, p = self._resolve(path)
-        return fs.modified(p)
-
-    ### File/directory operations
-    def cp_file(self, path1, path2, **kwargs):
-        if fs_type(path1) == fs_type(path2):
-            fs, p1 = self._resolve(path1)
-            _, p2 = self._resolve(path2)
-            fs.cp_file(p1, p2, **kwargs)
-        else:
-            source_info = self.info(path1)
-            if source_info["type"] == "directory":
-                self._cp_directory(path2)
-                return
-
-            src_fs, src_path = self._resolve(path1)
-            dst_fs, dst_path = self._resolve(path2)
-            with src_fs.open(src_path, "rb") as src:
-                with dst_fs.open(dst_path, "wb") as dst:
-                    shutil.copyfileobj(src, dst, length=self.cross_fs_copy_block_size)
-
-    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
-        if fs_type(path1) == fs_type(path2):
-            fs, p1 = self._resolve(path1)
-            _, p2 = self._resolve(path2)
-            fs.mv(
-                p1,
-                p2,
-                recursive=recursive,
-                maxdepth=maxdepth,
-                **kwargs,
-            )
-        else:
-            super().mv(
-                path1,
-                path2,
-                recursive=recursive,
-                maxdepth=maxdepth,
-                **kwargs,
-            )
-
-    def _rm(self, path):
-        fs, p = self._resolve(path)
-        fs._rm(p)
-
-    def rm(self, path, recursive=False, maxdepth=None):
-        fs, p = self._resolve(path)
-        fs.rm(p, recursive=recursive, maxdepth=maxdepth)
-
-    def mkdir(self, path, create_parents=True, **kwargs):
-        fs, p = self._resolve(path)
-        fs.mkdir(p, create_parents, **kwargs)
-
-    def makedirs(self, path, exist_ok=False):
-        fs, p = self._resolve(path)
-        fs.makedirs(p, exist_ok)
-
-    def rmdir(self, path):
-        fs, p = self._resolve(path)
-        fs.rmdir(p)
+    async def _root_info(self, path: str) -> dict[str, Any]:
+        # _route gives None for the root only.
+        return dict(root_dir_info)
 
     ## File I/O
     def open(
@@ -534,68 +395,51 @@ class DatabricksFileSystem(AbstractDatabricksFileSystem):
         mode="rb",
         notebook_format: NotebookFormat | None = None,
         language: Language | str | None = None,
-        max_concurrency: int | None = None,
-        min_block_size: int | None = None,
-        max_block_size: int | None = None,
-        block_size: int | None = None,
         compression: str | None = None,
         encoding: str | None = None,
         errors: str | None = None,
         newline: str | None = None,
         **kwargs,
     ):
-        """Open a file in a file system in Databricks (Workspace, Unity Catalog volume or legacy DBFS).
+        """Open a file in a Unity Catalog Volume, Workspace files or legacy DBFS.
+
+        Inside `fs.transaction`, a file written is committed or discarded with the others, whatever its backend.
 
         Parameters
         ----------
         path : str
-            The path to the file in the Unity Catalog Volume file system.
+            The path to the file: a `dbfs:/` URL or a POSIX path.
         mode : str, optional
-            The file mode like `rb`, `w`.
+            The file mode, such as `rb` or `w`. The modes supported depend on the backend.
         notebook_format : NotebookFormat, optional
-            The format to use when reading or writing a notebook. Applicable only to Workspace notebooks.
+            The format of a notebook read or written. Applies only to Workspace notebooks.
         language : Language, str, optional
-            Language of the notebook to read or write. Applicable only to Workspace files.
-        max_concurrency : int, optional
-            The maximum number of concurrent file operations. Applicable only to volume files.
-        min_block_size : int, optional
-            The minimum data size to read or write for each file operation. Applicable only to volume files.
-        max_block_size : int, optional
-            The maximum data size to read or write for each file operation. Applicable only to volume files.
-        block_size : int, optional
-            The data size to read or write for each file operation.
+            The language of a notebook written. Applies only to Workspace notebooks.
         compression : str, optional
-            If given, open file using compression codec. Can either be a compression
-            name (a key in ``fsspec.compression.compr``) or "infer" to guess the
-            compression from the filename suffix.
+            The compression codec: a key of ``fsspec.compression.compr``, or "infer" to guess it from the file
+            name's suffix.
         encoding : str, optional
-            The encoding to use when opening the file. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            The text encoding, in text mode only. See `io.TextIOWrapper
+            <https://docs.python.org/3/library/io.html#io.TextIOWrapper>`_.
         errors : str, optional
-            The error handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            How encoding errors are handled, in text mode only. See `io.TextIOWrapper
+            <https://docs.python.org/3/library/io.html#io.TextIOWrapper>`_.
         newline : str, optional
-            The newline handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            How newlines are handled, in text mode only. The backends write "\\n" newlines by default. See
+            `io.TextIOWrapper <https://docs.python.org/3/library/io.html#io.TextIOWrapper>`_.
         **kwargs
-            Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
+            Passed to the backend's `open`.
         """
-        fs, p = self._resolve(path)
-        return fs.open(
-            path=p,
-            mode=mode,
-            notebook_format=notebook_format,
-            language=language,
-            max_concurrency=max_concurrency,
-            max_block_size=max_block_size,
-            min_block_size=min_block_size,
-            block_size=block_size,
-            compression=compression,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **kwargs,
-        )
+        if notebook_format is not None:
+            kwargs["notebook_format"] = notebook_format
+        if language is not None:
+            kwargs["language"] = language
+        if "b" not in mode:
+            # Text is any mode without "b": "w" as well as "wt".
+            if write_mode(mode) and newline is None:
+                newline = "\n"
+            kwargs.update(encoding=encoding, errors=errors, newline=newline)
+        return super().open(path, mode, compression=compression, **kwargs)
 
 
 __all__ = [

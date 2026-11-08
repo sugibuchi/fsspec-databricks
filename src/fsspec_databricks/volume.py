@@ -1,20 +1,17 @@
 import asyncio
-import glob
 import logging
 import re
-import shutil
+import sys
+import threading
 import urllib.parse
-from collections.abc import Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
-from os import PathLike
 from random import random
-from threading import Event, RLock, Thread
-from typing import Any, Literal
+from typing import Any, TypeVar
 
 from aiohttp import (
     ClientConnectionError,
+    ClientError,
     ClientHandlerType,
     ClientMiddlewareType,
     ClientRequest,
@@ -30,26 +27,41 @@ from databricks.sdk.config import Config
 from databricks.sdk.errors import BadRequest, NotFound
 from databricks.sdk.service.catalog import CatalogInfo, SchemaInfo, VolumeInfo
 from databricks.sdk.service.files import DirectoryEntry, GetMetadataResponse
+from fsspec.asyn import sync
+from fsspec_alt_strategies.profile import StorageProfile
 
-from .base import AbstractDatabricksFileSystem, root_dir_info
-from .dbfs import DBFS
+from ._contrib.strategy.files.adaptive import (
+    AdaptiveReadableFile,
+    AdaptiveWritableFile,
+)
+from ._contrib.strategy.files.fsspec_async import AsyncFileAdapter
+from ._contrib.strategy.files.fsspec_transaction import (
+    AdaptiveWritableTransaction,
+    TransactionFile,
+)
+from .base import BaseDatabricksFileSystem, root_dir_info
 from .error import (
+    access_error,
     error_mapping,
     file_exists_error,
     file_not_found_error,
     io_error,
     is_a_directory_error,
+    not_a_directory_error,
     not_empty_error,
+    permission_error,
 )
-from .file import (
-    AbstractAsyncReadableFile,
-    AbstractAsyncWritableFile,
-)
-from .path import dbfs_root, parse_volume_path, volumes_root
+from .path import dbfs_root, parse_volume_path
 from .utils import to_datetime, to_rfc3339
 
+T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+_MiB = 1024 * 1024
+
 volumes_root_info = {
-    "name": volumes_root,
+    "name": "/Volumes",
     "size": None,
     "type": "directory",
     "created": None,
@@ -63,8 +75,7 @@ def _map_info(
     detail: bool,
     path: str | None = None,
 ) -> dict[str, Any] | str:
-    """Map Unity Catalog CatalogInfo, SchemaInfo, VolumeInfo, DirectoryEntry or GetMetadataResponse
-    to fsspec file info dict, or to the name only if not detail."""
+    """Map a catalog, schema, volume, directory entry or file metadata to an fsspec info dict, or to its name."""
     if isinstance(info, CatalogInfo | SchemaInfo | VolumeInfo):
         if isinstance(info, CatalogInfo):
             name = f"/Volumes/{info.name}"
@@ -107,33 +118,39 @@ def _map_info(
     return mapped if detail else mapped["name"]
 
 
-class VolumeFileSystem(DBFS):
+def _parse(path: str) -> tuple[str | None, str | None, str | None, str | None, str]:
+    """`parse_volume_path`, raising FileNotFoundError for paths outside /Volumes."""
+    try:
+        return parse_volume_path(path)
+    except ValueError:
+        raise file_not_found_error(path) from None
+
+
+class VolumeFileSystem(BaseDatabricksFileSystem):
     """Unity Catalog Volume file system.
 
-    As `WorkspaceClient.dbfs` API is largely compatible with Unity Catalog Volumes, this class inherits
-    `DBFS` and implements some handling specific for the volume-specific paths and file IO.
+    An async fsspec file system: its synchronous methods run on fsspec's event loop. Its recursive
+    operations walk the folder tree with the tree strategies of fsspec-alt-strategies, copied into
+    `_contrib.strategy`. Its files call the Files API with aiohttp, the rest the SDK.
     """
 
-    max_read_concurrency: int = 24
-    """The maximum number of concurrent file read operations on a Unity Catalog Volume file."""
+    storage_profile = StorageProfile(
+        fs_type="tree",
+        parents_required=False,
+        implicit_folders=False,
+        renames_files=False,
+        renames_folders=False,
+    )
+    """What the Files API does.
 
-    min_read_block_size: int = 1024 * 1024
-    """The minimum data size to read for each read operation on a Unity Catalog Volume file."""
+    - It lists one directory per request, so the tree strategies suit it.
+    - An upload creates the file's missing parent directories, as checked on a live workspace.
+    - Directories are objects of their own: an empty one exists, and is deleted by a request of its own.
+    - It has no server-side copy or rename, of files or directories.
+    """
 
-    max_read_block_size: int = 4 * 1024 * 1024
-    """The maximum data size to read for each read operation on a Unity Catalog Volume file."""
-
-    max_write_concurrency: int = 24
-    """The maximum number of concurrent file write operations on a Unity Catalog Volume file."""
-
-    min_write_block_size: int = 5 * 1024 * 1024
-    """The minimum data size to write for each write operation on a Unity Catalog Volume file."""
-
-    max_write_block_size: int = 16 * 1024 * 1024
-    """The maximum data size to write for each write operation on a Unity Catalog Volume file."""
-
-    min_multipart_upload_size: int = 5 * 1024 * 1024
-    """The minimum file size to use multipart upload for uploading the file content."""
+    io_concurrency: int = 24
+    """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""
 
     connection_pool_size: int = 100
     """The maximum number of connections in the aiohttp connection pool (TCPConnector limit)."""
@@ -144,164 +161,97 @@ class VolumeFileSystem(DBFS):
     _storage_proxy_probe_timeout: float = 3.0
     """The timeout in seconds for the storage proxy probe request."""
 
-    _max_delete_concurrency: int = 16
-    """The maximum number of concurrent delete requests of a recursive `rm`."""
-
-    log = logging.getLogger(__name__)
-
     def __init__(
         self,
         client: WorkspaceClient | None = None,
         config: Config | None = None,
         config_params: dict[str, Any] | None = None,
-        max_read_concurrency: int | None = None,
-        min_read_block_size: int | None = None,
-        max_read_block_size: int | None = None,
-        max_write_concurrency: int | None = None,
-        min_write_block_size: int | None = None,
-        max_write_block_size: int | None = None,
-        min_multipart_upload_size: int | None = None,
+        operation_concurrency: int | None = None,
+        io_concurrency: int | None = None,
         connection_pool_size: int | None = None,
-        verbose_debug_log: bool | None = None,
         **storage_options,
     ):
-        """Initialize the Unity Catalog Volume file system."""
+        """Initialize the Unity Catalog Volume file system.
+
+        Parameters
+        ----------
+        client : WorkspaceClient, optional
+            A Databricks SDK `WorkspaceClient` to call the APIs with.
+        config : Config, optional
+            A Databricks SDK `Config` to authenticate with.
+        config_params : dict[str, Any], optional
+            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
+        operation_concurrency : int, optional
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
+            Defaults to 16.
+        io_concurrency : int, optional
+            The maximum number of concurrent range reads and part uploads, shared by all the files opened.
+            Defaults to 24.
+        connection_pool_size : int, optional
+            The maximum number of connections in the aiohttp connection pool. Defaults to 100.
+        **storage_options
+            Standard fsspec storage options, such as `asynchronous` and `loop`.
+        """
+        if connection_pool_size is not None:
+            self.connection_pool_size = connection_pool_size
+
+        self._lock = threading.Lock()
+        self._workspace_id: int | None = None
+        self._storage_proxy_available: bool | None = None
+
+        # Made on the loop that uses it, as TCPConnector needs a running loop.
+        self._session: ClientSession | None = None
+        self._session_loop: asyncio.AbstractEventLoop | None = None
+
         super().__init__(
             client=client,
             config=config,
             config_params=config_params,
-            verbose_debug_log=verbose_debug_log,
+            operation_concurrency=operation_concurrency,
+            io_concurrency=io_concurrency,
             **storage_options,
         )
 
-        if max_read_concurrency is not None:
-            self.max_read_concurrency = max_read_concurrency
-        if min_read_block_size is not None:
-            self.min_read_block_size = min_read_block_size
-        if max_read_block_size is not None:
-            self.max_read_block_size = max_read_block_size
+    def close(self):
+        """Close the file system and its HTTP session."""
+        if self.closed:
+            return
+        try:
+            session, self._session = self._session, None
+            loop, self._session_loop = self._session_loop, None
+            if session is not None and not session.closed and not loop.is_closed():
+                try:
+                    running = asyncio.get_running_loop()
+                except RuntimeError:
+                    running = None
+                if running is loop:
+                    # Nothing can wait for it on its own loop.
+                    loop.create_task(session.close())
+                elif loop.is_running() and not sys.is_finalizing():
+                    sync(loop, session.close, timeout=5.0)
+        finally:
+            super().close()
 
-        if max_write_concurrency is not None:
-            self.max_write_concurrency = max_write_concurrency
-        if min_write_block_size is not None:
-            self.min_write_block_size = min_write_block_size
-        if max_write_block_size is not None:
-            self.max_write_block_size = max_write_block_size
-        if min_multipart_upload_size is not None:
-            self.min_multipart_upload_size = min_multipart_upload_size
-        if connection_pool_size is not None:
-            self.connection_pool_size = connection_pool_size
-
-        self._workspace_id: int | None = None
-        self._storage_proxy_available: bool | None = None
-
-        self.__loop = None
-        self.__io_thread: Thread | None = None
-        self.__lock = RLock()
-        self.__session: ClientSession | None = None
-
-    @property
-    def _loop(self):
+    async def _get_session(self) -> ClientSession:
+        """The aiohttp session of the running loop, made on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
-
-        with self.__lock:
-            if self.__loop is None:
-                ready = Event()
-
-                def run_loop():
-                    self.__loop = asyncio.new_event_loop()
-                    self.log.debug("Running event loop in IO thread.")
-                    asyncio.set_event_loop(self.__loop)
-                    self.__loop.call_soon(ready.set)
-
-                    try:
-                        self.__loop.run_forever()
-                    finally:
-                        self.log.debug("Shutting down async tasks.")
-                        self.__loop.run_until_complete(self.__loop.shutdown_asyncgens())
-                        self.log.debug("Closing event loop.")
-                        self.__loop.close()
-                        self.log.debug("Event loop closed. Finishing IO thread.")
-
-                self.__io_thread = Thread(
-                    target=run_loop, name="dbfs-io-thread", daemon=True
-                )
-
-                self.__io_thread.start()
-                ready.wait(timeout=5.0)
-
-                if self.__loop is None or not self.__loop.is_running():
-                    raise RuntimeError("Event loop in IO thread failed to start")
-
-        return self.__loop
-
-    @property
-    def _session(self) -> ClientSession:
-        """aiohttp client session.
-
-        `TCPConnector` requires a running event loop, so the session is created in the IO event loop.
-        """
-        loop = self._loop
-
-        def create() -> ClientSession:
-            return ClientSession(
+        loop = asyncio.get_running_loop()
+        if (
+            self._session is None
+            or self._session.closed
+            or self._session_loop is not loop
+        ):
+            self._session = ClientSession(
                 connector=TCPConnector(limit=self.connection_pool_size)
             )
-
-        try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
-
-        if running_loop is loop:
-            # Already in the IO event loop. Create the session directly, as waiting for
-            # a coroutine scheduled in the same loop (or for the lock) would deadlock.
-            if self.__session is None:
-                self.__session = create()
-                self.log.debug("aiohttp ClientSession created.")
-            return self.__session
-
-        with self.__lock:
-            if self.__session is None:
-
-                async def acreate() -> ClientSession:
-                    return create()
-
-                self.__session = asyncio.run_coroutine_threadsafe(
-                    acreate(), loop
-                ).result()
-                self.log.debug("aiohttp ClientSession created.")
-        return self.__session
-
-    def close(self):
-        if not self.closed:
-            try:
-                if self.__loop is not None:
-                    if self.__session is not None:
-                        self.log.debug("Closing aiohttp ClientSession.")
-                        try:
-                            asyncio.run_coroutine_threadsafe(
-                                self.__session.close(), self.__loop
-                            ).result(timeout=5.0)
-                            self.log.debug("aiohttp ClientSession closed.")
-                        finally:
-                            self.__session = None
-                    self.log.debug("Stopping event loop.")
-                    self.__loop.call_soon_threadsafe(self.__loop.stop)
-                    self.__io_thread.join(timeout=5.0)
-                    if self.__io_thread.is_alive():
-                        raise RuntimeError("IO thread failed to stop")
-                    self.log.debug("IO thread stopped.")
-            finally:
-                self.__loop = None
-                self.__io_thread = None
-                super().close()
+            self._session_loop = loop
+        return self._session
 
     @property
     def workspace_id(self) -> int:
-        """Get the workspace ID for this file system."""
-        with self.__lock:
+        """The ID of the workspace, fetched once."""
+        with self._lock:
             if self._workspace_id is None:
                 self._workspace_id = self.client.get_workspace_id()
             return self._workspace_id
@@ -309,103 +259,89 @@ class VolumeFileSystem(DBFS):
     @property
     def storage_proxy_available(self) -> bool:
         """Whether the Databricks storage proxy is available for this workspace."""
-        with self.__lock:
-            if self._storage_proxy_available is None:
-                if self.verbose_debug_log:
-                    self.log.debug(
-                        "Check availability of the storage proxy: workspace_id=%d",
-                        self.workspace_id,
-                    )
+        if self._storage_proxy_available is None:
+            sync(self.loop, self._probe_storage_proxy)
+        return self._storage_proxy_available
 
-                async def probe(session: ClientSession, workspace_id: int) -> bool:
-                    probe_url = (
-                        f"{self._storage_proxy_hostname}/api/2.0/fs/files"
-                        f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
-                    )
-                    auth = _workspace_authenticator(self.config)
-                    try:
-                        async with session.head(
-                            probe_url,
-                            middlewares=(auth,),
-                            timeout=ClientTimeout(
-                                total=self._storage_proxy_probe_timeout
-                            ),
-                        ) as response:
-                            return response.status == 200
-                    except (TimeoutError, ClientConnectionError):
-                        # The proxy can be unresolvable or unreachable from this network.
-                        return False
-
-                available = asyncio.run_coroutine_threadsafe(
-                    probe(self._session, self.workspace_id), self._loop
-                ).result()
-                self.log.debug(
-                    "Storage proxy is available: workspace_id=%d"
-                    if available
-                    else "Storage proxy is not available: workspace_id=%d",
-                    self.workspace_id,
-                )
-                self._storage_proxy_available = available
+    async def _probe_storage_proxy(self) -> bool:
+        if self._storage_proxy_available is not None:
             return self._storage_proxy_available
 
-    @staticmethod
-    def _ensure_in_volume(*paths: str) -> None:
-        """Ensure the given paths are within Unity Catalog Volumes"""
-        for path in paths:
-            _, _, _, path_in_volume, _ = parse_volume_path(path)
-            if path_in_volume is None:
-                raise ValueError(f"Path {path} is not within a Unity Catalog Volume")
+        workspace_id = await asyncio.to_thread(lambda: self.workspace_id)
+        probe_url = (
+            f"{self._storage_proxy_hostname}/api/2.0/fs/files"
+            f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
+        )
+        session = await self._get_session()
+        try:
+            async with session.head(
+                probe_url,
+                middlewares=(_workspace_authenticator(self.config),),
+                timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
+            ) as response:
+                available = response.status == 200
+                outcome = response.status
+        except (TimeoutError, ClientConnectionError) as e:
+            # The proxy can be unresolvable or unreachable from this network.
+            available = False
+            outcome = type(e).__name__
+        logger.debug(
+            "HEAD storage proxy probe: workspace_id=%d, status=%s",
+            workspace_id,
+            outcome,
+        )
+
+        if not available:
+            # Outside Databricks the proxy is normally absent: the fallback is expected.
+            logger.debug(
+                "Storage proxy unavailable, using the workspace host: workspace_id=%d",
+                workspace_id,
+            )
+        self._storage_proxy_available = available
+        return available
 
     ### File/directory information
-    def info(self, path, include_browse: bool | None = None, **kwargs):
-        self.log.debug("Getting info: path=%s, include_browse=%s", path, include_browse)
+    async def _info(self, path, include_browse: bool | None = None, **kwargs):
+        if self._strip_protocol(path) == dbfs_root:
+            return dict(root_dir_info)
 
-        stripped = self._strip_protocol(path)
-        if stripped == dbfs_root:
-            return root_dir_info
-
-        try:
-            catalog, schema, volume, path_in_volume, full_path = parse_volume_path(path)
-        except ValueError:
-            raise file_not_found_error(path) from None
+        catalog, schema, volume, path_in_volume, full_path = _parse(path)
 
         with error_mapping(path):
             if catalog is None:
-                return volumes_root_info
+                return dict(volumes_root_info)
             elif schema is None:
-                return _map_info(
-                    self.client.catalogs.get(catalog, include_browse=include_browse),
-                    detail=True,
+                info = await self._run_in_thread(
+                    self.client.catalogs.get, catalog, include_browse=include_browse
                 )
             elif volume is None:
-                return _map_info(
-                    self.client.schemas.get(
-                        f"{catalog}.{schema}", include_browse=include_browse
-                    ),
-                    detail=True,
+                info = await self._run_in_thread(
+                    self.client.schemas.get,
+                    f"{catalog}.{schema}",
+                    include_browse=include_browse,
                 )
             elif path_in_volume == "/":
-                return _map_info(
-                    self.client.volumes.read(
-                        f"{catalog}.{schema}.{volume}", include_browse=include_browse
-                    ),
-                    detail=True,
+                info = await self._run_in_thread(
+                    self.client.volumes.read,
+                    f"{catalog}.{schema}.{volume}",
+                    include_browse=include_browse,
                 )
             else:
                 # Files first: they are asked about more often than directories
                 try:
-                    return self._file_info(full_path)
+                    return await self._file_info(full_path)
                 except NotFound:
-                    return self._directory_info(full_path)
+                    return await self._directory_info(full_path)
+            return _map_info(info, detail=True)
 
-    def _file_info(self, full_path: str) -> dict[str, Any]:
+    async def _file_info(self, full_path: str) -> dict[str, Any]:
         """Info of a file in a volume, with one API call. Raises `NotFound` for other paths."""
-        metadata = self.client.files.get_metadata(full_path)
+        metadata = await self._run_in_thread(self.client.files.get_metadata, full_path)
         return _map_info(metadata, detail=True, path=full_path)
 
-    def _directory_info(self, full_path: str) -> dict[str, Any]:
+    async def _directory_info(self, full_path: str) -> dict[str, Any]:
         """Info of a directory in a volume, with one API call. Raises `NotFound` for other paths."""
-        self.client.files.get_directory_metadata(full_path)
+        await self._run_in_thread(self.client.files.get_directory_metadata, full_path)
         return {
             "name": full_path.rstrip("/"),
             "size": None,
@@ -415,24 +351,23 @@ class VolumeFileSystem(DBFS):
             "islink": False,
         }
 
-    def isdir(self, path):
+    async def _isdir(self, path):
         try:
             _, _, _, path_in_volume, full_path = parse_volume_path(path)
         except ValueError:
-            return super().isdir(path)
-
-        if path_in_volume is None or path_in_volume == "/":
-            # The volumes root, catalogs, schemas and volumes
-            return super().isdir(path)
+            path_in_volume, full_path = None, None
 
         try:
+            if path_in_volume is None or path_in_volume == "/":
+                # The root, the volumes root, catalogs, schemas and volumes
+                return (await self._info(path))["type"] == "directory"
             with error_mapping(path):
-                self._directory_info(full_path)
+                await self._directory_info(full_path)
                 return True
         except OSError:
             return False
 
-    def isfile(self, path):
+    async def _isfile(self, path):
         try:
             _, _, _, path_in_volume, full_path = parse_volume_path(path)
         except ValueError:
@@ -443,199 +378,102 @@ class VolumeFileSystem(DBFS):
 
         try:
             with error_mapping(path):
-                self._file_info(full_path)
+                await self._file_info(full_path)
                 return True
         except Exception:
             return False
 
-    def ls(self, path, detail=True, include_browse: bool | None = None, **kwargs):
-        self.log.debug(
-            "Listing path: path=%s, detail=%s, include_browse=%s",
-            path,
-            detail,
-            include_browse,
+    async def _ils(self, path, include_browse: bool | None = None, **kwargs):
+        """List a folder a page at a time, as the SDK's listing fetches them: a catalog, a schema, a volume or a directory."""
+        if self._strip_protocol(path) == dbfs_root:
+            yield dict(volumes_root_info)
+            return
+
+        catalog, schema, volume, _, full_path = _parse(path)
+        func, args, kwargs = _listing(
+            self.client, catalog, schema, volume, full_path, include_browse
         )
-
-        stripped = self._strip_protocol(path)
-        if stripped == dbfs_root:
-            return [volumes_root_info] if detail else [volumes_root]
-
-        try:
-            catalog, schema, volume, _, full_path = parse_volume_path(path)
-        except ValueError:
-            raise file_not_found_error(path) from None
-
+        listed = False
         with error_mapping(path):
-            if catalog is None:
-                return [
-                    _map_info(c, detail=detail)
-                    for c in self.client.catalogs.list(include_browse=include_browse)
-                ]
-            elif schema is None:
-                return [
-                    _map_info(s, detail=detail)
-                    for s in self.client.schemas.list(
-                        catalog, include_browse=include_browse
-                    )
-                ]
-            elif volume is None:
-                return [
-                    _map_info(v, detail=detail)
-                    for v in self.client.volumes.list(
-                        catalog, schema, include_browse=include_browse
-                    )
-                ]
-            else:
-                try:
-                    entries = list(self.client.files.list_directory_contents(full_path))
-                except (NotFound, BadRequest):
-                    # A file lists as itself
-                    info = self._file_info(full_path)
-                    return [info if detail else info["name"]]
-                return [_map_info(e, detail=detail) for e in entries]
+            try:
+                async for entry in self._iter_in_thread(func, *args, **kwargs):
+                    listed = True
+                    yield _map_info(entry, detail=True)
+            except (NotFound, BadRequest):
+                if volume is None or listed:
+                    raise
+                # A file lists as itself
+                yield await self._file_info(full_path)
 
     ### File/directory operations
-    def cp_file(self, path1, path2, **kwargs):
-        # Only logs: the base class has no precondition for copying
-        AbstractDatabricksFileSystem.cp_file(self, path1=path1, path2=path2, **kwargs)
-
+    async def _cp_file(self, path1, path2, **kwargs):
         try:
-            src = self.open(path1, "rb")
+            src = await self.open_async(path1, "rb")
         except IsADirectoryError:
-            self._cp_directory(path2)
+            await self._cp_directory(path2)
             return
 
         # The Files API has no copy: stream the content with concurrent reads and uploads
-        with src, self.open(path2, "wb") as dst:
-            shutil.copyfileobj(src, dst, length=self.max_write_block_size)
+        async with src:
+            dst = await self.open_async(path2, "wb")
+            async with dst:
+                while chunk := await src.read(self.transfer_size):
+                    await dst.write(chunk)
 
-    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
-        # fsspec's copy and delete, with the methods of this class
-        AbstractDatabricksFileSystem.mv(
-            self, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs
-        )
-
-    def _rm(self, path):
-        # The precondition check is implemented in the base class.
-        AbstractDatabricksFileSystem._rm(self, path=path)
-
-        _, _, _, _, full_path = parse_volume_path(path)
-        self._delete_file(full_path)
-
-    def rm(self, path, recursive=False, maxdepth=None):
-        self.log.debug(
-            "Deleting path: path=%s, recursive=%s, maxdepth=%s",
-            path,
-            recursive,
-            maxdepth,
-        )
-
-        paths = [path] if isinstance(path, (str, PathLike)) else path
-        for p in paths:
-            if glob.has_magic(self._strip_protocol(p)):
-                for matched in self.expand_path(p):
-                    self._rm_path(matched, recursive, maxdepth)
-            else:
-                self._rm_path(p, recursive, maxdepth)
-
-    def _rm_path(self, path, recursive: bool, maxdepth: int | None) -> None:
-        """Delete a file, or a directory with its content if recursive."""
-        _, _, _, path_in_volume, full_path = parse_volume_path(path)
+    async def _rm_file(self, path, **kwargs):
+        _, _, _, path_in_volume, full_path = _parse(path)
         if path_in_volume is None or path_in_volume == "/":
-            # Volumes, schemas and catalogs. A list, as DBFS.rm calls self.rm for a string.
-            DBFS.rm(self, [path], recursive=recursive, maxdepth=maxdepth)
-            return
+            raise is_a_directory_error(path)
 
-        if not recursive:
-            self._rm(path)
-            return
+        with error_mapping(path):
+            try:
+                await self._run_in_thread(self.client.files.delete, full_path)
+            except (NotFound, BadRequest):
+                if await self._isdir(path):
+                    raise is_a_directory_error(path) from None
+                raise
 
-        if self.info(path)["type"] == "file":
-            self._delete_file(full_path)
-            return
-
-        files, directories = self._walk_tree(full_path, maxdepth)
-        self._run_concurrently(self._delete_file, files)
-        # Children before parents. Directories of the same depth are independent.
-        directories.append(full_path)
-        for depth in sorted({d.count("/") for d in directories}, reverse=True):
-            self._run_concurrently(
-                self._delete_directory,
-                [d for d in directories if d.count("/") == depth],
+    async def _rmdir(self, path):
+        _, _, _, path_in_volume, full_path = _parse(path)
+        if path_in_volume is None or path_in_volume == "/":
+            raise permission_error(
+                path, "Catalogs, schemas and volumes are not deleted as directories"
             )
 
-    def _walk_tree(
-        self, full_path: str, maxdepth: int | None
-    ) -> tuple[list[str], list[str]]:
-        """List the files and directories under a directory, listing each depth concurrently."""
-        files: list[str] = []
-        directories: list[str] = []
+        # Checked first: deleting a missing directory succeeds on some clouds, e.g.
+        # AWS, where rmdir must raise FileNotFoundError.
+        info = await self._info(path)
+        if info["type"] != "directory":
+            raise not_a_directory_error(path)
 
-        def list_directory(directory: str) -> list[DirectoryEntry]:
-            with error_mapping(directory):
-                return list(self.client.files.list_directory_contents(directory))
-
-        level = [full_path]
-        depth = 0
-        while level and (maxdepth is None or depth < maxdepth):
-            depth += 1
-            next_level = []
-            with ThreadPoolExecutor(
-                max_workers=min(len(level), self._max_delete_concurrency)
-            ) as executor:
-                for entries in executor.map(list_directory, level):
-                    for e in entries:
-                        if e.is_directory:
-                            next_level.append(e.path.rstrip("/"))
-                        else:
-                            files.append(e.path)
-            directories.extend(next_level)
-            level = next_level
-
-        return files, directories
-
-    def _run_concurrently(self, func: Callable[[str], None], paths: Iterable[str]):
-        """Call the function on each path in a thread pool, and raise the first error."""
-        paths = list(paths)
-        if not paths:
-            return
-        with ThreadPoolExecutor(
-            max_workers=min(len(paths), self._max_delete_concurrency)
-        ) as executor:
-            for _ in executor.map(func, paths):
-                pass
-
-    def _delete_file(self, full_path: str) -> None:
-        with error_mapping(full_path):
-            self.client.files.delete(full_path)
-
-    def _delete_directory(self, full_path: str) -> None:
-        with error_mapping(full_path):
+        with error_mapping(path):
             try:
-                self.client.files.delete_directory(full_path)
+                await self._run_in_thread(self.client.files.delete_directory, full_path)
             except BadRequest as e:
-                if "is not empty" in e.args[0]:
-                    raise not_empty_error(full_path) from e
-                else:
-                    raise
+                if "is not empty" in str(e):
+                    raise not_empty_error(path) from e
+                raise
 
-    def rmdir(self, path):
-        # The precondition check is implemented in the base class.
-        AbstractDatabricksFileSystem.rmdir(self, path=path)
+    async def _create_directory(self, path):
+        _, _, _, path_in_volume, full_path = _parse(path)
+        if path_in_volume is None or path_in_volume == "/":
+            raise permission_error(
+                path, "Catalogs, schemas and volumes are not created as directories"
+            )
+        with error_mapping(path):
+            await self._run_in_thread(self.client.files.create_directory, full_path)
 
-        _, _, _, _, full_path = parse_volume_path(path)
-        self._delete_directory(full_path)
-
-    def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
+    ### File I/O
+    async def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
         """Check that the path can be opened in the mode, and return its info if needed."""
         if "r" not in mode and "x" not in mode:
             # Writing only needs to refuse directories
-            if self.isdir(path):
+            if await self._isdir(path):
                 raise is_a_directory_error(path)
             return None
 
         try:
-            info = self.info(path)
+            info = await self._info(path)
         except FileNotFoundError:
             info = None
 
@@ -648,118 +486,78 @@ class VolumeFileSystem(DBFS):
 
         return info
 
-    def _open(
-        self,
-        path,
-        mode="rb",
-        max_concurrency: int | None = None,
-        min_block_size: int | None = None,
-        max_block_size: int | None = None,
-        block_size: int | None = None,
-        autocommit=True,
-        cache_options=None,
-        **kwargs,
-    ):
+    async def _open_file(self, path: str, mode: str):
+        """Open a file object on the running loop."""
         if "a" in mode or "+" in mode:
             raise UnsupportedOperation("Append and read/write modes are not supported.")
 
-        info = self._check_open_target(path, mode)
+        info = await self._check_open_target(path, mode)
+        _, _, _, path_in_volume, full_path = _parse(path)
+        if path_in_volume is None or path_in_volume == "/":
+            raise is_a_directory_error(path)
 
-        auth = _workspace_authenticator(self.config)
-
-        if self.storage_proxy_available:
+        if await self._probe_storage_proxy():
             base_url = self._storage_proxy_hostname
             use_presigned_url = False
         else:
             base_url = self.config.host
             use_presigned_url = True
 
+        kwargs = {
+            "session": await self._get_session(),
+            "base_url": base_url,
+            "auth": _workspace_authenticator(self.config),
+            "concurrency_limit": self.io_limit,
+        }
+        loop = asyncio.get_running_loop()
         if "r" in mode:
             return VolumeReadableFile(
-                path=path,
-                session=self._session,
-                base_url=base_url,
-                auth=auth,
-                loop=self._loop,
-                size=int(info["size"]),
-                max_concurrency=max_concurrency
-                if max_concurrency is not None
-                else self.max_read_concurrency,
-                min_block_size=min_block_size
-                if min_block_size is not None
-                else self.min_read_block_size,
-                max_block_size=max_block_size
-                if max_block_size is not None
-                else self.max_read_block_size,
-                block_size=block_size,
+                full_path,
+                loop,
+                int(info["size"]),
                 prefer_presigned_url=use_presigned_url,
-                verbose_debug_log=self.verbose_debug_log,
+                **kwargs,
             )
         else:
-            min_block_size = (
-                min_block_size
-                if min_block_size is not None
-                else self.min_write_block_size
-            )
-            max_block_size = (
-                max_block_size
-                if max_block_size is not None
-                else self.max_write_block_size
-            )
-            if min_block_size % (256 * 1024) != 0:
-                raise ValueError(
-                    f"min_block_size is {min_block_size} but it must be a multiple of 256 KB (256 * 1024): path={path}"
-                )
-
-            if max_block_size % (256 * 1024) != 0:
-                raise ValueError(
-                    f"max_block_size is {max_block_size} but it must be a multiple of 256 KB (256 * 1024): path={path}"
-                )
-
             return VolumeWritableFile(
-                path=path,
-                session=self._session,
-                base_url=base_url,
-                auth=auth,
-                loop=self._loop,
-                max_concurrency=max_concurrency
-                if max_concurrency is not None
-                else self.max_write_concurrency,
-                min_block_size=min_block_size,
-                max_block_size=max_block_size,
-                min_multipart_upload_size=self.min_multipart_upload_size,
-                block_size=block_size,
-                use_presigned_url=use_presigned_url,
-                verbose_debug_log=self.verbose_debug_log,
+                full_path, loop, use_presigned_url=use_presigned_url, **kwargs
             )
 
-    def open(
+    async def open_async(self, path, mode="rb", **kwargs):
+        if "b" not in mode or kwargs.get("compression"):
+            raise ValueError("Only binary mode without compression is supported")
+        return AsyncFileAdapter(await self._open_file(path, mode))
+
+    def _open(
         self,
         path,
         mode="rb",
-        max_concurrency: int | None = None,
-        min_block_size: int | None = None,
-        max_block_size: int | None = None,
-        block_size: int | None = None,
-        compression: str | None = None,
-        encoding: str | None = None,
-        errors: str | None = None,
-        newline: str | None = None,
+        block_size=None,
+        autocommit=True,
+        cache_options=None,
         **kwargs,
     ):
-        return super().open(
-            path=path,
-            mode=mode,
-            max_concurrency=max_concurrency,
-            min_block_size=min_block_size,
-            max_block_size=max_block_size,
-            block_size=block_size,
-            compression=compression,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **kwargs,
-        )
+        f = sync(self.loop, self._open_file, path, mode)
+        if autocommit or "r" in mode:
+            return f
+        # In a transaction, the upload is completed on commit, and aborted on discard. The last part is held too:
+        # a resumable upload completes with it, and the server chooses that API only once the upload starts.
+        return TransactionFile(AdaptiveWritableTransaction(f, hold_last_part=True))
+
+    def open(self, path, mode="rb", **kwargs):
+        """Open a file in a Unity Catalog Volume.
+
+        Parameters
+        ----------
+        path : str
+            The path to the file in the Unity Catalog Volume file system.
+        mode : str, optional
+            The file mode, such as `rb` or `w`. Append and update modes are not supported.
+        **kwargs
+            Passed to `fsspec.AbstractFileSystem.open`, e.g. `compression`, `encoding`, `errors` and
+            `newline`. Options of the other backends, such as `notebook_format`, are ignored.
+        """
+        return super().open(path, mode, **kwargs)
 
 
 def _workspace_authenticator(config: Config) -> ClientMiddlewareType:
@@ -784,75 +582,72 @@ def _workspace_authenticator(config: Config) -> ClientMiddlewareType:
 _retryable_statuses = frozenset({429, 500, 502, 503, 504})
 
 
-class VolumeReadableFile(AbstractAsyncReadableFile):
-    log = VolumeFileSystem.log
+def _response_error(path: str, error: Exception, doing: str) -> OSError:
+    """An OSError for a failed request, by its HTTP status if it has one."""
+    status = getattr(error, "status", None)
+    message = f"{doing} failed" + (f" with status {status}" if status else "")
+    if status == 404:
+        return file_not_found_error(path, message)
+    if status in (401, 403):
+        return access_error(path, message)
+    if status == 409:
+        return file_exists_error(path, message)
+    return io_error(path, message)
+
+
+async def _check_response(response: ClientResponse, path: str, doing: str) -> None:
+    """Log the request, and raise an OSError for a failed response, logging its body."""
+    if response.ok:
+        logger.debug("%s: path=%s, status=%d", doing, path, response.status)
+        return
+    try:
+        body = await response.text()
+    except ClientError:
+        # The server may close the connection before a refused upload is sent.
+        body = None
+    logger.debug(
+        "%s: path=%s, status=%d, response=%s", doing, path, response.status, body
+    )
+    try:
+        response.raise_for_status()
+    except ClientResponseError as e:
+        raise _response_error(path, e, doing) from e
+
+
+class _VolumeFileMixin:
+    """Request settings shared by the file classes."""
 
     timeout_total: float | None = None
-    """The maximal number of seconds for the whole operation including connection establishment,
-    request sending and response reading.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds for a whole request: connecting, sending and reading the response.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     timeout_connect: float | None = None
-    """The maximal number of seconds for connecting to a peer for a new connection,
-    including wait for a free connection from a pool.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds to get a connection, including the wait for a free one from the pool.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     timeout_sock_connect: float | None = 30
-    """The maximal number of seconds for connecting to a peer for a new connection.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds to connect to a peer for a new connection.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
     timeout_sock_read: float | None = 120
-    """The maximal number of seconds allowed for period between reading a new data portion from a peer.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds between two reads of data from a peer.
+    `None` or `0` means no timeout.
+    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
-    min_presigned_url_size: int = 1024 * 1024
-    """The minimum file size to use presigned URLs for reading the file content. If the file size is smaller
-    than this threshold, the file content will be read from the Files API without using presigned URLs."""
-
-    presigned_url_expiration_duration: int = 60  # min
-    """The duration in minutes for which the presigned URLs are valid."""
-
-    presigned_url_refresh_after: int = 30  # min
-    """The duration in minutes after which the presigned URL should be refreshed."""
-
-    fetch_max_retries: int = 3
-    """The maximal number of retries of a range request after a transient error."""
-
-    fetch_retry_delay: float = 1.0
-    """The base delay in seconds before the first retry of a range request. It doubles with each retry."""
-
-    def __init__(
+    def _init_requests(
         self,
         path: str,
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
-        loop,
-        size: int,
-        max_concurrency: int | None = None,
-        min_block_size: int | None = None,
-        max_block_size: int | None = None,
-        block_size: int | None = None,
-        prefer_presigned_url: bool = True,
-        verbose_debug_log: bool | None = None,
-    ):
-        super().__init__(
-            path=path,
-            loop=loop,
-            size=size,
-            max_concurrency=max_concurrency,
-            min_block_size=min_block_size,
-            max_block_size=max_block_size,
-            block_size=block_size,
-            verbose_debug_log=verbose_debug_log,
-        )
-
+    ) -> None:
         self._session = session
         self._base_url = base_url.rstrip("/")
+        self._files_url = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(path)}"
+        self._auth = auth
         self._timeout = ClientTimeout(
             total=self.timeout_total,
             connect=self.timeout_connect,
@@ -860,9 +655,45 @@ class VolumeReadableFile(AbstractAsyncReadableFile):
             sock_read=self.timeout_sock_read,
         )
 
-        _, _, _, _, self._posix_path = parse_volume_path(path)
 
-        self._auth = auth
+class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
+    """A Unity Catalog Volume file read by range requests, through presigned URLs or the Files API."""
+
+    min_block_size: int = 1 * _MiB
+    """The smallest range request, which smaller reads fetch whole."""
+
+    max_block_size: int = 4 * _MiB
+    """The largest range request. Larger reads are split, to fetch the parts together."""
+
+    min_presigned_url_size: int = 1024 * 1024
+    """The smallest file read through presigned URLs. Smaller files are read from the Files API directly."""
+
+    presigned_url_expiration_duration: int = 60  # min
+    """How many minutes the presigned URLs are valid."""
+
+    presigned_url_refresh_after: int = 30  # min
+    """After how many minutes a presigned URL is renewed."""
+
+    fetch_max_retries: int = 3
+    """The maximum number of retries of a range request after a transient error."""
+
+    fetch_retry_delay: float = 1.0
+    """The base delay in seconds before the first retry of a range request. It doubles with each retry."""
+
+    def __init__(
+        self,
+        path: str,
+        loop: asyncio.AbstractEventLoop,
+        size: int,
+        *,
+        session: ClientSession,
+        base_url: str,
+        auth: ClientMiddlewareType,
+        prefer_presigned_url: bool = True,
+        **kwargs,
+    ):
+        super().__init__(path, loop, size, **kwargs)
+        self._init_requests(path, session, base_url, auth)
 
         self.use_presigned_url = (
             prefer_presigned_url and size >= self.min_presigned_url_size
@@ -871,482 +702,456 @@ class VolumeReadableFile(AbstractAsyncReadableFile):
         self._presigned_url: str | None = None
         self._presigned_url_headers: dict[str, str] | None = None
         self._presigned_url_refresh_time: datetime | None = None
-
-        self._presigned_url_expiration_duration = timedelta(
-            minutes=self.presigned_url_expiration_duration
-        )
-        self._presigned_url_refresh_after = timedelta(
-            minutes=self.presigned_url_refresh_after
-        )
-        self._lock: asyncio.Lock = asyncio.Lock()
+        self._presigned_url_lock = asyncio.Lock()
 
     async def _get_presigned_url(self) -> tuple[str, dict[str, str]]:
-        """Get the presigned URL for reading the file content.
+        """The presigned URL to read the file, with its headers: created anew when missing or due for renewal."""
 
-        If the current presigned URL is expired or not exists, a new presigned URL will be created."""
-
-        async with self._lock:
+        async with self._presigned_url_lock:
             if (
                 self._presigned_url is None
                 or datetime.now(tz=UTC) > self._presigned_url_refresh_time
             ):
                 now = datetime.now(tz=UTC)
-                expire_time = now + self._presigned_url_expiration_duration
-                refresh_time = now + self._presigned_url_refresh_after
+                expire_time = now + timedelta(
+                    minutes=self.presigned_url_expiration_duration
+                )
+                refresh_time = now + timedelta(minutes=self.presigned_url_refresh_after)
 
                 async with self._session.post(
                     f"{self._base_url}/api/2.0/fs/create-download-url",
-                    params={
-                        "path": self._posix_path,
-                        "expire_time": to_rfc3339(expire_time),
-                    },
+                    params={"path": self.path, "expire_time": to_rfc3339(expire_time)},
                     middlewares=(self._auth,),
                     timeout=self._timeout,
                 ) as response:
+                    await _check_response(response, self.path, "Creating presigned URL")
                     result = await response.json()
-                    try:
-                        response.raise_for_status()
-                    except ClientResponseError:
-                        self.log.error(
-                            "Failed to create presigned URL: path=%s, response=%s",
-                            self.path,
-                            result,
-                        )
-                        raise
 
-                    self._presigned_url = result["url"]
-                    self._presigned_url_headers = {
-                        h["name"]: h["value"] for h in result.get("headers", [])
-                    }
-                    self._presigned_url_refresh_time = refresh_time
-                    self.log.debug("Created presigned URL: path=%s", self.path)
+                self._presigned_url = result["url"]
+                self._presigned_url_headers = {
+                    h["name"]: h["value"] for h in result.get("headers", [])
+                }
+                self._presigned_url_refresh_time = refresh_time
 
-        return self._presigned_url, self._presigned_url_headers
+        return self._presigned_url, dict(self._presigned_url_headers)
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
-        delay = self.fetch_retry_delay
-        for _ in range(self.fetch_max_retries):
-            try:
-                return await self._request_range(start, end)
-            except ClientResponseError as e:
-                if e.status not in _retryable_statuses:
-                    raise
-                self.log.warning(
-                    "Retrying range request after status %d: path=%s, range=%d-%d",
-                    e.status,
-                    self.path,
-                    start,
-                    end,
-                )
-            # The jitter keeps concurrent range requests from retrying together.
-            await asyncio.sleep(delay * (1 + random()))
-            delay *= 2
-        return await self._request_range(start, end)
+        try:
+            delay = self.fetch_retry_delay
+            for _ in range(self.fetch_max_retries):
+                try:
+                    return await self._request_range(start, end)
+                except ClientResponseError as e:
+                    if e.status not in _retryable_statuses:
+                        raise
+                    logger.warning(
+                        "Retrying range request after status %d: path=%s, range=%d-%d",
+                        e.status,
+                        self.path,
+                        start,
+                        end,
+                    )
+                # The jitter keeps concurrent range requests from retrying together.
+                await asyncio.sleep(delay * (1 + random()))
+                delay *= 2
+            return await self._request_range(start, end)
+        except (ClientError, TimeoutError) as e:
+            raise _response_error(
+                self.path, e, f"Reading the range {start}-{end}"
+            ) from e
 
     async def _request_range(self, start: int, end: int) -> bytes:
         if self.use_presigned_url:
-            path, headers = await self._get_presigned_url()
+            url, headers = await self._get_presigned_url()
             middlewares = ()
         else:
-            path = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
+            url = self._files_url
             headers = {}
             middlewares = (self._auth,)
 
         headers["Range"] = f"bytes={start}-{end - 1}"
 
         async with self._session.get(
-            path,
+            url,
             headers=headers,
             middlewares=middlewares,
             timeout=self._timeout,
         ) as response:
+            # Reads of ranges are not logged: a read makes many, and the lines would drown the rest.
             response.raise_for_status()
             return await response.read()
-
-    async def aclose(self) -> None:
-        try:
-            await super().aclose()
-        finally:
-            self._session = None
 
 
 _range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
 
 
-class VolumeWritableFile(AbstractAsyncWritableFile):
-    timeout_total: float | None = None
-    """The maximal number of seconds for the whole operation including connection establishment,
-    request sending and response reading.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
+    """A Unity Catalog Volume file uploaded whole, or in parts by the upload API the server chooses.
 
-    timeout_connect: float | None = None
-    """The maximal number of seconds for connecting to a peer for a new connection,
-    including wait for a free connection from a pool.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    The initiate-upload reply names the API of each upload: multipart or resumable. The server's
+    choice is not fixed per cloud and may change with API versions, so the file follows it. The
+    file keeps what both APIs share, and each API's requests live in its session class.
+    """
 
-    timeout_sock_connect: float | None = 30
-    """The maximal number of seconds for connecting to a peer for a new connection.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    part_granularity: int = 256 * 1024
+    """Every part but the last is a multiple of this size."""
 
-    timeout_sock_read: float | None = 120
-    """The maximal number of seconds allowed for period between reading a new data portion from a peer.
-    If `None` or `0` is given, no timeout will be applied.
-    See `aiohttp Documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    min_block_size: int = 5 * _MiB
+    """The smallest part but the last. A multiple of `part_granularity`."""
+
+    max_block_size: int = 16 * _MiB
+    """The largest part. A multiple of `part_granularity`."""
+
+    min_multipart_size: int = 5 * _MiB
+    """The size from which a file is uploaded in parts."""
 
     url_expiration_duration_min: int = 60  # 1 hour
-    """The duration in minutes for which the upload URLs and abort URLs are valid."""
-
-    log = VolumeFileSystem.log
+    """How many minutes the upload and abort URLs are valid."""
 
     def __init__(
         self,
         path: str,
+        loop: asyncio.AbstractEventLoop,
+        *,
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
-        loop,
-        max_concurrency: int | None = None,
-        min_block_size: int | None = None,
-        max_block_size: int | None = None,
-        min_multipart_upload_size: int | None = None,
-        block_size: int | None = None,
         use_presigned_url: bool = True,
-        verbose_debug_log: bool | None = None,
+        **kwargs,
     ):
-        super().__init__(
-            path=path,
-            loop=loop,
-            max_concurrency=max_concurrency,
-            min_block_size=min_block_size,
-            max_block_size=max_block_size,
-            min_multipart_upload_size=min_multipart_upload_size,
-            block_size=block_size,
-            verbose_debug_log=verbose_debug_log,
-        )
+        # Checked before the file is set up, so that nothing is left to abort.
+        for name in ("min_block_size", "max_block_size"):
+            size = kwargs.get(name) or getattr(self, name)
+            if size % self.part_granularity != 0:
+                raise ValueError(
+                    f"{name} is {size} but it must be a multiple of "
+                    f"{self.part_granularity}: path={path}"
+                )
 
-        self._session = session
-        self._base_url = base_url.rstrip("/")
-        self._upload_part_timeout = ClientTimeout(
-            total=self.timeout_total,
-            connect=self.timeout_connect,
-            sock_connect=self.timeout_sock_connect,
-            sock_read=self.timeout_sock_read,
-        )
-
-        _, _, _, _, self._posix_path = parse_volume_path(path)
-
-        self._auth = auth
-
-        self._upload_mode: Literal["multipart", "resumable"] = "multipart"
-        self._session_token: str | None = None
-
-        self._resumable_upload_url: str | None = None
-        self._resumable_upload_headers: dict[str, str] = {}
-        self._resumable_upload_params: dict[str, Any] | None = None
+        super().__init__(path, loop, **kwargs)
+        self._init_requests(path, session, base_url, auth)
 
         self.use_presigned_url = use_presigned_url
-        self.url_expiration_duration = timedelta(
-            minutes=self.url_expiration_duration_min
-        )
+        self._upload_session: _MultipartSession | _ResumableSession | None = None
 
     def _url_expire_time(self) -> str:
-        return to_rfc3339(datetime.now(tz=UTC) + self.url_expiration_duration)
+        return to_rfc3339(
+            datetime.now(tz=UTC) + timedelta(minutes=self.url_expiration_duration_min)
+        )
+
+    def _middlewares(self) -> tuple[ClientMiddlewareType, ...]:
+        """Presigned URLs carry their own authorization."""
+        return () if self.use_presigned_url else (self._auth,)
+
+    async def _post_json(self, url: str, body: dict[str, Any], doing: str) -> Any:
+        async with self._session.post(
+            url, json=body, middlewares=(self._auth,), timeout=self._timeout
+        ) as response:
+            await _check_response(response, self.path, doing)
+            return await response.json()
+
+    async def _delete(
+        self, url: str, headers: dict[str, str], params: dict[str, Any] | None
+    ) -> None:
+        async with self._session.delete(
+            url,
+            headers=headers,
+            params=params,
+            middlewares=self._middlewares(),
+            data=b"",
+            timeout=self._timeout,
+        ) as response:
+            await _check_response(response, self.path, "Aborting upload")
 
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(
-            f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
+            self._files_url,
             data=data,
             middlewares=(self._auth,),
+            timeout=self._timeout,
         ) as response:
-            response.raise_for_status()
+            await _check_response(response, self.path, "Uploading")
 
     async def _start_multipart_upload(self) -> None:
         async with self._session.post(
-            f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
+            self._files_url,
             params={"action": "initiate-upload"},
             middlewares=(self._auth,),
+            timeout=self._timeout,
         ) as response:
+            await _check_response(response, self.path, "Initiating upload")
             result = await response.json()
-            try:
-                response.raise_for_status()
-            except ClientResponseError:
-                self.log.error(
-                    "Failed to initiate upload: path=%s, response=%s", self.path, result
-                )
-                raise
 
-            if "multipart_upload" in result:
-                self.log.debug("Upload mode - multipart: path=%s", self.path)
-                self._upload_mode = "multipart"
-                self._session_token = result["multipart_upload"]["session_token"]
-            elif "resumable_upload" in result:
-                self.log.debug("Upload mode - resumable: path=%s", self.path)
-                self._upload_mode = "resumable"
-                self._session_token = result["resumable_upload"]["session_token"]
+        # The server chooses the API of each upload: the file follows it.
+        if "multipart_upload" in result:
+            self._upload_session = _MultipartSession(
+                self, result["multipart_upload"]["session_token"]
+            )
+        elif "resumable_upload" in result:
+            self._upload_session = await _ResumableSession.start(
+                self, result["resumable_upload"]["session_token"]
+            )
+            # A resumable upload takes its parts one at a time, in order.
+            self.sequential = True
+        else:
+            raise io_error(self.path, f"Unexpected initiate-upload response: {result}")
 
-                self.max_concurrency = 1
-                url, headers, params = await self._get_resumable_upload_url()
-                self._resumable_upload_url = url
-                self._resumable_upload_headers = headers
-                self._resumable_upload_params = params
-            else:
-                raise ValueError(f"Unexpected initiate-upload response: {result}")
+    async def _upload_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> tuple[int, str] | None:
+        assert self._upload_session is not None
+        # The server's errors as OSErrors of their kind, e.g. a PermissionError for a 403.
+        try:
+            return await self._upload_session.upload_part(data, start, end, index, last)
+        except (ClientError, TimeoutError) as e:
+            raise _response_error(self.path, e, f"Uploading part {index}") from e
 
-    async def _get_multipart_upload_url(
+    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
+        assert self._upload_session is not None
+        await self._upload_session.complete(parts)
+
+    async def _abort_multipart_upload(self) -> None:
+        if self._upload_session is None:
+            # No session started, e.g. the initiation failed: nothing to abort.
+            return
+        logger.warning("Aborting upload: path=%s", self.path)
+        await self._upload_session.abort()
+
+
+class _MultipartSession:
+    """A multipart upload session: parts in parallel, completed with their ETags."""
+
+    def __init__(self, file: VolumeWritableFile, session_token: str):
+        self.file = file
+        self.session_token = session_token
+
+    async def upload_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> tuple[int, str]:
+        file = self.file
+        # The multipart upload API's part numbers are 1-based.
+        part_number = index + 1
+
+        url, headers, params = await self._part_url(part_number)
+
+        async with file._session.put(
+            url,
+            headers=headers,
+            params=params,
+            data=data,
+            middlewares=file._middlewares(),
+            timeout=file._timeout,
+        ) as response:
+            await _check_response(response, file.path, f"Uploading part {part_number}")
+            return part_number, response.headers.get("etag", "")
+
+    async def _part_url(
         self, part_number: int
-    ) -> tuple[str, dict[str, str], dict[str, str] | None]:
-        if self.use_presigned_url:
-            async with self._session.post(
-                f"{self._base_url}/api/2.0/fs/create-upload-part-urls",
-                json={
-                    "path": self._posix_path,
-                    "session_token": self._session_token,
+    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+        file = self.file
+        if file.use_presigned_url:
+            result = await file._post_json(
+                f"{file._base_url}/api/2.0/fs/create-upload-part-urls",
+                {
+                    "path": file.path,
+                    "session_token": self.session_token,
                     "start_part_number": part_number,
                     "count": 1,
-                    "expire_time": self._url_expire_time(),
+                    "expire_time": file._url_expire_time(),
                 },
-                middlewares=(self._auth,),
-            ) as response:
-                result = await response.json()
-                try:
-                    response.raise_for_status()
-                except ClientResponseError:
-                    self.log.error(
-                        "Failed to get URL for part upload: path=%s, response=%s",
-                        self.path,
-                        result,
-                    )
-                    raise
-
-            path = result["upload_part_urls"][0]["url"]
+                "Getting URL for part upload",
+            )
+            url = result["upload_part_urls"][0]["url"]
             headers = {
                 h["name"]: h["value"]
                 for h in result["upload_part_urls"][0].get("headers", [])
             }
             headers["Content-Type"] = "application/octet-stream"
-            params = None
-        else:
-            path = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
-            headers = {"Content-Type": "application/octet-stream"}
-            params = {
-                "session_token": self._session_token,
+            return url, headers, None
+        return (
+            file._files_url,
+            {"Content-Type": "application/octet-stream"},
+            {
+                "session_token": self.session_token,
                 "upload_type": "multipart",
                 "part_number": part_number,
-            }
+            },
+        )
 
-        return path, headers, params
-
-    async def _upload_part(
-        self, data: bytes, start: int, end: int, part_index: int, last_part: bool
-    ) -> tuple[int, str] | None:
-        if self._upload_mode == "resumable":
-            await self._upload_resumable_part(data, start, end, last_part)
-            return None
-
-        # Add 1 as part_number used by the multipart upload API is 1-based index
-        # while the part_index used in the code is 0-based.
-        part_number = part_index + 1
-
-        path, headers, params = await self._get_multipart_upload_url(part_number)
-
-        async with self._session.put(
-            path,
-            headers=headers,
-            params=params,
-            data=data,
-            middlewares=() if self.use_presigned_url else (self._auth,),
-            timeout=self._upload_part_timeout,
-        ) as response:
-            response.raise_for_status()
-            return part_number, response.headers.get("etag", "")
-
-    async def _get_resumable_upload_url(
-        self,
-    ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        if self.use_presigned_url:
-            async with self._session.post(
-                f"{self._base_url}/api/2.0/fs/create-resumable-upload-url",
-                json={
-                    "path": self._posix_path,
-                    "session_token": self._session_token,
-                    "expire_time": self._url_expire_time(),
-                },
-                middlewares=(self._auth,),
-            ) as response:
-                result = await response.json()
-                try:
-                    response.raise_for_status()
-                except ClientResponseError:
-                    self.log.error(
-                        "Failed to get URL for resumable upload: path=%s, response=%s",
-                        self.path,
-                        result,
-                    )
-                    raise
-            url = result["resumable_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["resumable_upload_url"].get("headers", [])
-            }
-            params = None
-        else:
-            url = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
-            headers = {"Content-Type": "application/octet-stream"}
-            params = {
-                "session_token": self._session_token,
-                "upload_type": "resumable",
-            }
-
-        return url, headers, params
-
-    async def _upload_resumable_part(
-        self, data: bytes, start: int, end: int, last_part: bool
-    ) -> None:
-        original_start = start
-        while True:
-            headers = dict(self._resumable_upload_headers)
-            headers["Content-Range"] = (
-                f"bytes {start}-{end - 1}/{end if last_part else '*'}"
-            )
-            headers["Content-Type"] = "application/octet-stream"
-
-            async with self._session.put(
-                self._resumable_upload_url,
-                headers=headers,
-                params=self._resumable_upload_params,
-                data=data[start - original_start :],
-                timeout=self._upload_part_timeout,
-                middlewares=() if self.use_presigned_url else (self._auth,),
-            ) as response:
-                if response.status in (200, 201) and last_part:
-                    break  # Upload is done
-                if response.status == 308:
-                    m = _range_pat.match(response.headers.get("Range") or "")
-                    if m is None:
-                        raise io_error(
-                            self.path,
-                            f"Invalid or missing Range header in resumable upload response: "
-                            f"header={response.headers.get('Range')!r}",
-                        )
-                    confirmed = int(m.group("end"))
-                    if confirmed == end - 1:
-                        break
-                    else:
-                        start = confirmed + 1
-                        continue  # Retry the upload for the remaining part
-                else:
-                    self.log.error(
-                        "Unexpected response for resumable upload: path=%s, status=%d",
-                        self.path,
-                        response.status,
-                    )
-                    raise io_error(
-                        self.path,
-                        f"Unexpected response for resumable upload: status={response.status}",
-                    )
-
-    async def _complete_multipart_upload(self) -> None:
-        if self._upload_mode == "resumable":
-            return  # No need to complete the resumable upload as it's completed when uploading the last part.
-
-        parts = list(await asyncio.gather(*self._tasks))
-        parts.sort()
-
-        async with self._session.post(
-            f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}",
+    async def complete(self, parts: list[Any]) -> None:
+        file = self.file
+        async with file._session.post(
+            file._files_url,
             params={
                 "action": "complete-upload",
                 "upload_type": "multipart",
-                "session_token": self._session_token,
+                "session_token": self.session_token,
             },
             json={
-                "parts": [{"part_number": i, "etag": etag} for i, etag in parts],
+                "parts": [
+                    {"part_number": i, "etag": etag} for i, etag in sorted(parts)
+                ],
             },
-            middlewares=(self._auth,),
+            middlewares=(file._auth,),
+            timeout=file._timeout,
         ) as response:
-            text = await response.text()
-            try:
-                response.raise_for_status()
-            except ClientResponseError:
-                self.log.error(
-                    "Failed to complete upload: path=%s, response=%s", self.path, text
-                )
-                raise
+            await _check_response(response, file.path, "Completing upload")
 
-    async def _get_multipart_upload_abort_url(
-        self,
-    ) -> tuple[str, dict[str, str], dict[str, str] | None]:
-        if self.use_presigned_url:
-            async with self._session.post(
-                f"{self._base_url}/api/2.0/fs/create-abort-upload-url",
-                json={
-                    "path": self._posix_path,
-                    "session_token": self._session_token,
-                    "expire_time": self._url_expire_time(),
+    async def _abort_url(self) -> tuple[str, dict[str, str], dict[str, Any] | None]:
+        file = self.file
+        if file.use_presigned_url:
+            result = await file._post_json(
+                f"{file._base_url}/api/2.0/fs/create-abort-upload-url",
+                {
+                    "path": file.path,
+                    "session_token": self.session_token,
+                    "expire_time": file._url_expire_time(),
                 },
-                middlewares=(self._auth,),
-            ) as response:
-                result = await response.json()
-                try:
-                    response.raise_for_status()
-                except ClientResponseError:
-                    self.log.error(
-                        "Failed to get URL for upload abort: path=%s, response=%s",
-                        self.path,
-                        result,
-                    )
-                    raise
-
-            path = result["abort_upload_url"]["url"]
+                "Getting URL for upload abort",
+            )
+            url = result["abort_upload_url"]["url"]
             headers = {
                 h["name"]: h["value"]
                 for h in result["abort_upload_url"].get("headers", [])
             }
             headers["Content-Type"] = "application/octet-stream"
-            params = None
-        else:
-            path = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(self._posix_path)}"
-            headers = {"Content-Type": "application/json"}
-            params = {
-                "action": "abort-upload",
-                "session_token": self._session_token,
-            }
+            return url, headers, None
+        return (
+            file._files_url,
+            {"Content-Type": "application/json"},
+            {"action": "abort-upload", "session_token": self.session_token},
+        )
 
-        return path, headers, params
-
-    async def _abort_multipart_upload(self) -> None:
-        if self._upload_mode == "multipart":
-            try:
-                path, headers, params = await self._get_multipart_upload_abort_url()
-            except ClientResponseError as e:
-                if e.status == 400:
-                    return  # Azure Databricks does not support abort of multipart upload
-                raise
-        else:
-            path = self._resumable_upload_url
-            headers = self._resumable_upload_headers
-            params = self._resumable_upload_params
-
-        async with self._session.delete(
-            path,
-            headers=headers,
-            params=params,
-            middlewares=() if self.use_presigned_url else (self._auth,),
-            data=b"",
-        ) as response:
-            response.raise_for_status()
-
-    async def aclose(self) -> None:
+    async def abort(self) -> None:
         try:
-            await super().aclose()
-        finally:
-            self._session = None
+            url, headers, params = await self._abort_url()
+        except OSError as e:
+            if (
+                isinstance(e.__cause__, ClientResponseError)
+                and e.__cause__.status == 400
+            ):
+                return  # Azure Databricks does not support abort of multipart upload
+            raise
+        await self.file._delete(url, headers, params)
+
+
+class _ResumableSession:
+    """A resumable upload session: parts one at a time, in order, the last completing it.
+
+    Parts but the last are multiples of 256 KiB, as resumable uploads require.
+    """
+
+    def __init__(
+        self,
+        file: VolumeWritableFile,
+        url: str,
+        headers: dict[str, str],
+        params: dict[str, Any] | None,
+    ):
+        self.file = file
+        self.url = url
+        self.headers = headers
+        self.params = params
+
+    @classmethod
+    async def start(
+        cls, file: VolumeWritableFile, session_token: str
+    ) -> "_ResumableSession":
+        """Get where to send the parts, which is also where to abort the session."""
+        if file.use_presigned_url:
+            result = await file._post_json(
+                f"{file._base_url}/api/2.0/fs/create-resumable-upload-url",
+                {
+                    "path": file.path,
+                    "session_token": session_token,
+                    "expire_time": file._url_expire_time(),
+                },
+                "Getting URL for resumable upload",
+            )
+            url = result["resumable_upload_url"]["url"]
+            headers = {
+                h["name"]: h["value"]
+                for h in result["resumable_upload_url"].get("headers", [])
+            }
+            return cls(file, url, headers, None)
+        return cls(
+            file,
+            file._files_url,
+            {"Content-Type": "application/octet-stream"},
+            {"session_token": session_token, "upload_type": "resumable"},
+        )
+
+    async def upload_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> None:
+        file = self.file
+        original_start = start
+        while True:
+            headers = dict(self.headers)
+            headers["Content-Range"] = f"bytes {start}-{end - 1}/{end if last else '*'}"
+            headers["Content-Type"] = "application/octet-stream"
+
+            async with file._session.put(
+                self.url,
+                headers=headers,
+                params=self.params,
+                data=data[start - original_start :],
+                timeout=file._timeout,
+                middlewares=file._middlewares(),
+            ) as response:
+                logger.debug(
+                    "PUT resumable part %d-%d: path=%s, status=%d",
+                    start,
+                    end,
+                    file.path,
+                    response.status,
+                )
+                if response.status in (200, 201) and last:
+                    return  # Upload is done
+                if response.status != 308:
+                    raise io_error(
+                        file.path,
+                        f"Unexpected response for resumable upload: status={response.status}",
+                    )
+                m = _range_pat.match(response.headers.get("Range") or "")
+                if m is None:
+                    raise io_error(
+                        file.path,
+                        f"Invalid or missing Range header in resumable upload response: "
+                        f"header={response.headers.get('Range')!r}",
+                    )
+                confirmed = int(m.group("end"))
+                if confirmed == end - 1:
+                    return
+                # Send again what the server has not confirmed
+                start = confirmed + 1
+
+    async def complete(self, parts: list[Any]) -> None:
+        pass  # The last part completes a resumable upload.
+
+    async def abort(self) -> None:
+        # The upload URL is known already: no request for another.
+        await self.file._delete(self.url, self.headers, self.params)
 
 
 __all__ = [
     "VolumeFileSystem",
+    "VolumeReadableFile",
+    "VolumeWritableFile",
     "volumes_root_info",
 ]
+
+
+def _listing(client, catalog, schema, volume, full_path, include_browse):
+    """The SDK listing of a path: the SDK's method, and its positional and keyword arguments."""
+    if catalog is None:
+        return client.catalogs.list, (), {"include_browse": include_browse}
+    if schema is None:
+        return client.schemas.list, (catalog,), {"include_browse": include_browse}
+    if volume is None:
+        return (
+            client.volumes.list,
+            (catalog, schema),
+            {"include_browse": include_browse},
+        )
+    return client.files.list_directory_contents, (full_path,), {}

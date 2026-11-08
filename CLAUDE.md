@@ -9,7 +9,9 @@ All Python goes through uv: never call `python` or `pip` directly.
 ```bash
 uv sync                                         # the package, editable, with the dev dependencies (uv.lock)
 uv lock                                         # update uv.lock after changing dependencies, and commit it
-uv run pytest                                   # all tests: most need a Databricks workspace (see below)
+uv run pytest                                   # all tests, on the dummy server: no workspace needed
+uv run pytest --api=live tests/test_dbfs.py     # the backend tests on the live workspace; --api=both for both
+uv run pytest --fs=volume,workspace             # only these backends: volume, workspace, dbfs
 uv run pytest tests/test_path.py -k volume      # one file / matching tests
 uv run pytest --cov                             # with coverage of src/
 uvx ruff check .                                # lint (ruff is not a dev dependency; config in pyproject.toml)
@@ -17,61 +19,76 @@ uvx ruff format .                               # format
 uvx pre-commit run --all-files                  # the hooks: ruff, whitespace, end of files, YAML
 ```
 
-CI, in `.github/workflows/on_push.yaml`, runs on pushes:
+CI, in `.github/workflows/ci.yaml`, runs on pull requests and pushes to `main`:
 
-- ruff check and ruff format check, with the latest ruff;
-- pytest on Python 3.14 against the default workspace, with coverage on `main`;
-- on `main`, pytest on the other supported Python versions;
-- pytest on Azure, AWS or GCP workspaces named in the `TEST_ENVIRONMENTS` variable.
+- `lint`: ruff check, ruff format check, zizmor and actionlint;
+- `test`: pytest on the dummy server on Python 3.11 to 3.14, with coverage to Codecov from 3.14;
+- `live`: pytest `--api=live` on Python 3.14, on the `aws`, `azure` and `gcp` environments, never for forks.
 
-Releases are published GitHub releases. DEVELOPMENT.md describes them.
+`codeql.yaml` scans the code and workflows. `release.yaml` releases a pushed `v*` tag: DEVELOPMENT.md describes it.
 
-The test jobs hold Databricks credentials. Keep their supply chain fixed:
+The live jobs hold Databricks credentials. Keep their supply chain fixed:
 
 - `uv.lock` is committed, and CI installs with `uv sync --locked`. After changing dependencies, run `uv lock` and
   commit `uv.lock`.
-- Actions are pinned to commit SHAs, with the version in a comment, e.g. `@<sha> # v7.0.1`. Dependabot updates both.
-- `astral-sh/setup-uv` publishes no major-version tags: pin a full version's SHA.
+- Pin every action to a full commit SHA, with its version in a comment, e.g. `@<sha>  # v7.0.1`. Dependabot updates
+  them. Also pin uv's `version`.
+- Check out with `persist-credentials: false`: no job pushes.
 - Never add a `pull_request_target` trigger, or give secrets to `pull_request` runs from forks.
 - Each workflow declares `permissions:`, with only what it needs.
+- Check changes with `uvx zizmor --offline .github/workflows` and `uvx --from actionlint-py actionlint`.
 
 ## Tests and layout
 
 DEVELOPMENT.md describes the layout, the tests and their setup. Read its Tests section before writing tests. The traps:
 
-- Most tests run against a real workspace. They need credentials and the two test root variables, from `.env` or the
-  environment.
-- The session fixtures `volume_test_root` and `workspace_test_root` delete everything in the test roots first. Never
-  point them at folders holding anything else.
-- Without credentials, run `tests/test_file.py`, `tests/test_volume.py`, `tests/test_path.py` and `tests/test_utils.py`.
-  `test_volume.py` and `test_file.py` use the fake Files API in `tests/dummy_api.py`.
-- A test of anything a workspace serves gets a check without one where possible, on the fake API or with mocks.
-- Test helpers shared by files are in `tests/utils.py`.
+- `uv run pytest` runs everything on the dummy server, `tests/dummy_api.py`, with no credentials. `--api=live` or
+  `--api=both` runs the backend tests on the workspace too, from `.env` or the environment.
+- Without `--api` and `--fs`, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS` choose, from the
+  environment or `.env`.
+- `--fs` selects the backends. Each backend test has a `backend` marker, and a test spanning backends names them all.
+- Run live files one at a time: the Volumes tests take about 20 minutes.
+- The session fixtures `volume_test_root`, `workspace_test_root` and `dbfs_test_root` delete everything in the test
+  roots first. Never point them at folders holding anything else.
+- Never fake the SDK or its clients. A backend test takes `client`, which is the dummy's or the workspace's.
+- A test taking the `dummy` fixture runs on the dummy only. Count requests with `dummy.requests`, never with mocks.
+- `tests/dummy_api.py` serves the Files, Workspace, DBFS and Unity Catalog APIs over HTTP, to the SDK's real
+  `WorkspaceClient`. Follow the REST reference there, and mark behaviour it leaves open as an assumption.
+- One test file per module. Test helpers shared by files are in `tests/utils.py`: test files never import each other.
 - `tests/conftest.py` sets `cachable = False`, so each test gets new file system instances.
 
 ## Architecture
 
 DEVELOPMENT.md's Architecture section describes each part: read it before changing one. The traps:
 
-- `DatabricksFileSystem` routes each call to a backend by path. It holds no file system logic of its own, except for
-  the root folder and transfers between backends.
-- Its methods get the backend and the path to pass with `_resolve(path)`. Inside a workspace, that path is a local
-  path, and names returned are mapped back with `from_local_path`.
-- Base class methods in `base.py` only check preconditions. Subclasses call `super()` first, then the API.
+- `DatabricksFileSystem` is the library's `AsyncRoutingFileSystem`. It implements `_route`, `_outer` and `_roots`.
+  Override a method that the router passes on only for what Databricks adds, e.g. `open`'s notebook parameters.
+- `_route(path)` gives the backend and its path. Inside a workspace, that path is a local path, and `_outer` maps the
+  names returned back with `from_local_path`.
+- Every backend must be async. The local file system is wrapped in the library's `SyncTreeWrapper`.
+- Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `BaseDatabricksFileSystem` in `base.py`,
+  and call the SDK in threads with `_run_in_thread`, passing the SDK's bound method and its arguments.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
-- aiohttp objects are created and used in the Volume backend's IO event loop. `TCPConnector` needs a running loop.
-- Never block on the IO loop from code running in it. File objects' synchronous methods raise there.
+- `VolumeFileSystem` is an async fsspec file system on fsspec's loop. Its aiohttp session is created on the loop using
+  it, as `TCPConnector` needs a running loop.
+- Never block on the loop from code running in it. File objects' synchronous methods raise there.
+- `src/fsspec_databricks/_contrib/strategy/` is a copy of fsspec-alt-strategies. Never edit it: DEVELOPMENT.md says how
+  to refresh it.
 - `DatabricksFileSystem.__init__` takes every parameter of the SDK's `WorkspaceClient`, in its order.
   `test_dbx_fs_accepts_workspace_client_params` fails when the SDK adds one: add it to the signature, the docstring
   and `config_params`.
 - File systems must stay picklable. fsspec pickles them as their constructor arguments, so every argument must be
   picklable. Runtime attributes are never pickled.
 - Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
-  `mixins/files.py` uses the same: follow it. Keep the fallback to resumable upload working.
+  `mixins/files.py` uses the same: follow it. Keep resumable upload working too.
 - Volume write block sizes are multiples of 256 KB.
-- Workspace files are cached whole in memory, up to the API's 10 MB.
-- Chatty debug logs go under `if self.verbose_debug_log:`.
+- Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
+- Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on the dummy server.
+- Logging follows s3fs and gcsfs. Each module has `logging.getLogger(__name__)`, and the library installs no handlers.
+- Log one DEBUG line per request to Databricks, where it leaves the process: `_run_in_thread` in `base.py`, and Volumes' HTTP
+  helpers in `volume.py`. Range reads are not logged. Keep it cheap, with lazy `%` formatting.
+- Log retries and aborted uploads at WARNING. Log nothing else: the library's monitors report operations.
 
 ## Conventions
 
@@ -113,6 +130,8 @@ Write docs so that people can review them. That covers this file, DEVELOPMENT.md
 
 Update the docs when behaviour, parameters or options change. Keep user docs short and compact: what users do, not how
 it works or why.
+
+After each release, rewrite its GitHub release notes as DEVELOPMENT.md's "Release notes" says, without being asked.
 
 ### Links
 

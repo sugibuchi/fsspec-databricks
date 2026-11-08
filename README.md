@@ -1,6 +1,10 @@
 # fsspec-databricks
 
 [![PyPI - Version](https://img.shields.io/pypi/v/fsspec-databricks?color=blue)](https://pypi.org/project/fsspec-databricks/)
+[![Python versions](https://img.shields.io/pypi/pyversions/fsspec-databricks)](https://pypi.org/project/fsspec-databricks/)
+[![License](https://img.shields.io/github/license/sugibuchi/fsspec-databricks)](https://github.com/sugibuchi/fsspec-databricks/blob/main/LICENSE)
+[![CI](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/ci.yaml)
+[![CodeQL](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/codeql.yaml/badge.svg?branch=main)](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/codeql.yaml)
 [![codecov](https://codecov.io/github/sugibuchi/fsspec-databricks/graph/badge.svg?token=RKC8T20CEE)](https://codecov.io/github/sugibuchi/fsspec-databricks)
 
 An [fsspec](https://filesystem-spec.readthedocs.io/en/latest/) file system for Databricks:
@@ -72,9 +76,8 @@ for authentication.
 | `dbfs:/Workspace/path`                                 | Workspace files                             |
 | `dbfs:/path`, any other                                | Legacy DBFS                                 |
 
-POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and `/path`. Databricks maps `/Workspace`
-to Workspace files only in workspaces with legacy DBFS disabled. See
-[Databricks' documentation](https://docs.databricks.com/aws/en/files/).
+POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and `/path`. See
+[Databricks' documentation](https://docs.databricks.com/aws/en/files/) for these paths.
 
 ---
 
@@ -84,7 +87,7 @@ to Workspace files only in workspaces with legacy DBFS disabled. See
 * `databricks-sdk`: 0.156.0 or later
 * `fsspec`: 2024.6.0 or later
 * `aiohttp`: 3.12.0 or later
-* Tested on Databricks Free Edition, Azure Databricks and Databricks on Google Cloud
+* Tested live on Databricks Free Edition on AWS, Azure Databricks and Databricks on Google Cloud
 
 ---
 
@@ -94,8 +97,7 @@ to Workspace files only in workspaces with legacy DBFS disabled. See
 
 * Writing Volume files uses the Files API's multipart upload. The Databricks REST reference does not document it, but
   the official Databricks SDK for Python uses it, as an experimental feature.
-* Databricks on AWS is not tested.
-* Legacy DBFS is not tested.
+* Legacy DBFS is tested offline only, on a simulated API: no test workspace enables it.
 
 ---
 

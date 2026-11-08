@@ -1,12 +1,10 @@
-import glob
-import logging
-import os
-from io import BytesIO
+import asyncio
+import errno
+import io
+from io import UnsupportedOperation
 from typing import Any, Literal
 
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.config import Config
-from databricks.sdk.errors import BadRequest, ResourceDoesNotExist
+from databricks.sdk.errors import BadRequest
 from databricks.sdk.service.workspace import (
     ExportFormat,
     ImportFormat,
@@ -14,18 +12,21 @@ from databricks.sdk.service.workspace import (
     ObjectInfo,
     ObjectType,
 )
+from fsspec_alt_strategies.profile import StorageProfile
 
-from .base import AbstractDatabricksFileSystem, root_dir_info
+from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
+from ._contrib.strategy.files.fsspec_transaction import FileTransaction, TransactionFile
+from .base import BaseDatabricksFileSystem, root_dir_info
 from .error import (
     error_mapping,
     file_exists_error,
     file_not_found_error,
     is_a_directory_error,
+    not_a_directory_error,
     not_empty_error,
 )
-from .file import MemoryCachedFile, write_mode
 from .path import dbfs_root, parse_workspace_path, workspace_root
-from .utils import to_datetime, value_of
+from .utils import to_datetime, value_of, write_mode
 
 workspace_root_info = {
     "name": workspace_root,
@@ -64,97 +65,104 @@ def _map_info(info: ObjectInfo, detail: bool) -> dict[str, Any] | str:
         return f"/Workspace{info.path}"
 
 
-class WorkspaceFileSystem(AbstractDatabricksFileSystem):
-    """Databricks Workspace file system."""
+def _parse(path: str) -> str:
+    """`parse_workspace_path`, raising FileNotFoundError for paths outside /Workspace."""
+    try:
+        return parse_workspace_path(path)
+    except ValueError:
+        raise file_not_found_error(path) from None
 
-    log = logging.getLogger(__name__)
+
+class WorkspaceFileSystem(BaseDatabricksFileSystem):
+    """Databricks Workspace file system.
+
+    An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
+    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. A recursive `rm`
+    deletes each directory by the API's own recursive delete, `_rm_tree`.
+    """
+
+    storage_profile = StorageProfile(
+        fs_type="tree",
+        parents_required=True,
+        implicit_folders=False,
+        renames_files=False,
+        renames_folders=False,
+    )
+    """What the Workspace API does.
+
+    - It lists one directory per request, so the tree strategies suit it.
+    - An import into a missing directory fails: the parents are made first, by `mkdirs`.
+    - Directories are objects of their own: an empty one exists, and is deleted by a request of its own.
+    - It has no move, of files or directories.
+    """
 
     def __init__(
         self,
-        client: WorkspaceClient | None = None,
-        config: Config | None = None,
+        client=None,
+        config=None,
         config_params: dict[str, Any] | None = None,
-        verbose_debug_log: bool | None = None,
+        operation_concurrency: int | None = None,
+        io_concurrency: int | None = None,
         **storage_options,
     ):
-        """Initialize the Workspace file system."""
+        """Initialize the Workspace file system.
+
+        Parameters
+        ----------
+        client : WorkspaceClient, optional
+            A Databricks SDK `WorkspaceClient` to call the APIs with.
+        config : Config, optional
+            A Databricks SDK `Config` to authenticate with.
+        config_params : dict[str, Any], optional
+            The parameters of a Databricks SDK `Config`, used without `client` or `config`.
+        operation_concurrency : int, optional
+            The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
+            Defaults to 16.
+        io_concurrency : int, optional
+            Adds to the threads running SDK calls. Defaults to 8. Files do not use it: each is downloaded and
+            uploaded whole, in the thread that opens or closes it.
+        **storage_options
+            Standard fsspec storage options, such as `asynchronous` and `loop`.
+        """
         super().__init__(
             client=client,
             config=config,
             config_params=config_params,
-            verbose_debug_log=verbose_debug_log,
+            operation_concurrency=operation_concurrency,
+            io_concurrency=io_concurrency,
             **storage_options,
         )
 
     ### File/directory information
-    def info(self, path, **kwargs):
-        super().info(path=path, **kwargs)
+    async def _info(self, path, **kwargs):
+        if self._strip_protocol(path) == dbfs_root:
+            return dict(root_dir_info)
 
-        stripped = self._strip_protocol(path)
-        if stripped == dbfs_root:
-            return root_dir_info
-
-        try:
-            workspace_path = parse_workspace_path(path)
-        except ValueError:
-            raise file_not_found_error(path) from None
-
+        workspace_path = _parse(path)
         with error_mapping(path):
-            return _map_info(
-                self.client.workspace.get_status(workspace_path),
-                detail=True,
+            status = await self._run_in_thread(
+                self.client.workspace.get_status, workspace_path
             )
+        return _map_info(status, detail=True)
 
-    def ls(self, path, detail=True, **kwargs):
-        super().ls(path=path, detail=detail, **kwargs)
+    async def _ils(self, path, **kwargs):
+        """List a folder a page at a time, as the SDK's listing fetches them."""
+        if self._strip_protocol(path) == dbfs_root:
+            yield dict(workspace_root_info)
+            return
 
-        stripped = self._strip_protocol(path)
-        if stripped == dbfs_root:
-            return [workspace_root_info] if detail else [workspace_root]
-
-        try:
-            workspace_path = parse_workspace_path(path)
-        except ValueError:
-            raise file_not_found_error(path) from None
-
+        workspace_path = _parse(path)
         with error_mapping(path):
-            return [
-                _map_info(i, detail) for i in self.client.workspace.list(workspace_path)
-            ]
-
-    def exists(self, path, **kwargs):
-        try:
-            with error_mapping(path):
-                self.client.workspace.get_status(parse_workspace_path(path))
-                return True
-        except FileNotFoundError:
-            return False
-
-    def created(self, path):
-        return self.info(path)["created"]
-
-    def modified(self, path):
-        return self.info(path)["modified"]
+            listing = self._iter_in_thread(self.client.workspace.list, workspace_path)
+            async for entry in listing:
+                yield _map_info(entry, True)
 
     ### File/directory operations
-    def cp_file(self, path1, path2, **kwargs):
-        # The precondition check is implemented in the base class.
-        super().cp_file(path1=path1, path2=path2, **kwargs)
-
-        file_path1 = parse_workspace_path(path1)
-        file_path2 = parse_workspace_path(path2)
-
-        source_info = self.info(path1)
+    async def _cp_file(self, path1, path2, **kwargs):
+        source_info = await self._info(path1)
         if source_info["type"] == "directory":
-            try:
-                dest_info = self.info(path2)
-                if dest_info["type"] == "directory":
-                    return
-                else:
-                    raise file_exists_error(path2)
-            except FileNotFoundError:
-                self.mkdirs(path2)
-                return
+            await self._cp_directory(path2)
+            return
 
         if source_info["object_type"] == "NOTEBOOK":
             export_format = ExportFormat.SOURCE
@@ -165,97 +173,91 @@ class WorkspaceFileSystem(AbstractDatabricksFileSystem):
             import_format = ImportFormat.RAW
             language = None
 
-        with (
-            error_mapping(path1),
-            self.client.workspace.download(
-                file_path1,
-                format=export_format,
-            ) as f,
-            error_mapping(path2),
-        ):
-            self.client.workspace.upload(
+        file_path1 = _parse(path1)
+        file_path2 = _parse(path2)
+
+        def download(path, format):
+            # In one thread: the download's stream is read as it is opened.
+            with self.client.workspace.download(path, format=format) as f:
+                return f.read()
+
+        with error_mapping(path1):
+            data = await self._run_in_thread(download, file_path1, export_format)
+        with error_mapping(path2):
+            await self._run_in_thread(
+                self.client.workspace.upload,
                 file_path2,
-                f,
+                data,
                 format=import_format,
                 language=language,
+                overwrite=True,
             )
 
-    def _rm(self, path):
-        # The precondition check is implemented in the base class.
-        super()._rm(path=path)
-
+    async def _delete(self, path: str, recursive: bool) -> None:
+        workspace_path = _parse(path)
         with error_mapping(path):
-            self.client.workspace.delete(parse_workspace_path(path), recursive=False)
+            await self._run_in_thread(
+                self.client.workspace.delete, workspace_path, recursive=recursive
+            )
 
-    def rm(self, path, recursive=False, maxdepth=None):
-        self.log.debug(
-            "Deleting path: path=%s, recursive=%s, maxdepth=%s",
-            path,
-            recursive,
-            maxdepth,
-        )
+    async def _rm_file(self, path, **kwargs):
+        # Checked first: the API deletes an empty directory as a file. The
+        # strategies give only files, but fsspec's non-recursive rm may not.
+        if (await self._info(path))["type"] != "file":
+            raise is_a_directory_error(path)
+        await self._delete(path, recursive=False)
 
-        if isinstance(path, (str, os.PathLike)):
-            self.rm([path], recursive=recursive, maxdepth=maxdepth)
-        else:
-            paths = [(p, parse_workspace_path(p)) for p in path]
-            if all(not glob.has_magic(parsed) for p, parsed in paths):
-                # Utilize the API's native recursive delete if there are no glob patterns.
-                with error_mapping(path):
-                    for p, parsed in paths:
-                        if not recursive and self.isdir(p):
-                            raise is_a_directory_error(p)
-                        self.client.workspace.delete(parsed, recursive=recursive)
-            else:
-                super().rm(path, recursive=recursive, maxdepth=maxdepth)
+    async def _rm_tree(self, path):
+        """Delete a directory with all in it, by the API's recursive delete: one request."""
+        await self._delete(path, recursive=True)
 
-    def mkdir(self, path, create_parents=True, **kwargs):
-        # The precondition check is implemented in the base class.
-        super().mkdir(path=path, create_parents=create_parents, **kwargs)
-
-        with error_mapping(path):
-            self.client.workspace.mkdirs(parse_workspace_path(path))
-
-    def makedirs(self, path, exist_ok=False):
-        # The precondition check is implemented in the base class.
-        super().makedirs(path=path, exist_ok=exist_ok)
-
-        with error_mapping(path):
-            self.client.workspace.mkdirs(parse_workspace_path(path))
-
-    def rmdir(self, path):
-        # The precondition check is implemented in the base class.
-        super().rmdir(path=path)
+    async def _rmdir(self, path):
+        if (await self._info(path))["type"] != "directory":
+            raise not_a_directory_error(path)
 
         with error_mapping(path):
             try:
-                self.client.workspace.delete(
-                    parse_workspace_path(path),
-                    recursive=False,
-                )
+                await self._delete(path, recursive=False)
             except BadRequest as e:
-                if "is not empty" in e.args[0]:
+                if "is not empty" in str(e):
                     raise not_empty_error(path) from e
-                else:
-                    raise
+                raise
 
-    def _open(
+    async def _create_directory(self, path):
+        workspace_path = _parse(path)
+        with error_mapping(path):
+            await self._run_in_thread(self.client.workspace.mkdirs, workspace_path)
+
+    ### File I/O
+    def _file_info(self, path: str) -> dict[str, Any] | None:
+        """The info of the file at the path, None if missing, with a blocking SDK call."""
+        if self._strip_protocol(path) == dbfs_root:
+            raise is_a_directory_error(path)
+        try:
+            with error_mapping(path):
+                info = _map_info(
+                    self.client.workspace.get_status(_parse(path)), detail=True
+                )
+        except FileNotFoundError:
+            return None
+        if info["type"] == "directory":
+            raise is_a_directory_error(path)
+        return info
+
+    def _open_file(
         self,
-        path,
-        mode="rb",
+        path: str,
+        mode: str,
         notebook_format: NotebookFormat | None = None,
         language: Language | str | None = None,
-        **kwargs,
-    ):
-        if "+" in mode:
-            raise ValueError(f"Update mode (+) is not supported: {mode}")
+    ) -> "WorkspaceFile":
+        """Open a file object with the formats of the object at the path.
 
-        try:
-            info = self.info(path)
-            if info["type"] == "directory":
-                raise is_a_directory_error(path)
-        except FileNotFoundError:
-            info = None
+        It calls the blocking SDK directly: never call it on the loop.
+        """
+        if "+" in mode:
+            raise UnsupportedOperation(f"Update mode (+) is not supported: {mode}")
+        info = self._file_info(path)
 
         if "r" in mode and info is None:
             raise file_not_found_error(path)
@@ -272,7 +274,7 @@ class WorkspaceFileSystem(AbstractDatabricksFileSystem):
                 value_of(notebook_format, ImportFormat) or ImportFormat.SOURCE
             )
             language = value_of(language or info["language"], Language)
-        elif info and info["object_type"] != "NOTEBOOK":
+        elif info:
             # File exists and is not a notebook
             if notebook_format is not None:
                 raise ValueError(
@@ -293,14 +295,45 @@ class WorkspaceFileSystem(AbstractDatabricksFileSystem):
             language = value_of(language, Language)
 
         return WorkspaceFile(
-            client=self.client,
-            path=path,
+            self,
+            path,
+            mode,
             export_format=export_format,
             import_format=import_format,
             language=language,
-            mode=mode,
-            verbose_debug_log=self.verbose_debug_log,
         )
+
+    async def open_async(
+        self,
+        path,
+        mode="rb",
+        notebook_format: NotebookFormat | None = None,
+        language: Language | str | None = None,
+        **kwargs,
+    ):
+        if "b" not in mode or kwargs.get("compression"):
+            raise ValueError("Only binary mode without compression is supported")
+        # Opening downloads the file: seek and tell then need no request on the loop.
+        f = await asyncio.to_thread(
+            self._open_file, path, mode, notebook_format, language
+        )
+        return SyncFileAdapter(f)
+
+    def _open(
+        self,
+        path,
+        mode="rb",
+        block_size=None,
+        autocommit=True,
+        cache_options=None,
+        notebook_format: NotebookFormat | None = None,
+        language: Language | str | None = None,
+        **kwargs,
+    ):
+        f = self._open_file(path, mode, notebook_format, language)
+        if autocommit or "r" in mode:
+            return f
+        return TransactionFile(_WorkspaceTransaction(f))
 
     def open(
         self,
@@ -308,10 +341,6 @@ class WorkspaceFileSystem(AbstractDatabricksFileSystem):
         mode="rb",
         notebook_format: NotebookFormat | None = None,
         language: Language | str | None = None,
-        compression: str | None = None,
-        encoding: str | None = None,
-        errors: str | None = None,
-        newline: str | None = None,
         **kwargs,
     ):
         """Open a file in the Databricks Workspace file system.
@@ -321,98 +350,201 @@ class WorkspaceFileSystem(AbstractDatabricksFileSystem):
         path : str
             The path to the file in the Databricks Workspace.
         mode : str, optional
-            The file mode like `rb`, `w`.
+            The file mode, such as `rb` or `w`. Update modes (`+`) are not supported.
         notebook_format : NotebookFormat, optional
-            The format to use when reading or writing a notebook. Applies only to notebook objects.
+            The format of a notebook read or written: `SOURCE` by default. Existing files that are not
+            notebooks refuse it.
         language : Language, str, optional
-            Language of the notebook to read or write. Applies only to notebook objects.
-        compression : str, optional
-            If given, open file using compression codec. Can either be a compression
-            name (a key in ``fsspec.compression.compr``) or "infer" to guess the
-            compression from the filename suffix.
-        encoding : str, optional
-            The encoding to use when opening the file. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        errors : str, optional
-            The error handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        newline : str, optional
-            The newline handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
+            The language of a notebook written. Required for a new notebook.
         **kwargs
-            Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
+            Passed to `fsspec.AbstractFileSystem.open`, e.g. `compression`, `encoding`, `errors` and `newline`.
         """
         return super().open(
-            path,
-            mode=mode,
-            notebook_format=notebook_format,
-            language=language,
-            compression=compression,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **kwargs,
+            path, mode, notebook_format=notebook_format, language=language, **kwargs
         )
 
 
-class WorkspaceFile(MemoryCachedFile):
-    log = WorkspaceFileSystem.log
+class WorkspaceFile(io.BytesIO):
+    """A Workspace file or notebook, downloaded whole and uploaded whole, as the Workspace API transfers them.
 
-    max_size = 10 * 1024 * 1024  # 10 MB
-    block_size = 10 * 1024 * 1024  # 10 MB
+    A synchronous file calling the SDK directly, with no event loop:
+
+    - Opening for reading or appending downloads the whole file into memory.
+    - Closing uploads it whole, if written, or if the file is new.
+    - Leaving a `with` block by an exception, `discard`, or the garbage collector uploads nothing.
+    - Exclusive creation uploads without overwriting, so that the API refuses a file created meanwhile.
+    - Files are at most `max_size` bytes: beyond it, OSError with `errno.EFBIG`.
+    """
+
+    max_size = 10 * 1024 * 1024
+    """The Workspace API's limit."""
 
     def __init__(
         self,
+        fs: WorkspaceFileSystem,
         path: str,
-        client: WorkspaceClient,
+        mode: str = "rb",
+        *,
         export_format: ExportFormat | None = None,
         import_format: ImportFormat | None = None,
         language: Language | None = None,
-        mode="rb",
-        verbose_debug_log: bool | None = None,
     ):
-        self._client = client
+        super().__init__()
+        # Set first, so that closing a file whose download failed uploads nothing.
+        self._discarded = True
+        self.fs = fs
+        self.path = path
+        self.mode = mode
         self.export_format = export_format
         self.import_format = import_format
         self.language = language
+        self._kind = mode.replace("b", "").replace("t", "")
+        if self._kind not in ("r", "w", "a", "x"):
+            raise ValueError(f"Unsupported mode: {mode!r}")
+        # Whether closing uploads: a new file is uploaded even if empty.
+        self._changed = self._kind in "wx"
+        if self._kind in "ra":
+            try:
+                super().write(self._download())
+            except FileNotFoundError:
+                if self._kind == "r":
+                    raise
+                self._changed = True  # Appending creates the file.
+            self.seek(0, io.SEEK_END if self._kind == "a" else io.SEEK_SET)
+        self._discarded = False
 
-        super().__init__(
-            path=path,
-            mode=mode,
-            verbose_debug_log=verbose_debug_log,
-        )
-
-    def _remote_file_exists(self):
-        try:
-            self._client.workspace.get_status(parse_workspace_path(self.path))
-            return True
-        except ResourceDoesNotExist:
-            return False
-
-    def _remote_file_download(self):
+    def _download(self) -> bytes:
+        workspace_path = parse_workspace_path(self.path)
         with (
             error_mapping(self.path),
-            self._client.workspace.download(
-                path=parse_workspace_path(self.path), format=self.export_format
+            self.fs.client.workspace.download(
+                workspace_path, format=self.export_format
             ) as src,
         ):
-            return BytesIO(src.read())
+            data = src.read()
+        _check_size(len(data), self.max_size, self.path)
+        return data
 
-    def _remote_file_upload(self, data):
-        if hasattr(data, "read"):
-            data = data.read()
-
+    def _upload(self) -> None:
+        workspace_path = parse_workspace_path(self.path)
         with error_mapping(self.path):
-            self._client.workspace.upload(
-                path=parse_workspace_path(self.path),
-                content=data,
+            self.fs.client.workspace.upload(
+                workspace_path,
+                self.getvalue(),
                 format=self.import_format,
                 language=self.language,
-                overwrite=True,
+                # The API refuses to overwrite: no other client's file is lost.
+                overwrite=self._kind != "x",
             )
+
+    @property
+    def size(self) -> int:
+        """The file's size so far."""
+        return self.getbuffer().nbytes
+
+    def readable(self) -> bool:
+        self._check_open()
+        return self._kind == "r"
+
+    def writable(self) -> bool:
+        self._check_open()
+        return self._kind != "r"
+
+    def _check_open(self) -> None:
+        if self.closed:
+            raise ValueError("I/O operation on closed file.")
+
+    def read(self, size: int | None = -1) -> bytes:
+        if not self.readable():
+            raise UnsupportedOperation(f"File not open for reading: {self.path}")
+        return super().read(size)
+
+    def read1(self, size: int | None = -1) -> bytes:
+        return self.read(size)
+
+    def readinto(self, buffer: Any) -> int:
+        if not self.readable():
+            raise UnsupportedOperation(f"File not open for reading: {self.path}")
+        return super().readinto(buffer)
+
+    def readline(self, size: int | None = -1) -> bytes:
+        if not self.readable():
+            raise UnsupportedOperation(f"File not open for reading: {self.path}")
+        return super().readline(size)
+
+    def write(self, data: Any) -> int:
+        if not self.writable():
+            raise UnsupportedOperation(f"File not open for writing: {self.path}")
+        if self._kind == "a":
+            self.seek(0, io.SEEK_END)
+        size = memoryview(data).nbytes
+        _check_size(max(self.tell() + size, self.size), self.max_size, self.path)
+        self._changed = True
+        return super().write(data)
+
+    def writelines(self, lines: Any) -> None:
+        for line in lines:
+            self.write(line)
+
+    def truncate(self, size: int | None = None) -> int:
+        if not self.writable():
+            raise UnsupportedOperation(f"File not open for writing: {self.path}")
+        self._changed = True
+        return super().truncate(size)
+
+    def discard(self) -> None:
+        """Upload nothing on closing: the changes are lost."""
+        self._discarded = True
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        try:
+            if not self._discarded and self._changed:
+                self._upload()
+        finally:
+            super().close()
+
+    def __exit__(self, exc_type: object, *exc_info: object) -> None:
+        if exc_type is not None:
+            self.discard()
+        self.close()
+
+    def __del__(self) -> None:
+        # A file the garbage collector finds open was abandoned: nothing is uploaded.
+        self._discarded = True
+        super().__del__()
+
+
+class _WorkspaceTransaction(FileTransaction):
+    """A `WorkspaceFile` in a transaction: its buffer is uploaded on commit, as closing does, or dropped on discard."""
+
+    def __init__(self, file: WorkspaceFile):
+        super().__init__(file.path)
+        self.file = file
+
+    def start_staging(self) -> WorkspaceFile:
+        return self.file
+
+    def end_staging(self) -> None:
+        pass  # The buffer stays open, for commit to upload.
+
+    def commit(self) -> None:
+        self.file.close()
+
+    def discard(self) -> None:
+        self.file.discard()
+        self.file.close()
+
+
+def _check_size(size: int, max_size: int, path: str) -> None:
+    if size > max_size:
+        raise OSError(errno.EFBIG, f"File too large, over {max_size} bytes", path)
 
 
 __all__ = [
+    "NotebookFormat",
+    "WorkspaceFile",
     "WorkspaceFileSystem",
     "workspace_root_info",
 ]

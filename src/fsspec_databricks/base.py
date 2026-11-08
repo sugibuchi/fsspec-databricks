@@ -1,20 +1,26 @@
 import atexit
+import contextlib
 import logging
 import weakref
-from datetime import datetime
-from typing import Any
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from itertools import islice
+from typing import Any, TypeVar
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
-from fsspec.spec import AbstractFileSystem
 
-from .error import (
-    file_exists_error,
-    is_a_directory_error,
-    not_a_directory_error,
-)
-from .file import write_mode
+from ._contrib.strategy.common.sync_client import SyncClientSupport
+from ._contrib.strategy.tree.filesystem import TreeFileSystem
+from .error import file_exists_error, not_a_directory_error
 from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
+from .utils import write_mode
+
+T = TypeVar("T")
+
+# The most entries taken from an SDK listing at a time, in one of the threads.
+_LISTING_BATCH = 1000
+
+logger = logging.getLogger(__name__)
 
 root_dir_info = {
     "name": dbfs_root,
@@ -36,67 +42,120 @@ def _register_cleanup(fs):
     atexit.register(_cleanup, weakref.ref(fs))
 
 
-class AbstractDatabricksFileSystem(AbstractFileSystem):
-    """Abstract base class for Databricks file systems."""
+def _next_batch(entries: Iterator[T]) -> list[T]:
+    """Take the next entries of an SDK listing, fetching its pages as it comes to them."""
+    return list(islice(entries, _LISTING_BATCH))
 
-    protocol = scheme
-    root_marker = "/"
 
-    log = logging.getLogger(__name__)
+class DatabricksClientSupport:
+    """The Databricks SDK client and configuration of a file system, made on first use.
 
-    verbose_debug_log: bool = False
-    """Whether to enable verbose debug logging for file system operations."""
+    A mixin, so that file systems with another fsspec base class share it.
+    """
 
-    def __init__(
+    def _init_client(
         self,
-        client: WorkspaceClient | None = None,
-        config: Config | None = None,
-        config_params: dict[str, Any] | None = None,
-        verbose_debug_log: bool | None = None,
-        **storage_options,
-    ):
-        """Initialize the file system.
-
-        Parameters
-        ----------
-        *args
-            Standard fsspec filesystem options.
-        client : WorkspaceClient, optional
-            A Databricks SDK WorkspaceClient object.
-        config : Config, optional
-            A Databricks SDK Config object.
-        config_params : dict[str, Any], optional
-            A dictionary of parameters to create a Databricks SDK Config object.
-        verbose_debug_log : bool, optional
-            Whether to enable verbose debug logging for file system operations.
-        **storage_options
-            Standard fsspec storage options.
-        """
-        # Directory listing cache is explicitly disabled for all Databricks file systems.
-        super().__init__(use_listings_cache=False, **storage_options)
-
-        if verbose_debug_log is not None:
-            self.verbose_debug_log = verbose_debug_log
-
+        client: WorkspaceClient | None,
+        config: Config | None,
+        config_params: dict[str, Any] | None,
+    ) -> None:
         self._closed: bool = False
 
         self._client = client
         self._config = config
         self._config_params = config_params or {}
 
-        self.__client = self._client
-        self.__config = client.config if client else self._config
+        self._active_client = self._client
+        self._active_config = client.config if client else self._config
+
+    def _close_client(self) -> None:
+        self._active_client = None
+        self._active_config = None
+        self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        """Whether the file system is closed."""
+        return self._closed
+
+    @property
+    def config(self) -> Config:
+        """The Databricks SDK `Config`, made on first use."""
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+
+        if self._active_config is None:
+            if self._client is not None:
+                self._active_config = self._client.config
+            else:
+                self._active_config = Config(**self._config_params)
+        return self._active_config
+
+    @property
+    def client(self):
+        """The Databricks SDK `WorkspaceClient`, made on first use."""
+        if self.closed:
+            raise RuntimeError("The file system is already closed")
+
+        if self._active_client is None:
+            if self._client is not None:
+                self._active_client = self._client
+            else:
+                self._active_client = WorkspaceClient(config=self.config)
+        return self._active_client
+
+
+class BaseDatabricksFileSystem(
+    DatabricksClientSupport, SyncClientSupport, TreeFileSystem
+):
+    """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
+
+    A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
+    they run in threads with `_run_in_thread`, which logs each.
+    """
+
+    protocol = scheme
+    root_marker = "/"
+
+    operation_concurrency: int = 16
+    """The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`."""
+
+    io_concurrency: int = 8
+    """The maximum number of concurrent transfers of the files opened, shared by all of them."""
+
+    def __init__(
+        self,
+        client: WorkspaceClient | None = None,
+        config: Config | None = None,
+        config_params: dict[str, Any] | None = None,
+        operation_concurrency: int | None = None,
+        io_concurrency: int | None = None,
+        **storage_options,
+    ):
+        super().__init__(
+            operation_concurrency=operation_concurrency or self.operation_concurrency,
+            io_concurrency=io_concurrency or self.io_concurrency,
+            # No Databricks file system caches listings.
+            use_listings_cache=False,
+            **storage_options,
+        )
+        self._init_client(client, config, config_params)
 
         _register_cleanup(self)
-        self.log.debug("Opened: %s", self)
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        return strip_scheme(path)
+
+    def unstrip_protocol(self, name: str) -> str:
+        return unstrip_scheme(name)
 
     def close(self):
         """Close the file system and release any resources."""
         if not self.closed:
-            self.__client = None
-            self.__config = None
-            self._closed = True
-            self.log.debug("Closed: %s", self)
+            self._close_client()
+        # The threads, from SyncClientSupport.
+        super().close()
 
     def __enter__(self):
         if self.closed:
@@ -107,210 +166,97 @@ class AbstractDatabricksFileSystem(AbstractFileSystem):
         self.close()
 
     def __del__(self):
-        self.close()
+        with contextlib.suppress(Exception):
+            self.close()
 
-    @property
-    def closed(self) -> bool:
-        """Check if the file system is closed.
+    async def _run_in_thread(self, func: Callable[..., T], /, *args, **kwargs) -> T:
+        """Run a blocking call in the file system's own threads, logging it as one request to Databricks.
 
-        Returns
-        -------
-        bool
-            `True` if the file system is closed, `False` otherwise.
+        The log names the call and its first argument, the path of most SDK calls.
         """
-        return self._closed
+        api = getattr(func, "__qualname__", func)
+        path = args[0] if args else None
+        try:
+            result = await super()._run_in_thread(func, *args, **kwargs)
+        except Exception as e:
+            logger.debug("%s: path=%s, failed=%s", api, path, type(e).__name__)
+            raise
+        logger.debug("%s: path=%s, ok", api, path)
+        return result
 
-    @property
-    def config(self) -> Config:
-        """Databricks Workspace API client configuration.
+    async def _iter_in_thread(
+        self, func: Callable[..., Iterable[T]], /, *args, **kwargs
+    ) -> AsyncIterator[T]:
+        """Iterate an SDK listing, a batch at a time, each taken in the file system's own threads.
 
-        Returns
-        -------
-        Config
-            The Databricks configuration object.
+        The SDK's listings are iterators fetching a page as they come to it. So the entries are yielded as the pages
+        come, and a folder of many entries is never held whole: the strategies act on the first page while the next
+        ones are fetched.
         """
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
+        entries = iter(await self._run_in_thread(func, *args, **kwargs))
+        while batch := await self._run_in_thread(_next_batch, entries):
+            for entry in batch:
+                yield entry
 
-        if self.__config is None:
-            if self._client is not None:
-                self.__config = self._client.config
-            else:
-                self.__config = Config(**self._config_params)
-        return self.__config
-
-    @property
-    def client(self):
-        """Client for accessing the Databricks Workspace API.
-
-        Returns
-        -------
-        WorkspaceClient
-            The Databricks SDK WorkspaceClient object.
-        """
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-
-        if self.__client is None:
-            if self._client is not None:
-                self.__client = self._client
-            else:
-                self.__client = WorkspaceClient(config=self.config)
-        return self.__client
-
-    @classmethod
-    def _strip_protocol(cls, path):
-        return strip_scheme(path)
-
-    def unstrip_protocol(self, name: str) -> str:
-        return unstrip_scheme(name)
-
-    ### File/directory information
-
-    def ls(self, path, detail=True, **kwargs) -> list[str] | list[dict[str, Any]]:
-        self.log.debug("Listing directory: path=%s, detail=%s", path, detail)
-
-    def info(self, path, **kwargs) -> dict[str, Any]:
-        self.log.debug("Getting info: path=%s", path)
-
-    def exists(self, path, **kwargs) -> bool:
-        self.log.debug("Checking existence: path=%s", path)
-
-    def created(self, path) -> datetime | None:
+    def created(self, path):
         return self.info(path)["created"]
 
-    def modified(self, path) -> datetime | None:
+    def modified(self, path):
         return self.info(path)["modified"]
 
-    ### File/directory operations
-    def cp_file(self, path1, path2, **kwargs):
-        self.log.debug("Copying file: path1=%s, path2=%s", path1, path2)
+    async def _create_directory(self, path: str) -> None:
+        """Create a directory and its parents with the API."""
+        raise NotImplementedError
 
-    def _cp_directory(self, path2):
+    async def _cp_directory(self, path2: str) -> None:
         """Copy a directory: create the destination, as directories have no content."""
         try:
-            info = self.info(path2)
+            info = await self._info(path2)
         except FileNotFoundError:
-            self.mkdirs(path2)
+            await self._makedirs(path2, exist_ok=True)
             return
         if info["type"] != "directory":
             raise file_exists_error(path2)
 
-    def _rm(self, path):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
-        self.log.debug("Deleting file: path=%s", path)
-
-        info = self.info(path)
-        if info["type"] != "file":
-            raise is_a_directory_error(path)
-
-    def mkdir(self, path, create_parents=True, **kwargs):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
-        self.log.debug(
-            "Making directory: path=%s, create_parents=%s", path, create_parents
-        )
-
+    async def _mkdir(self, path, create_parents=True, **kwargs):
         parent = self._parent(path)
-        if not self.isdir(parent):
+        if not await self._isdir(parent):
             # Tell a missing parent from a file
             try:
-                self.info(parent)
+                await self._info(parent)
             except FileNotFoundError:
-                if create_parents:
-                    return
-                else:
+                if not create_parents:
                     raise
-            raise not_a_directory_error(parent)
+            else:
+                raise not_a_directory_error(parent)
 
-        if self.exists(path):
+        if await self._exists(path):
             raise file_exists_error(path)
 
-    def makedirs(self, path, exist_ok=False):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
-        self.log.debug("Making directories: path=%s, exist_ok=%s", path, exist_ok)
+        # The APIs create the parents too
+        await self._create_directory(path)
 
+    async def _makedirs(self, path, exist_ok=False):
         try:
-            info = self.info(path)
-            if info["type"] == "directory":
-                if exist_ok:
-                    return
-                else:
-                    raise file_exists_error(path)
-            else:
-                raise not_a_directory_error(path)
+            info = await self._info(path)
         except FileNotFoundError:
-            pass
-
-    def rmdir(self, path):
-        # Implement only the precondition check here
-        # Actual operations must be implemented by subclasses
-        self.log.debug("Deleting directory: path=%s", path)
-
-        if not self.isdir(path):
-            # Raises FileNotFoundError if the path is missing
-            self.info(path)
+            await self._create_directory(path)
+            return
+        if info["type"] != "directory":
             raise not_a_directory_error(path)
+        if not exist_ok:
+            raise file_exists_error(path)
 
-    def open(
-        self,
-        path,
-        mode="rb",
-        block_size: int | None = None,
-        compression: str | None = None,
-        encoding: str | None = None,
-        errors: str | None = None,
-        newline: str | None = None,
-        **kwargs,
-    ):
-        """Open a file for reading or writing.
-
-        Parameters
-        ----------
-        path : str
-            The path to the file to open.
-        mode : str, optional
-            The file mode like `rb`, `w`.
-        block_size : int, optional
-            The block size to use when accessing data in the file.
-        max_size : int, optional
-            The maximum size of the file to read or write.
-        compression : str, optional
-            If given, open file using compression codec. Can either be a compression
-            name (a key in ``fsspec.compression.compr``) or "infer" to guess the
-            compression from the filename suffix.
-        encoding : str, optional
-            The encoding to use when opening the file. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        errors : str, optional
-            The error handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        newline : str, optional
-            The newline handling strategy to use when opening the file in text mode. Only applicable for text mode.
-            See `io.TextIOWrapper <https://docs.python.org/3/library/io.html#buffered-streams>`_.
-        **kwargs
-            Additional keyword arguments to pass to `AbstractBufferedFile` constructor.
-        """
-        self.log.debug("Opening file: path=%s, mode=%s", path, mode)
-
-        if "t" in mode and write_mode(mode):
-            newline = newline or "\n"
-
-        return super().open(
-            path=path,
-            mode=mode,
-            block_size=block_size,
-            compression=compression,
-            encoding=encoding,
-            errors=errors,
-            newline=newline,
-            **kwargs,
-        )
+    def open(self, path, mode="rb", **kwargs):
+        """Open a file, writing text with "\\n" newlines by default."""
+        # Text is any mode without "b": "w" as well as "wt".
+        if "b" not in mode and write_mode(mode) and kwargs.get("newline") is None:
+            kwargs["newline"] = "\n"
+        return super().open(path, mode, **kwargs)
 
 
 __all__ = [
-    "AbstractDatabricksFileSystem",
+    "BaseDatabricksFileSystem",
+    "DatabricksClientSupport",
     "root_dir_info",
 ]

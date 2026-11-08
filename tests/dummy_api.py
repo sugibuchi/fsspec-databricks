@@ -1,112 +1,490 @@
 """
-FastAPI application that simulates the behavior of the Databricks Files System API for testing purposes.
+FastAPI application that simulates Databricks' Files API, Workspace API and legacy DBFS API, for tests.
+
+The APIs answer as their REST references say, with the SDK's error format: a JSON body of `error_code` and
+`message`, from which the SDK picks its exception class. The Volumes' files, the Workspace files and the DBFS root
+are separate namespaces, as in Databricks. Behaviour that a reference leaves open is marked as an assumption.
 """
 
 import asyncio
+import base64
 import hashlib
+import json
 import logging
+import posixpath
 import re
 import socket
 import time
 import urllib.parse
 import uuid
-from base64 import b64encode
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from email.utils import formatdate, parsedate_to_datetime
 from time import sleep
 from typing import Annotated, Literal
 
 import requests
-from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.params import Depends, Header
+from fastapi import FastAPI, Header, Request, Response
+from fastapi.params import Depends
+from fastapi.responses import JSONResponse
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
-from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
-
-@dataclass
-class DummyAPIContext:
-    upload_mode: Literal["multipart", "resumable"] = "multipart"
-    check_signed_url: bool = False
-    abort_supported: bool = True
-
-    get_file_errors: list[int] = field(default_factory=list)
-    """Statuses that the next requests to read a file get, one each."""
-
-    files: dict[str, bytes] = field(default_factory=dict)
-
-    multipart_upload_sessions: dict[str, dict[tuple[int, str], bytes | None]] = field(
-        default_factory=dict
-    )
-
-    resumable_upload_sessions: dict[str, tuple[bytes, bool]] = field(
-        default_factory=dict
-    )
-
-    def check_multipart_upload_session(self, session_token: str):
-        if session_token not in self.multipart_upload_sessions:
-            raise http_exception(
-                "BAD_REQUEST",
-                f"Unknown multipart upload session: {session_token}",
-                400,
-            )
-
-    def check_resumable_upload_session(self, session_token: str):
-        if session_token not in self.resumable_upload_sessions:
-            raise http_exception(
-                "BAD_REQUEST",
-                f"Unknown resumable upload session: {session_token}",
-                400,
-            )
-
-
-def http_exception(error_code: str, message: str, status_code: int):
-    """Create HTTPException object with logging"""
-    log.debug(
-        "Raising HTTPException: error_code=%s, message=%s, status_code=%d",
-        error_code,
-        message,
-        status_code,
-    )
-
-    return HTTPException(
-        detail={
-            "error_code": error_code,
-            "message": message,
-        },
-        status_code=status_code,
-    )
-
-
-class Part(BaseModel):
-    part_number: int
-    etag: str
-
-
-class Parts(BaseModel):
-    parts: list[Part]
-
-
 app = FastAPI()
 
-_dummy_context = DummyAPIContext()
+
+class ApiError(Exception):
+    """An error answered in the format of Databricks' REST APIs."""
+
+    def __init__(self, error_code: str, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.status_code = status_code
 
 
-def dummy_context() -> DummyAPIContext:
-    return _dummy_context
+@app.exception_handler(ApiError)
+async def _api_error(request: Request, exc: ApiError):
+    log.debug("API error: %s %s: %s", exc.status_code, exc.error_code, exc.message)
+    return JSONResponse(
+        {"error_code": exc.error_code, "message": exc.message},
+        status_code=exc.status_code,
+    )
 
 
-def _now_rfc7231():
-    return datetime.now(tz=UTC).strftime("%a, %d %b %Y %H:%M:%S GMT")
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
-_range_pat = re.compile(r"bytes=(?P<first_pos>\d+)-(?P<last_pos>\d+)")
-_resumable_upload_content_range_pat = re.compile(
-    r"bytes (?:(?P<first_pos>\d+)-(?P<last_pos>\d+)|(?P<unknown_range>\*))/(?P<total_size>\d+|\*)"
-)
+def _rfc7231(ms: int) -> str:
+    return formatdate(ms / 1000, usegmt=True)
+
+
+def _bool(value) -> bool:
+    if isinstance(value, bytes):
+        value = value.decode()
+    return value is True or str(value).lower() == "true"
+
+
+def _text(value) -> str | None:
+    return value.decode() if isinstance(value, bytes) else value
+
+
+async def _body(request: Request) -> dict:
+    """A request's fields, from a JSON body or a multipart form, as the SDK sends either."""
+    return _fields(request.headers.get("content-type", ""), await request.body())
+
+
+def _fields(content_type: str, body: bytes) -> dict:
+    if content_type.startswith("multipart/form-data"):
+        boundary = re.search(r'boundary="?([^";]+)"?', content_type).group(1).encode()
+        fields = {}
+        for part in body.split(b"--" + boundary)[1:-1]:
+            head, _, data = part[2:].partition(b"\r\n\r\n")
+            name = re.search(rb'name="([^"]*)"', head).group(1).decode()
+            fields[name] = data[:-2]  # The CRLF before the next boundary.
+        return fields
+    try:
+        fields = json.loads(body) if body else {}
+    except ValueError:
+        # Data, such as a part of an upload.
+        return {}
+    return fields if isinstance(fields, dict) else {}
+
+
+def _absolute(path: str | None) -> str:
+    if not path or not path.startswith("/"):
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE", f"Path ({path}) must be an absolute path."
+        )
+    return posixpath.normpath(path).replace("//", "/")
+
+
+def _subtree(paths, path: str) -> list[str]:
+    prefix = path.rstrip("/") + "/"
+    return [p for p in paths if p == path or p.startswith(prefix)]
+
+
+def _children(paths, path: str) -> list[str]:
+    return [p for p in paths if p != "/" and posixpath.dirname(p) == path]
+
+
+### State
+
+
+@dataclass
+class VolumeFile:
+    data: bytes
+    last_modified: int
+
+    def headers(self) -> dict[str, str]:
+        """The headers of a download or a metadata request, as the Files API answers."""
+        return {
+            "content-length": str(len(self.data)),
+            "content-type": "application/octet-stream",
+            "last-modified": _rfc7231(self.last_modified),
+        }
+
+
+@dataclass
+class MultipartUpload:
+    path: str
+    overwrite: bool
+    parts: dict[int, tuple[str, bytes]] = field(default_factory=dict)
+    """The parts by number, each with its ETag."""
+
+
+@dataclass
+class ResumableUpload:
+    path: str
+    overwrite: bool
+    data: bytearray = field(default_factory=bytearray)
+
+
+@dataclass
+class WorkspaceObject:
+    object_type: Literal["DIRECTORY", "FILE", "NOTEBOOK"]
+    object_id: int
+    created_at: int | None = None
+    modified_at: int | None = None
+    language: str | None = None
+    content: bytes = b""
+
+    def info(self, path: str) -> dict:
+        info = {
+            "path": path,
+            "object_type": self.object_type,
+            "object_id": self.object_id,
+            "resource_id": str(self.object_id),
+        }
+        # Directories tell no times, notebooks no size: as the Workspace API answers.
+        if self.created_at is not None:
+            info["created_at"] = self.created_at
+            info["modified_at"] = self.modified_at
+        if self.object_type == "FILE":
+            info["size"] = len(self.content)
+        if self.language:
+            info["language"] = self.language
+        return info
+
+
+@dataclass
+class DbfsEntry:
+    is_dir: bool
+    modification_time: int
+    data: bytearray = field(default_factory=bytearray)
+
+    def info(self, path: str) -> dict:
+        return {
+            "path": path,
+            "is_dir": self.is_dir,
+            "file_size": 0 if self.is_dir else len(self.data),
+            "modification_time": self.modification_time,
+        }
+
+
+@dataclass(frozen=True)
+class Recorded:
+    """A request served: its method, its path, and its parameters from the query and the body, without data."""
+
+    method: str
+    path: str
+    params: dict
+
+    def __iter__(self):
+        return iter((self.method, self.path))
+
+
+_data_fields = {"content", "contents", "data", "file", "parts"}
+
+
+class _Recorder:
+    """ASGI middleware recording each request in the storage, then passing its body on."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        chunks, more = [], True
+        while more:
+            message = await receive()
+            chunks.append(message.get("body", b""))
+            more = message.get("more_body", False)
+        body = b"".join(chunks)
+
+        headers = {k.decode().lower(): v.decode() for k, v in scope["headers"]}
+        params = dict(urllib.parse.parse_qsl(scope["query_string"].decode()))
+        for name, value in _fields(headers.get("content-type", ""), body).items():
+            if name not in _data_fields:
+                params[name] = _text(value)
+        _storage.requests.append(
+            Recorded(scope["method"], urllib.parse.unquote(scope["path"]), params)
+        )
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return await receive()
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+app.add_middleware(_Recorder)
+
+
+_volume_pat = re.compile(r"/Volumes/[^/]+/[^/]+/[^/]+")
+
+
+def _volume_root(path: str) -> str:
+    return "/".join(path.split("/")[:5])
+
+
+def _volume_ancestors(path: str) -> list[str]:
+    """The directories above a path in its volume, from the top, without the volume itself."""
+    root = _volume_root(path)
+    names = path[len(root) :].split("/")[1:-1]
+    return [root + "/" + "/".join(names[: i + 1]) for i in range(len(names))]
+
+
+@dataclass
+class DummyStorage:
+    """The Volumes' files, the Workspace files and the DBFS root of a dummy server, with its test switches."""
+
+    volume_files: dict[str, VolumeFile] = field(default_factory=dict)
+    volume_dirs: set[str] = field(default_factory=set)
+    multipart_uploads: dict[str, MultipartUpload] = field(default_factory=dict)
+    resumable_uploads: dict[str, ResumableUpload] = field(default_factory=dict)
+
+    upload_mode: Literal["multipart", "resumable", "unknown"] = "multipart"
+    """The upload API that initiate-upload answers with, as the server chooses it. `unknown` names another one."""
+
+    presigned_urls_only: bool = False
+    """Whether the Files API refuses to transfer data itself, so that only presigned URLs do."""
+
+    abort_supported: bool = True
+    """Whether multipart uploads can be aborted by a presigned URL, which Azure Databricks refuses."""
+
+    storage_proxy_available: bool = False
+    """Whether the storage proxy's probe succeeds, for a client whose proxy host is this server."""
+
+    read_errors: list[int] = field(default_factory=list)
+    """Statuses that the next downloads get, one each."""
+
+    workspace: dict[str, WorkspaceObject] = field(default_factory=dict)
+    dbfs: dict[str, DbfsEntry] = field(default_factory=dict)
+    dbfs_handles: dict[int, str] = field(default_factory=dict)
+    legacy_dbfs_disabled: bool = False
+    dbfs_add_block_errors: int = 0
+    """The number of the next add-blocks that fail, with an internal error."""
+    next_id: int = 1
+
+    workspace_id: int = 1234567890
+
+    requests: list["Recorded"] = field(default_factory=list)
+    """The requests served since the last reset, in order, for tests counting them."""
+
+    def __post_init__(self):
+        self.reset()
+
+    def requests_to(self, prefix: str = "/api/", method: str | None = None):
+        """The requests whose path starts with the prefix, of one method or any."""
+        return [
+            r
+            for r in self.requests
+            if r.path.startswith(prefix) and method in (None, r.method)
+        ]
+
+    def reset(self):
+        self.requests = []
+        self.volume_files = {}
+        self.volume_dirs = set()
+        self.multipart_uploads = {}
+        self.resumable_uploads = {}
+        self.upload_mode = "multipart"
+        self.presigned_urls_only = False
+        self.abort_supported = True
+        self.storage_proxy_available = False
+        self.read_errors = []
+        self.workspace = {"/": WorkspaceObject("DIRECTORY", 0)}
+        self.dbfs = {"/": DbfsEntry(True, 0)}
+        self.dbfs_handles = {}
+        self.legacy_dbfs_disabled = False
+        self.dbfs_add_block_errors = 0
+
+    def new_id(self) -> int:
+        self.next_id += 1
+        return self.next_id
+
+    ### Files API
+    def vol_is_dir(self, path: str) -> bool:
+        # Assumed: every volume exists, as the dummy has no Unity Catalog.
+        return path in self.volume_dirs or path == _volume_root(path)
+
+    def vol_get(self, path: str) -> VolumeFile:
+        if path not in self.volume_files:
+            raise ApiError("NOT_FOUND", f"The file {path} is not found.", 404)
+        return self.volume_files[path]
+
+    def vol_children(self, path: str) -> list[str]:
+        # Assumed: sorted by name, as object storage lists.
+        return sorted(_children([*self.volume_files, *self.volume_dirs], path))
+
+    def vol_mkdirs(self, path: str) -> None:
+        for p in [*_volume_ancestors(path), path]:
+            if p in self.volume_files:
+                # Assumed: as for a file at the path itself.
+                raise ApiError(
+                    "ALREADY_EXISTS", f"Cannot create {path}: {p} is a file.", 409
+                )
+            if p != _volume_root(p):
+                self.volume_dirs.add(p)
+
+    def vol_check_writable(self, path: str, overwrite: bool) -> None:
+        if self.vol_is_dir(path):
+            # Assumed: a directory is never overwritten by a file.
+            raise ApiError("ALREADY_EXISTS", f"A directory exists at {path}.", 409)
+        if path in self.volume_files and not overwrite:
+            raise ApiError("ALREADY_EXISTS", f"The file {path} already exists.", 409)
+        for p in _volume_ancestors(path):
+            if p in self.volume_files:
+                raise ApiError(
+                    "ALREADY_EXISTS", f"Cannot create {path}: {p} is a file.", 409
+                )
+
+    def vol_write(self, path: str, data: bytes, overwrite: bool = True) -> None:
+        """Write a file, creating its parents: tests set files up with it too."""
+        self.vol_check_writable(path, overwrite)
+        # Assumed: an upload creates the missing parent directories, as object storage has none to create.
+        self.vol_mkdirs(posixpath.dirname(path))
+        self.volume_files[path] = VolumeFile(bytes(data), _now_ms())
+
+    def vol_initiate_upload(self, path: str, overwrite: bool) -> dict:
+        self.vol_check_writable(path, overwrite)
+        token = str(uuid.uuid4())
+        if self.upload_mode == "multipart":
+            self.multipart_uploads[token] = MultipartUpload(path, overwrite)
+            return {"multipart_upload": {"session_token": token}}
+        if self.upload_mode == "resumable":
+            self.resumable_uploads[token] = ResumableUpload(path, overwrite)
+            return {"resumable_upload": {"session_token": token}}
+        # An upload API that no client knows.
+        return {"other_upload": {"session_token": token}}
+
+    def vol_upload(self, kind: str, token: str | None, path: str):
+        uploads = (
+            self.multipart_uploads if kind == "multipart" else self.resumable_uploads
+        )
+        upload = uploads.get(token)
+        if upload is None or upload.path != path:
+            # Assumed: an unknown session, or one of another file, is not found.
+            raise ApiError("NOT_FOUND", f"No {kind} upload session {token}.", 404)
+        return upload
+
+    ### Workspace
+    def ws_get(self, path: str) -> WorkspaceObject:
+        if path not in self.workspace:
+            raise ApiError(
+                "RESOURCE_DOES_NOT_EXIST", f"Path ({path}) doesn't exist.", 404
+            )
+        return self.workspace[path]
+
+    def ws_mkdirs(self, path: str) -> None:
+        parts = [p for p in path.split("/") if p]
+        for i in range(1, len(parts) + 1):
+            p = "/" + "/".join(parts[:i])
+            if p not in self.workspace:
+                self.workspace[p] = WorkspaceObject("DIRECTORY", self.new_id())
+            elif self.workspace[p].object_type != "DIRECTORY":
+                raise ApiError(
+                    "RESOURCE_ALREADY_EXISTS",
+                    f"Cannot create directory {path}: {p} is not a directory.",
+                )
+
+    def ws_import(
+        self,
+        path: str,
+        object_type: str,
+        language: str | None,
+        content: bytes,
+        overwrite: bool,
+    ) -> None:
+        parent = posixpath.dirname(path)
+        if self.workspace.get(parent, WorkspaceObject("FILE", -1)).object_type != (
+            "DIRECTORY"
+        ):
+            # Assumed: the parents are not created, unlike mkdirs.
+            raise ApiError(
+                "RESOURCE_DOES_NOT_EXIST",
+                f"The parent folder ({parent}) does not exist.",
+                404,
+            )
+        now = _now_ms()
+        existing = self.workspace.get(path)
+        if existing is None:
+            self.workspace[path] = WorkspaceObject(
+                object_type, self.new_id(), now, now, language, bytes(content)
+            )
+            return
+        if not overwrite or existing.object_type == "DIRECTORY":
+            raise ApiError("RESOURCE_ALREADY_EXISTS", f"Path ({path}) already exists.")
+        # Overwriting keeps the object, its place in listings and its creation time.
+        existing.object_type = object_type
+        existing.language = language
+        existing.content = bytes(content)
+        existing.modified_at = now
+
+    ### DBFS
+    def dbfs_get(self, path: str) -> DbfsEntry:
+        if path not in self.dbfs:
+            raise ApiError(
+                "RESOURCE_DOES_NOT_EXIST",
+                f"No file or directory exists on path {path}.",
+                404,
+            )
+        return self.dbfs[path]
+
+    def dbfs_mkdirs(self, path: str) -> None:
+        parts = [p for p in path.split("/") if p]
+        for i in range(1, len(parts) + 1):
+            p = "/" + "/".join(parts[:i])
+            if p not in self.dbfs:
+                self.dbfs[p] = DbfsEntry(True, _now_ms())
+            elif not self.dbfs[p].is_dir:
+                raise ApiError(
+                    "RESOURCE_ALREADY_EXISTS",
+                    f"A file or directory already exists at the input path {p}.",
+                )
+
+    def dbfs_create(self, path: str, overwrite: bool) -> DbfsEntry:
+        # Assumed: overwrite replaces a file, never a directory.
+        if path in self.dbfs and (not overwrite or self.dbfs[path].is_dir):
+            raise ApiError(
+                "RESOURCE_ALREADY_EXISTS",
+                f"A file or directory already exists at the input path {path}.",
+            )
+        # Assumed: the parents are created, as `mkdirs` does.
+        self.dbfs_mkdirs(posixpath.dirname(path))
+        entry = DbfsEntry(False, _now_ms())
+        self.dbfs[path] = entry
+        return entry
+
+
+_storage = DummyStorage()
+
+
+def dummy_storage() -> DummyStorage:
+    return _storage
+
+
+Storage = Annotated[DummyStorage, Depends(dummy_storage)]
 
 
 @app.get("/_headers")
@@ -114,395 +492,826 @@ async def get_headers(request: Request):
     return dict(request.headers)
 
 
-@app.get("/api/2.0/fs/files{file_path:path}")
-async def get_file(
-    context: Annotated[DummyAPIContext, Depends(dummy_context)],
-    file_path: str,
-    range: Annotated[str | None, Header()] = None,
-    signed: Annotated[str | None, Query()] = None,
-):
-    if context.get_file_errors:
-        raise http_exception(
-            "INTERNAL_ERROR",
-            "Injected error",
-            context.get_file_errors.pop(0),
-        )
-
-    if context.check_signed_url and signed != "true":
-        raise http_exception(
-            "BAD_REQUEST",
-            "Signed URL is required",
-            400,
-        )
-
-    if file_path not in context.files:
-        raise http_exception(
-            "NOT_FOUND",
-            "File not found",
-            404,
-        )
-
-    data = context.files[file_path]
-    if range:
-        m = _range_pat.fullmatch(range)
-        if not m:
-            raise http_exception(
-                "BAD_REQUEST",
-                "Invalid Range header",
-                400,
-            )
-        first_pos = int(m.group("first_pos"))
-        last_pos = int(m.group("last_pos"))
-        return Response(
-            status_code=206,
-            media_type="application/octet-stream",
-            headers={
-                "content-range": f"bytes {first_pos}-{last_pos}/{len(data)}",
-                "content-length": str(last_pos - first_pos + 1),
-                "last-modified": _now_rfc7231(),
-            },
-            content=data[first_pos : last_pos + 1],
-        )
-    else:
-        return Response(
-            status_code=200,
-            media_type="application/octet-stream",
-            headers={
-                "content-range": f"bytes {0}-{len(data)}/{len(data)}",
-                "content-length": str(len(data)),
-                "last-modified": _now_rfc7231(),
-            },
-            content=data,
-        )
-
-
-@app.post("/api/2.0/fs/files{file_path:path}")
-async def post_file(
-    context: Annotated[DummyAPIContext, Depends(dummy_context)],
-    file_path: str,
-    request: Request,
-    action: Annotated[str | None, Query()] = None,
-    session_token: Annotated[str | None, Query()] = None,
-    upload_type: Annotated[str | None, Query()] = None,
-    overwrite: Annotated[str | None, Query()] = None,
-):
-    if not overwrite and file_path in context.files:
-        raise http_exception(
-            "RESOURCE_ALREADY_EXISTS",
-            f"File already exists: {file_path}",
-            409,
-        )
-
-    if action is not None:
-        if action == "initiate-upload":
-            session_token = str(uuid.uuid4())
-            if context.upload_mode == "multipart":
-                context.multipart_upload_sessions[session_token] = {}
-                return {"multipart_upload": {"session_token": session_token}}
-            else:
-                context.resumable_upload_sessions[session_token] = (b"", False)
-                return {"resumable_upload": {"session_token": session_token}}
-
-        elif action == "complete-upload":
-            if upload_type != "multipart":
-                raise http_exception(
-                    "BAD_REQUEST",
-                    f"Invalid upload_type: {upload_type}",
-                    400,
-                )
-
-            context.check_multipart_upload_session(session_token)
-            session = context.multipart_upload_sessions.pop(session_token)
-
-            parts = sorted(
-                [
-                    (p.part_number, p.etag)
-                    for p in Parts.model_validate(await request.json()).parts
-                ]
-            )
-
-            data = bytearray()
-            for p in sorted(parts):
-                if p not in session:
-                    raise http_exception(
-                        "BAD_REQUEST",
-                        f"Invalid part number or etag: {p}",
-                        400,
-                    )
-
-                if session[p] is None:
-                    raise http_exception(
-                        "BAD_REQUEST",
-                        f"Data for part number {p[0]} is not uploaded",
-                        400,
-                    )
-                data.extend(session[p])
-            context.files[file_path] = bytes(data)
-
-            return Response(status_code=206)
-
-    raise http_exception(
-        "BAD_REQUEST",
-        f"Invalid action: {action}",
-        400,
+@app.get("/api/2.0/preview/scim/v2/Me")
+async def scim_me(storage: Storage):
+    # The SDK reads the workspace ID from this header, e.g. before probing the storage proxy.
+    return JSONResponse(
+        {"id": "1", "userName": "dummy@example.com"},
+        headers={"X-Databricks-Org-Id": str(storage.workspace_id)},
     )
 
 
+### Files API
+#
+# Files and directories in Unity Catalog volumes, under `/Volumes/<catalog>/<schema>/<volume>`. Uploads in parts
+# go through the upload API that initiate-upload names: multipart, as on AWS and Azure, or resumable, as on GCP.
+# Their parts go to presigned URLs, or to the Files API itself with the session in the query, as the storage proxy
+# takes them. The presigned URLs point back to this server, with `signed=true`.
+
+_max_page_size = 1000
+_resumable_granularity = 256 * 1024
+_probe_path = "/DatabricksInternal/Probe/fullstack/wis"
+
+
+def _volume_path(path: str | None) -> str:
+    path = _absolute(path)
+    if not _volume_pat.match(path):
+        # Assumed: the error of a path outside the volumes.
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE",
+            f"Path ({path}) is not in a Unity Catalog volume.",
+        )
+    return path
+
+
+def _overwrite(value: str | None) -> bool:
+    # The reference: an existing file is overwritten when `overwrite` is true or unspecified.
+    return value is None or _bool(value)
+
+
+def _check_presigned(storage: DummyStorage, signed: str | None) -> None:
+    if storage.presigned_urls_only and signed != "true":
+        raise ApiError("PERMISSION_DENIED", "Only presigned URLs transfer data.", 403)
+
+
+def _presigned_url(request: Request, path: str, **query) -> str:
+    base = str(request.base_url).rstrip("/")
+    query = urllib.parse.urlencode({**query, "signed": "true"})
+    return f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}"
+
+
+_range_pat = re.compile(r"bytes=(?P<first>\d*)-(?P<last>\d*)")
+
+
+def _byte_range(header: str, size: int) -> tuple[int, int] | None:
+    """The first and last positions of a Range header, or None for a range past the end."""
+    m = _range_pat.fullmatch(header)
+    if not m or not (m["first"] or m["last"]):
+        # Assumed: a malformed range is refused, not ignored.
+        raise ApiError("INVALID_PARAMETER_VALUE", f"Invalid Range header: {header}")
+    if not m["first"]:
+        # A suffix: the last bytes.
+        return max(size - int(m["last"]), 0), size - 1
+    first = int(m["first"])
+    last = min(int(m["last"]), size - 1) if m["last"] else size - 1
+    if first >= size or first > last:
+        return None
+    return first, last
+
+
+@app.get("/api/2.0/fs/files{file_path:path}")
+async def files_download(
+    storage: Storage,
+    file_path: str,
+    range: Annotated[str | None, Header()] = None,
+    if_unmodified_since: Annotated[str | None, Header()] = None,
+    signed: str | None = None,
+):
+    if storage.read_errors:
+        raise ApiError("INTERNAL_ERROR", "Injected error", storage.read_errors.pop(0))
+    _check_presigned(storage, signed)
+    path = _volume_path(file_path)
+    file = storage.vol_get(path)
+
+    # The SDK resumes a broken download from where it stopped, if the file did not change.
+    if (
+        if_unmodified_since
+        and parsedate_to_datetime(if_unmodified_since).timestamp()
+        < file.last_modified // 1000
+    ):
+        raise ApiError("FAILED_PRECONDITION", f"The file {path} was modified.", 412)
+
+    headers = file.headers()
+    if not range:
+        return Response(content=file.data, headers=headers)
+    positions = _byte_range(range, len(file.data))
+    if positions is None:
+        return JSONResponse(
+            {"error_code": "INVALID_PARAMETER_VALUE", "message": "Invalid range."},
+            status_code=416,
+            headers={"content-range": f"bytes */{len(file.data)}"},
+        )
+    first, last = positions
+    headers["content-range"] = f"bytes {first}-{last}/{len(file.data)}"
+    headers["content-length"] = str(last - first + 1)
+    return Response(
+        content=file.data[first : last + 1], headers=headers, status_code=206
+    )
+
+
+@app.head("/api/2.0/fs/files{file_path:path}")
+async def files_get_metadata(storage: Storage, file_path: str):
+    if file_path == _probe_path:
+        # The storage proxy's probe: 200 when it serves the workspace.
+        return Response(status_code=200 if storage.storage_proxy_available else 403)
+    path = _volume_path(file_path)
+    # A HEAD response has no body: the SDK tells the error by its status alone.
+    return Response(headers=storage.vol_get(path).headers())
+
+
 @app.put("/api/2.0/fs/files{file_path:path}")
-async def put_file(
-    context: Annotated[DummyAPIContext, Depends(dummy_context)],
+async def files_upload(
+    storage: Storage,
     file_path: str,
     request: Request,
-    session_token: Annotated[str | None, Query()] = None,
-    upload_type: Annotated[str | None, Query()] = None,
-    part_number: Annotated[int | None, Query()] = None,
+    overwrite: str | None = None,
+    upload_type: str | None = None,
+    session_token: str | None = None,
+    part_number: int | None = None,
     content_range: Annotated[str | None, Header()] = None,
-    signed: Annotated[str | None, Query()] = None,
+    signed: str | None = None,
 ):
-    if context.check_signed_url and signed != "true":
-        raise http_exception(
-            "BAD_REQUEST",
-            "Signed URL is required",
-            400,
-        )
-
-    data = bytes(await request.body())
+    path = _volume_path(file_path)
+    _check_presigned(storage, signed)
+    data = await request.body()
 
     if upload_type == "multipart":
-        context.check_multipart_upload_session(session_token)
+        upload = storage.vol_upload("multipart", session_token, path)
+        if part_number is None or part_number < 1:
+            raise ApiError("INVALID_PARAMETER_VALUE", f"Invalid part: {part_number}")
+        # Uploading a part again replaces it, as object storage does.
+        etag = base64.b64encode(hashlib.sha256(data).digest()).decode()
+        upload.parts[part_number] = (etag, data)
+        return Response(headers={"etag": etag})
+    if upload_type == "resumable":
+        return _resumable_put(storage, path, session_token, content_range, data)
+    if upload_type is not None:
+        raise ApiError("INVALID_PARAMETER_VALUE", f"Invalid upload_type: {upload_type}")
 
-        etag = b64encode(hashlib.sha256(data).digest()).decode()
-        context.multipart_upload_sessions[session_token][(part_number, etag)] = data
+    storage.vol_write(path, data, _overwrite(overwrite))
+    return Response(status_code=204)
 
-        return Response(
-            status_code=206,
-            media_type="text/plain",
-            headers={
-                "etag": etag,
-                "date": _now_rfc7231(),
-                "transfer-encoding": "chunked",
-            },
-        )
-    elif upload_type == "resumable":
-        context.check_resumable_upload_session(session_token)
-        uploaded, completed = context.resumable_upload_sessions[session_token]
 
-        if content_range is None:
-            raise http_exception(
-                "BAD_REQUEST",
-                "Content-Range header is required for resumable upload",
-                400,
-            )
-        m = _resumable_upload_content_range_pat.fullmatch(content_range)
+_content_range_pat = re.compile(
+    r"bytes (?:(?P<first>\d+)-(?P<last>\d+)|(?P<status>\*))/(?P<total>\d+|\*)"
+)
 
-        if not m:
-            raise http_exception(
-                "BAD_REQUEST",
-                f"Invalid Content-Range header: {content_range}",
-                400,
-            )
 
-        d = m.groupdict()
-        if d["unknown_range"] != "*":
-            if completed:
-                raise http_exception(
-                    "BAD_REQUEST",
-                    "File upload has already been completed",
-                    400,
-                )
-
-            start = int(d["first_pos"])
-            end = int(d["last_pos"]) + 1
-            total_size = None if d["total_size"] == "*" else int(d["total_size"])
-
-            if total_size is None and (end - start) % (256 * 1024) != 0:
-                raise http_exception(
-                    "BAD_REQUEST",
-                    f"Content-Range must be a multiple of 256KB (256 * 1024): {content_range}",
-                    400,
-                )
-
-            data = uploaded + data
-            completed = uploaded is not None and len(data) == total_size
-            context.resumable_upload_sessions[session_token] = (data, completed)
-            if completed:
-                context.files[file_path] = data
-
-        return Response(
-            status_code=201 if completed else 308,
-            headers={"Range": f"bytes=0-{len(data) - 1}"},
+def _resumable_put(
+    storage: DummyStorage,
+    path: str,
+    session_token: str | None,
+    content_range: str | None,
+    data: bytes,
+) -> Response:
+    """A chunk of a resumable upload, or a query of its status, as Google Cloud Storage takes them."""
+    upload = storage.vol_upload("resumable", session_token, path)
+    m = _content_range_pat.fullmatch(content_range or "")
+    if not m:
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE", f"Invalid Content-Range: {content_range}"
         )
 
-    else:
-        context.files[file_path] = data
-        return Response(status_code=204)
+    if not m["status"]:
+        first, last = int(m["first"]), int(m["last"])
+        total = None if m["total"] == "*" else int(m["total"])
+        if first > len(upload.data) or len(data) != last - first + 1:
+            # Assumed: a gap or a wrong length is refused.
+            raise ApiError(
+                "INVALID_PARAMETER_VALUE", f"Unexpected chunk: {content_range}"
+            )
+        if total is None and len(data) % _resumable_granularity != 0:
+            raise ApiError(
+                "INVALID_PARAMETER_VALUE",
+                f"A chunk but the last must be a multiple of 256 KiB: {content_range}",
+            )
+        # A chunk overlapping what was received replaces it.
+        upload.data[first:] = data
+        if total is not None:
+            if len(upload.data) != total:
+                raise ApiError(
+                    "INVALID_PARAMETER_VALUE", f"Unexpected size: {content_range}"
+                )
+            del storage.resumable_uploads[session_token]
+            if path in storage.volume_files and not upload.overwrite:
+                # As Cloud Storage answers a failed precondition, which the SDK expects.
+                raise ApiError(
+                    "ALREADY_EXISTS", f"The file {path} already exists.", 412
+                )
+            storage.vol_write(path, upload.data, upload.overwrite)
+            return Response(status_code=200)
+
+    # 308 tells what was received so far, and nothing before the first byte.
+    headers = {"range": f"bytes=0-{len(upload.data) - 1}"} if upload.data else {}
+    return Response(status_code=308, headers=headers)
+
+
+@app.post("/api/2.0/fs/files{file_path:path}")
+async def files_upload_action(
+    storage: Storage,
+    file_path: str,
+    request: Request,
+    action: str | None = None,
+    upload_type: str | None = None,
+    session_token: str | None = None,
+    overwrite: str | None = None,
+):
+    path = _volume_path(file_path)
+    if action == "initiate-upload":
+        return storage.vol_initiate_upload(path, _overwrite(overwrite))
+    if action == "complete-upload" and upload_type == "multipart":
+        upload = storage.vol_upload("multipart", session_token, path)
+        parts = (await _body(request)).get("parts") or []
+        numbers = [p["part_number"] for p in parts]
+        if not numbers or numbers != sorted(set(numbers)):
+            raise ApiError(
+                "INVALID_PARAMETER_VALUE", "The parts must be in ascending order."
+            )
+        data = bytearray()
+        for p in parts:
+            etag, part = upload.parts.get(p["part_number"], (None, b""))
+            if etag is None or etag != p["etag"]:
+                raise ApiError("INVALID_PARAMETER_VALUE", f"Unknown part or ETag: {p}")
+            data.extend(part)
+        del storage.multipart_uploads[session_token]
+        storage.vol_write(path, data, upload.overwrite)
+        return {}
+    if action == "abort-upload" and upload_type == "multipart":
+        # The SDK aborts with a POST, fsspec-databricks with a DELETE: both are served.
+        storage.vol_upload("multipart", session_token, path)
+        del storage.multipart_uploads[session_token]
+        return {}
+    raise ApiError(
+        "INVALID_PARAMETER_VALUE",
+        f"Invalid action: action={action}, upload_type={upload_type}",
+    )
 
 
 @app.delete("/api/2.0/fs/files{file_path:path}")
-async def delete_file(
-    context: Annotated[DummyAPIContext, Depends(dummy_context)],
+async def files_delete(
+    storage: Storage,
     file_path: str,
-    action: Annotated[str | None, Query()] = None,
-    upload_type: Annotated[str | None, Query()] = None,
-    session_token: Annotated[str | None, Query()] = None,
-    signed: Annotated[str | None, Query()] = None,
+    action: str | None = None,
+    upload_type: str | None = None,
+    session_token: str | None = None,
+    signed: str | None = None,
 ):
-    if context.check_signed_url and signed != "true":
-        raise http_exception(
-            "BAD_REQUEST",
-            "Signed URL is required",
-            400,
-        )
-
+    path = _volume_path(file_path)
     if action == "abort-upload":
-        context.check_multipart_upload_session(session_token)
-        context.multipart_upload_sessions.pop(session_token)
+        _check_presigned(storage, signed)
+        storage.vol_upload("multipart", session_token, path)
+        del storage.multipart_uploads[session_token]
         return Response(status_code=204)
     if upload_type == "resumable":
-        context.check_resumable_upload_session(session_token)
-        context.resumable_upload_sessions.pop(session_token)
+        # Deleting the session's URL cancels it, as on Cloud Storage.
+        _check_presigned(storage, signed)
+        storage.vol_upload("resumable", session_token, path)
+        del storage.resumable_uploads[session_token]
         return Response(status_code=204)
-    elif action is None and upload_type is None and session_token is None:
-        if file_path not in context.files:
-            raise http_exception(
-                "NOT_FOUND",
-                "File not found",
-                404,
-            )
-
-        del context.files[file_path]
-        return Response(status_code=204)
-    else:
-        raise http_exception(
-            "BAD_REQUEST",
+    if action or upload_type or session_token:
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE",
             f"Invalid action: action={action}, upload_type={upload_type}",
-            400,
         )
+    # Assumed: a directory is no file, so it is not found.
+    storage.vol_get(path)
+    del storage.volume_files[path]
+    return Response(status_code=204)
+
+
+@app.put("/api/2.0/fs/directories{directory_path:path}")
+async def files_create_directory(storage: Storage, directory_path: str):
+    # The reference: the parents are created, and an existing directory is no error.
+    storage.vol_mkdirs(_volume_path(directory_path))
+    return Response(status_code=204)
+
+
+@app.delete("/api/2.0/fs/directories{directory_path:path}")
+async def files_delete_directory(storage: Storage, directory_path: str):
+    path = _volume_path(directory_path)
+    if path == _volume_root(path):
+        # Assumed: a volume is deleted by the Unity Catalog API only.
+        raise ApiError("INVALID_PARAMETER_VALUE", f"Cannot delete the volume {path}.")
+    if path not in storage.volume_dirs:
+        raise ApiError("NOT_FOUND", f"The directory {path} is not found.", 404)
+    if storage.vol_children(path):
+        # The reference: only an empty directory is deleted. Assumed: the error's code and message.
+        raise ApiError("DIRECTORY_NOT_EMPTY", f"Directory {path} is not empty.")
+    storage.volume_dirs.remove(path)
+    return Response(status_code=204)
+
+
+@app.head("/api/2.0/fs/directories{directory_path:path}")
+async def files_get_directory_metadata(storage: Storage, directory_path: str):
+    path = _volume_path(directory_path)
+    # Assumed: a file is no directory, so it is not found.
+    return Response(status_code=200 if storage.vol_is_dir(path) else 404)
+
+
+@app.get("/api/2.0/fs/directories{directory_path:path}")
+async def files_list_directory_contents(
+    storage: Storage,
+    directory_path: str,
+    page_size: int | None = None,
+    page_token: str | None = None,
+):
+    path = _volume_path(directory_path)
+    if not storage.vol_is_dir(path):
+        # Assumed: listing a file fails as listing a missing directory.
+        raise ApiError("NOT_FOUND", f"The directory {path} is not found.", 404)
+    # The reference: at most 1000 entries a page, larger sizes taken as 1000.
+    size = min(page_size, _max_page_size) if page_size and page_size > 0 else 1000
+
+    children = storage.vol_children(path)
+    if page_token:
+        # Assumed: the token is opaque; here, the last path of the previous page.
+        try:
+            after = base64.b64decode(page_token, b"-_", validate=True).decode()
+        except ValueError:
+            raise ApiError(
+                "INVALID_PARAMETER_VALUE", f"Invalid page token: {page_token}"
+            ) from None
+        children = [p for p in children if p > after]
+
+    page = children[:size]
+    response = {}
+    if page:
+        response["contents"] = [_directory_entry(storage, p) for p in page]
+    if len(children) > size:
+        response["next_page_token"] = base64.urlsafe_b64encode(
+            page[-1].encode()
+        ).decode()
+    return response
+
+
+def _directory_entry(storage: DummyStorage, path: str) -> dict:
+    entry = {"path": path, "name": posixpath.basename(path)}
+    file = storage.volume_files.get(path)
+    if file is None:
+        # Assumed: directories tell no size and no time, as object storage keeps none.
+        entry["is_directory"] = True
+    else:
+        entry["is_directory"] = False
+        entry["file_size"] = len(file.data)
+        entry["last_modified"] = file.last_modified
+    return entry
 
 
 @app.post("/api/2.0/fs/create-download-url")
-async def create_download_url(
+async def files_create_download_url(
+    storage: Storage,
     request: Request,
-    path: Annotated[str | None, Query()] = None,
-    expire_time: Annotated[datetime | None, Query()] = None,
+    path: str | None = None,
+    expire_time: str | None = None,
 ):
-    if path is None or expire_time is None:
-        raise http_exception(
-            "BAD_REQUEST",
-            f"Missing required queries: (path, expire_time)=({path}, {expire_time})",
-            400,
-        )
+    if expire_time is None:
+        raise ApiError("INVALID_PARAMETER_VALUE", "expire_time is required.")
+    path = _volume_path(path)
+    # Assumed: a URL for a missing file is refused.
+    storage.vol_get(path)
+    return {"url": _presigned_url(request, path), "headers": []}
 
-    query = urllib.parse.urlencode({"signed": "true"})
-    base = str(request.base_url).rstrip("/")
 
-    return {
-        "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
-        "headers": [],
-    }
+async def _session_request(storage: DummyStorage, request: Request, kind: str):
+    """The path and session token of a request for upload URLs, checked."""
+    body = await _body(request)
+    path = _volume_path(body.get("path"))
+    token = body.get("session_token")
+    storage.vol_upload(kind, token, path)
+    return body, path, token
 
 
 @app.post("/api/2.0/fs/create-upload-part-urls")
-async def create_upload_part_url(request: Request):
-    body = await request.json()
+async def files_create_upload_part_urls(storage: Storage, request: Request):
+    body, path, token = await _session_request(storage, request, "multipart")
     try:
-        path = body["path"]
-        session_token = body["session_token"]
-        start_part_number = body["start_part_number"]
-        count = body["count"]
-        _ = body["expire_time"]
-    except KeyError as e:
-        raise http_exception(
-            "BAD_REQUEST",
-            str(e),
-            400,
-        ) from e
-
-    base = str(request.base_url).rstrip("/")
-
+        start, count = int(body["start_part_number"]), int(body["count"])
+        expire_time = body["expire_time"]
+    except (KeyError, TypeError, ValueError) as e:
+        raise ApiError("INVALID_PARAMETER_VALUE", f"Invalid request: {e}") from e
     return {
         "upload_part_urls": [
             {
-                "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+                "url": _presigned_url(
+                    request,
+                    path,
+                    session_token=token,
+                    upload_type="multipart",
+                    part_number=i,
+                ),
                 "headers": [],
+                "part_number": i,
+                "expire_time": expire_time,
             }
-            for query in [
-                urllib.parse.urlencode(
-                    {
-                        "session_token": session_token,
-                        "upload_type": "multipart",
-                        "part_number": i,
-                        "signed": "true",
-                    }
-                )
-                for i in range(start_part_number, start_part_number + count)
-            ]
+            for i in range(start, start + count)
         ]
     }
 
 
 @app.post("/api/2.0/fs/create-resumable-upload-url")
-async def create_resumable_upload_url(request: Request):
-    body = await request.json()
-    try:
-        path = body["path"]
-        session_token = body["session_token"]
-    except KeyError as e:
-        raise http_exception(
-            "BAD_REQUEST",
-            str(e),
-            400,
-        ) from e
-
-    query = urllib.parse.urlencode(
-        {"session_token": session_token, "upload_type": "resumable", "signed": "true"}
-    )
-    base = str(request.base_url).rstrip("/")
-
-    return {
-        "resumable_upload_url": {
-            "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
-            "headers": [],
-        }
-    }
+async def files_create_resumable_upload_url(storage: Storage, request: Request):
+    _, path, token = await _session_request(storage, request, "resumable")
+    url = _presigned_url(request, path, session_token=token, upload_type="resumable")
+    return {"resumable_upload_url": {"url": url, "headers": []}}
 
 
 @app.post("/api/2.0/fs/create-abort-upload-url")
-async def create_abort_upload_url(
-    request: Request,
-    context: Annotated[DummyAPIContext, Depends(dummy_context)],
-):
-    if not context.abort_supported:
-        # As Azure Databricks, which does not support abort of multipart upload
-        raise http_exception(
-            "BAD_REQUEST",
-            "Abort of multipart upload is not supported",
-            400,
+async def files_create_abort_upload_url(storage: Storage, request: Request):
+    if not storage.abort_supported:
+        # As Azure Databricks answers, which cannot abort multipart uploads.
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE", "Abort of multipart upload is not supported."
         )
-
-    body = await request.json()
-    try:
-        path = body["path"]
-        session_token = body["session_token"]
-        _ = body["expire_time"]
-    except KeyError as e:
-        raise http_exception(
-            "BAD_REQUEST",
-            str(e),
-            400,
-        ) from e
-
-    query = urllib.parse.urlencode(
-        {"action": "abort-upload", "session_token": session_token, "signed": "true"}
-    )
-    base = str(request.base_url).rstrip("/")
-
+    body, path, token = await _session_request(storage, request, "multipart")
+    if "expire_time" not in body:
+        raise ApiError("INVALID_PARAMETER_VALUE", "expire_time is required.")
+    url = _presigned_url(request, path, action="abort-upload", session_token=token)
     return {
         "abort_upload_url": {
-            "url": f"{base}/api/2.0/fs/files{urllib.parse.quote(path)}?{query}",
+            "url": url,
             "headers": [],
+            "expire_time": body["expire_time"],
         }
     }
+
+
+### Unity Catalog API
+#
+# Only what lists and describes the volumes. Assumed: every catalog, schema and volume exists, as for the Files
+# API, and the listings name those holding files or directories.
+
+_created_at = _now_ms()
+
+
+def _uc_names(storage: DummyStorage) -> set[tuple[str, str, str]]:
+    roots = {_volume_root(p) for p in [*storage.volume_files, *storage.volume_dirs]}
+    return {tuple(r.split("/")[2:5]) for r in roots if _volume_pat.match(r)}
+
+
+def _uc_info(*names: str) -> dict:
+    info = {
+        "name": names[-1],
+        "full_name": ".".join(names),
+        "created_at": _created_at,
+        "updated_at": _created_at,
+    }
+    if len(names) > 1:
+        info["catalog_name"] = names[0]
+    if len(names) > 2:
+        info["schema_name"] = names[1]
+        info["volume_type"] = "MANAGED"
+    return info
+
+
+@app.get("/api/2.1/unity-catalog/catalogs")
+async def uc_list_catalogs(storage: Storage):
+    names = sorted({n[0] for n in _uc_names(storage)})
+    return {"catalogs": [_uc_info(n) for n in names]}
+
+
+@app.get("/api/2.1/unity-catalog/catalogs/{name}")
+async def uc_get_catalog(name: str):
+    return _uc_info(name)
+
+
+@app.get("/api/2.1/unity-catalog/schemas")
+async def uc_list_schemas(storage: Storage, catalog_name: str):
+    names = sorted({n[:2] for n in _uc_names(storage) if n[0] == catalog_name})
+    return {"schemas": [_uc_info(*n) for n in names]}
+
+
+@app.get("/api/2.1/unity-catalog/schemas/{full_name}")
+async def uc_get_schema(full_name: str):
+    return _uc_info(*full_name.split("."))
+
+
+@app.get("/api/2.1/unity-catalog/volumes")
+async def uc_list_volumes(storage: Storage, catalog_name: str, schema_name: str):
+    names = sorted(
+        n for n in _uc_names(storage) if n[:2] == (catalog_name, schema_name)
+    )
+    return {"volumes": [_uc_info(*n) for n in names]}
+
+
+@app.get("/api/2.1/unity-catalog/volumes/{name}")
+async def uc_read_volume(name: str):
+    return _uc_info(*name.split("."))
+
+
+### Workspace API
+
+# Notebook extensions by language, which an AUTO import strips, with the header of each language's source.
+_notebook_extensions = {
+    ".py": ("PYTHON", b"# Databricks notebook source"),
+    ".sql": ("SQL", b"-- Databricks notebook source"),
+    ".scala": ("SCALA", b"// Databricks notebook source"),
+    ".r": ("R", b"# Databricks notebook source"),
+}
+_workspace_max_size = 10 * 1024 * 1024
+
+
+@app.get("/api/2.0/workspace/get-status")
+async def workspace_get_status(storage: Storage, path: str | None = None):
+    path = _absolute(path)
+    return storage.ws_get(path).info(path)
+
+
+@app.get("/api/2.0/workspace/list")
+async def workspace_list(storage: Storage, path: str | None = None):
+    path = _absolute(path)
+    obj = storage.ws_get(path)
+    if obj.object_type != "DIRECTORY":
+        return {"objects": [obj.info(path)]}
+    # In creation order, as the Workspace API lists.
+    children = _children(storage.workspace, path)
+    if not children:
+        return {}
+    return {"objects": [storage.workspace[p].info(p) for p in children]}
+
+
+@app.post("/api/2.0/workspace/mkdirs")
+async def workspace_mkdirs(storage: Storage, request: Request):
+    storage.ws_mkdirs(_absolute((await _body(request)).get("path")))
+    return {}
+
+
+@app.post("/api/2.0/workspace/delete")
+async def workspace_delete(storage: Storage, request: Request):
+    body = await _body(request)
+    path = _absolute(body.get("path"))
+    storage.ws_get(path)
+    if _children(storage.workspace, path) and not _bool(body.get("recursive")):
+        raise ApiError("DIRECTORY_NOT_EMPTY", f"Folder ({path}) is not empty.")
+    for p in _subtree(storage.workspace, path):
+        del storage.workspace[p]
+    return {}
+
+
+@app.post("/api/2.0/workspace/import")
+async def workspace_import(storage: Storage, request: Request):
+    body = await _body(request)
+    path = _absolute(_text(body.get("path")))
+    fmt = _text(body.get("format")) or "SOURCE"
+    language = _text(body.get("language"))
+    overwrite = _bool(body.get("overwrite"))
+    content = body.get("content") or b""
+    # A JSON body has the content in base64, a form has it as a posted file.
+    if isinstance(content, str):
+        content = base64.b64decode(content)
+
+    if len(content) > _workspace_max_size:
+        raise ApiError("MAX_NOTEBOOK_SIZE_EXCEEDED", f"File size exceeds 10 MB: {path}")
+
+    path, object_type, language = _import_kind(path, fmt, language, content)
+    storage.ws_import(path, object_type, language, content, overwrite)
+    return {}
+
+
+def _import_kind(
+    path: str, fmt: str, language: str | None, content: bytes
+) -> tuple[str, str, str | None]:
+    """The path, object type and language of an import, from its format."""
+    if fmt == "RAW":
+        object_type = "FILE"
+    elif fmt == "SOURCE":
+        if not language:
+            # Without a language, SOURCE imports a directory, which the dummy does not support.
+            raise ApiError(
+                "INVALID_PARAMETER_VALUE",
+                "The language must be set to import a notebook as SOURCE.",
+            )
+        object_type = "NOTEBOOK"
+    elif fmt == "AUTO":
+        base, ext = posixpath.splitext(path)
+        kind = _notebook_extensions.get(ext.lower())
+        if kind and content.startswith(kind[1]):
+            object_type, language, path = "NOTEBOOK", kind[0], base
+        else:
+            object_type, language = "FILE", None
+    else:
+        # HTML, JUPYTER, DBC and R_MARKDOWN convert notebooks: the dummy keeps sources only.
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE",
+            f"Import format not supported by the dummy: {fmt}",
+        )
+    if object_type == "FILE":
+        language = None
+    return path, object_type, language
+
+
+@app.get("/api/2.0/workspace/export")
+async def workspace_export(
+    storage: Storage,
+    path: str | None = None,
+    format: str = "SOURCE",
+    direct_download: str | None = None,
+):
+    path = _absolute(path)
+    obj = storage.ws_get(path)
+    if obj.object_type == "DIRECTORY":
+        # Directories export as archives, which the dummy does not make.
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE", f"Exporting directories is not supported: {path}"
+        )
+    if obj.object_type == "NOTEBOOK" and format not in ("SOURCE", "AUTO"):
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE",
+            f"Export format not supported by the dummy: {format}",
+        )
+    if len(obj.content) > _workspace_max_size:
+        raise ApiError("MAX_NOTEBOOK_SIZE_EXCEEDED", f"File size exceeds 10 MB: {path}")
+
+    # Files export as they are, in any format: assumed, as the reference names only notebook formats.
+    if _bool(direct_download):
+        return Response(content=obj.content, media_type="application/octet-stream")
+    file_type = None
+    if obj.object_type == "NOTEBOOK":
+        file_type = {"PYTHON": "py", "SQL": "sql", "SCALA": "scala", "R": "r"}.get(
+            obj.language
+        )
+    response = {"content": base64.b64encode(obj.content).decode()}
+    if file_type:
+        response["file_type"] = file_type
+    return response
+
+
+@app.get("/api/2.1/settings/{name}")
+async def get_setting(storage: Storage, name: str):
+    if name != "disable_legacy_dbfs":
+        raise ApiError("RESOURCE_DOES_NOT_EXIST", f"Setting {name} not found.", 404)
+    value = {"value": storage.legacy_dbfs_disabled}
+    return {"name": name, "boolean_val": value, "effective_boolean_val": value}
+
+
+### Legacy DBFS API
+_dbfs_max_block_size = 1024 * 1024
+
+
+def _dbfs_path(path) -> str:
+    path = _text(path)
+    if path and path.startswith("dbfs:"):
+        path = path[len("dbfs:") :]
+    return _absolute(path)
+
+
+def _check_dbfs_enabled(storage: DummyStorage) -> None:
+    if storage.legacy_dbfs_disabled:
+        raise ApiError("PERMISSION_DENIED", "Public DBFS root is disabled.", 403)
+
+
+@app.get("/api/2.0/dbfs/get-status")
+async def dbfs_get_status(storage: Storage, path: str | None = None):
+    _check_dbfs_enabled(storage)
+    path = _dbfs_path(path)
+    return storage.dbfs_get(path).info(path)
+
+
+@app.get("/api/2.0/dbfs/list")
+async def dbfs_list(storage: Storage, path: str | None = None):
+    _check_dbfs_enabled(storage)
+    path = _dbfs_path(path)
+    entry = storage.dbfs_get(path)
+    if not entry.is_dir:
+        return {"files": [entry.info(path)]}
+    # Assumed: sorted by name, as the Hadoop file system under DBFS lists.
+    children = sorted(_children(storage.dbfs, path))
+    if not children:
+        return {}
+    return {"files": [storage.dbfs[p].info(p) for p in children]}
+
+
+@app.post("/api/2.0/dbfs/mkdirs")
+async def dbfs_mkdirs(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    storage.dbfs_mkdirs(_dbfs_path((await _body(request)).get("path")))
+    return {}
+
+
+@app.post("/api/2.0/dbfs/delete")
+async def dbfs_delete(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    body = await _body(request)
+    path = _dbfs_path(body.get("path"))
+    if path not in storage.dbfs:
+        # Assumed: deleting a missing path succeeds, as the reference names no error for it.
+        return {}
+    if path == "/":
+        raise ApiError("INVALID_PARAMETER_VALUE", "Cannot delete the root.")
+    if _children(storage.dbfs, path) and not _bool(body.get("recursive")):
+        raise ApiError(
+            "IO_ERROR",
+            f"Directory {path} is not empty: set recursive to delete it.",
+        )
+    for p in _subtree(storage.dbfs, path):
+        del storage.dbfs[p]
+    return {}
+
+
+@app.post("/api/2.0/dbfs/move")
+async def dbfs_move(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    body = await _body(request)
+    src = _dbfs_path(body.get("source_path"))
+    dst = _dbfs_path(body.get("destination_path"))
+    storage.dbfs_get(src)
+    if dst in storage.dbfs:
+        raise ApiError(
+            "RESOURCE_ALREADY_EXISTS",
+            f"A file or directory already exists at the input path {dst}.",
+        )
+    if src == "/" or dst.startswith(src.rstrip("/") + "/"):
+        raise ApiError("INVALID_PARAMETER_VALUE", f"Cannot move {src} into {dst}.")
+    # Assumed: the destination's parents are created, as `mkdirs` does.
+    storage.dbfs_mkdirs(posixpath.dirname(dst))
+    # A directory moves with all in it.
+    for p in _subtree(storage.dbfs, src):
+        storage.dbfs[dst + p[len(src) :]] = storage.dbfs.pop(p)
+    return {}
+
+
+@app.post("/api/2.0/dbfs/create")
+async def dbfs_create(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    body = await _body(request)
+    path = _dbfs_path(body.get("path"))
+    # Assumed: the file exists, empty, from its creation on, and grows with each block, as on HDFS.
+    storage.dbfs_create(path, _bool(body.get("overwrite")))
+    handle = storage.new_id()
+    storage.dbfs_handles[handle] = path
+    return {"handle": handle}
+
+
+def _dbfs_handle(storage: DummyStorage, handle) -> str:
+    if handle not in storage.dbfs_handles:
+        raise ApiError("RESOURCE_DOES_NOT_EXIST", f"Unknown handle: {handle}", 404)
+    return storage.dbfs_handles[handle]
+
+
+def _dbfs_block(data) -> bytes:
+    block = base64.b64decode(data) if isinstance(data, str) else bytes(data or b"")
+    if len(block) > _dbfs_max_block_size:
+        raise ApiError(
+            "MAX_BLOCK_SIZE_EXCEEDED",
+            f"The block of {len(block)} bytes exceeds the limit of 1 MB.",
+        )
+    return block
+
+
+@app.post("/api/2.0/dbfs/add-block")
+async def dbfs_add_block(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    body = await _body(request)
+    path = _dbfs_handle(storage, body.get("handle"))
+    block = _dbfs_block(body.get("data"))
+    if storage.dbfs_add_block_errors:
+        storage.dbfs_add_block_errors -= 1
+        raise ApiError("INTERNAL_ERROR", "Injected error", 500)
+    entry = storage.dbfs.get(path)
+    if entry is not None and not entry.is_dir:
+        entry.data.extend(block)
+        entry.modification_time = _now_ms()
+    return {}
+
+
+@app.post("/api/2.0/dbfs/close")
+async def dbfs_close(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    body = await _body(request)
+    _dbfs_handle(storage, body.get("handle"))
+    del storage.dbfs_handles[body["handle"]]
+    return {}
+
+
+@app.post("/api/2.0/dbfs/put")
+async def dbfs_put(storage: Storage, request: Request):
+    _check_dbfs_enabled(storage)
+    # A JSON body has the contents in base64, limited to 1 MB; a form posts them as a file.
+    body = await _body(request)
+    path = _dbfs_path(body.get("path"))
+    contents = body.get("contents") or body.get("file") or b""
+    if isinstance(contents, str):
+        contents = _dbfs_block(contents)
+    entry = storage.dbfs_create(path, _bool(body.get("overwrite")))
+    entry.data.extend(contents)
+    return {}
+
+
+@app.get("/api/2.0/dbfs/read")
+async def dbfs_read(
+    storage: Storage,
+    path: str | None = None,
+    offset: int = 0,
+    length: int = 512 * 1024,
+):
+    _check_dbfs_enabled(storage)
+    path = _dbfs_path(path)
+    entry = storage.dbfs_get(path)
+    if entry.is_dir:
+        raise ApiError("INVALID_PARAMETER_VALUE", f"Path {path} is a directory.")
+    if offset < 0 or length < 0:
+        raise ApiError(
+            "INVALID_PARAMETER_VALUE", f"Invalid offset or length: {offset}, {length}"
+        )
+    if length > _dbfs_max_block_size:
+        raise ApiError(
+            "MAX_READ_SIZE_EXCEEDED",
+            f"Cannot read more than 1 MB: {length} bytes requested.",
+        )
+    data = bytes(entry.data[offset : offset + length])
+    return {"bytes_read": len(data), "data": base64.b64encode(data).decode()}
+
+
+### Server
 
 
 def _find_free_port(start_port=8000, end_port=9000) -> str:
@@ -552,6 +1361,8 @@ def serve_app(loop):
 
 
 __all__ = [
-    "dummy_context",
+    "DummyStorage",
+    "Recorded",
+    "dummy_storage",
     "serve_app",
 ]

@@ -3,7 +3,7 @@ from enum import Enum
 
 import pytest
 
-from fsspec_databricks.utils import to_datetime, value_of
+from fsspec_databricks.utils import read_mode, to_datetime, value_of, write_mode
 
 
 def test_to_datetime():
@@ -68,3 +68,18 @@ def test_value_of():
 
     with pytest.raises(ValueError):
         assert value_of("Orange", Fruit)
+
+
+@pytest.mark.parametrize(
+    ("mode", "readable", "writable"),
+    [
+        ("rb", True, False),
+        ("wb", False, True),
+        ("ab", False, True),
+        ("xb", False, True),
+        ("r+b", True, True),
+    ],
+)
+def test_modes(mode: str, readable: bool, writable: bool):
+    assert read_mode(mode) is readable
+    assert write_mode(mode) is writable

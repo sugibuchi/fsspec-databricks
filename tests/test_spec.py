@@ -7,26 +7,24 @@ import fsspec
 import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat
+from fsspec_alt_strategies.monitor import Monitor, monitoring
 
 from fsspec_databricks import DatabricksFileSystem, use
-from tests.test_volume_fs import (
-    dbfs_url as volume_dbfs_url,
+from tests.utils import (
+    init_dbfs_test_dir,
+    init_volume_test_dir,
+    init_workspace_test_dir,
+    volume_download,
+    workspace_download,
 )
-from tests.test_volume_fs import (
-    download as volume_download,
-)
-from tests.test_volume_fs import (
-    init_test_dir as init_volume_test_dir,
-)
-from tests.test_workspace_fs import (
-    dbfs_url as workspace_dbfs_url,
-)
-from tests.test_workspace_fs import (
-    download as workspace_download,
-)
-from tests.test_workspace_fs import (
-    init_test_dir as init_workspace_test_dir,
-)
+
+
+def volume_dbfs_url(path: str) -> str:
+    return f"dbfs:/{path.lstrip('/')}"
+
+
+def workspace_dbfs_url(path: str) -> str:
+    return f"dbfs:/Workspace/{path.lstrip('/')}"
 
 
 def test_use():
@@ -118,66 +116,143 @@ def test_dbx_fs_local_root(tmp_path):
         assert fs.ls("/", detail=False) == ["/data"]
 
 
-def test_dbx_fs_init(client: WorkspaceClient):
+class _Calls(Monitor):
+    """Records the calls whose operations it is told of."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def started(self, call, state, op):
+        self.calls.append(call)
+
+
+@pytest.fixture
+def routed(client, workspace_test_root, dbfs_client, dbfs_test_root):
+    """A `DatabricksFileSystem` outside a workspace, a Workspace directory of files, and an empty DBFS directory."""
+    ws = init_workspace_test_dir(
+        client,
+        workspace_test_root,
+        items={
+            "dir": {
+                "a.bin": (b"a", ImportFormat.RAW, None),
+                "sub": {"b.bin": (b"bb", ImportFormat.RAW, None)},
+            }
+        },
+    )
+    dbfs = init_dbfs_test_dir(dbfs_client, dbfs_test_root)
+    with DatabricksFileSystem(client=client) as fs:
+        fs._running_in_workspace = False
+        yield fs, f"/Workspace{ws}", dbfs
+
+
+@pytest.mark.backend("workspace", "dbfs")
+def test_dbx_fs_routes_recursive_operations(routed):
+    """Recursive operations run in the backend of their path, with its strategies, which monitors see."""
+    fs, ws, _ = routed
+    monitor = _Calls()
+    with monitoring(monitor):
+        assert fs.find(f"dbfs:{ws}/dir") == [f"{ws}/dir/a.bin", f"{ws}/dir/sub/b.bin"]
+        assert fs.glob(f"{ws}/dir/*.bin") == [f"{ws}/dir/a.bin"]
+        assert fs.du(f"{ws}/dir") == 3
+        fs.copy(f"{ws}/dir", f"{ws}/copy", recursive=True)
+
+    # The backend's calls, with its paths, made through the router.
+    backend = fs._workspace_fs
+    assert [(c.fs, c.method, c.path) for c in monitor.calls] == [
+        (backend, "find", f"{ws}/dir"),
+        (backend, "glob", f"{ws}/dir/*.bin"),
+        (backend, "du", f"{ws}/dir"),
+        (backend, "copy", f"{ws}/dir"),
+    ]
+    assert all(c.via == (fs,) for c in monitor.calls)
+    assert fs.find(f"{ws}/copy") == [f"{ws}/copy/a.bin", f"{ws}/copy/sub/b.bin"]
+    assert [root for root, _, _ in fs.walk(f"{ws}/dir")] == [
+        f"{ws}/dir",
+        f"{ws}/dir/sub",
+    ]
+
+
+@pytest.mark.backend("workspace", "dbfs")
+def test_dbx_fs_copies_between_backends(routed):
+    """A copy between backends is the router's own, streaming each file through the backends' file objects."""
+    fs, ws, dbfs = routed
+    monitor = _Calls()
+    with monitoring(monitor):
+        fs.copy(f"{ws}/dir", f"{dbfs}/backup", recursive=True)
+    assert [(c.fs, c.method, c.path) for c in monitor.calls] == [
+        (fs, "copy", f"{ws}/dir")
+    ]
+
+    assert fs.find(f"{dbfs}/backup") == [
+        f"{dbfs}/backup/a.bin",
+        f"{dbfs}/backup/sub/b.bin",
+    ]
+    assert fs.cat_file(f"{dbfs}/backup/sub/b.bin") == b"bb"
+
+    fs.mv(f"{dbfs}/backup/a.bin", f"{ws}/a.bin")
+    assert not fs.exists(f"{dbfs}/backup/a.bin")
+    assert fs.cat_file(f"{ws}/a.bin") == b"a"
+
+
+@pytest.mark.backend("workspace", "dbfs")
+def test_dbx_fs_root_without_legacy_dbfs(routed, monkeypatch):
+    """Without legacy DBFS, the root holds the Volumes and Workspace roots, and cannot be changed."""
+    fs, _, _ = routed
+
+    async def refused(path, **kwargs):
+        # As the DBFS API answers a workspace disabling legacy DBFS.
+        raise PermissionError(path)
+
+    monkeypatch.setattr(fs._legacy_fs, "_ls", refused)
+    assert fs.ls("/", detail=False) == ["/Volumes", "/Workspace"]
+    assert fs.info("dbfs:/")["type"] == "directory"
+    with pytest.raises(PermissionError):
+        fs.rm("/", recursive=True)
+
+
+@pytest.mark.backend("workspace", "dbfs")
+def test_dbx_fs_transaction_spans_backends(routed):
+    """The router's transaction commits, or discards, the files opened on every backend."""
+    fs, ws, dbfs = routed
+    with fs.transaction:
+        fs.pipe_file(f"{ws}/new.bin", b"w")
+        with fs.open(f"{dbfs}/new.bin", "wb") as f:
+            f.write(b"d")
+        assert not fs.exists(f"{ws}/new.bin")
+        assert not fs.exists(f"{dbfs}/new.bin")
+    assert fs.cat_file(f"{ws}/new.bin") == b"w"
+    assert fs.cat_file(f"{dbfs}/new.bin") == b"d"
+    # The backends' own transactions hold nothing.
+    assert not fs._workspace_fs.transaction.files
+    assert not fs._legacy_fs.transaction.files
+
+    with pytest.raises(ValueError, match="dummy"), fs.transaction:
+        with fs.open(f"{ws}/lost.bin", "wb") as f:
+            f.write(b"w")
+        with fs.open(f"{dbfs}/lost.bin", "wb") as f:
+            f.write(b"d")
+        raise ValueError("dummy")
+    assert not fs.exists(f"{ws}/lost.bin")
+    assert fs.ls(dbfs, detail=False) == [f"{dbfs}/new.bin"]
+
+
+def test_dbx_fs_init():
     with DatabricksFileSystem() as fs:
-        assert (
-            fs.volume_fs_max_read_concurrency
-            == DatabricksFileSystem.volume_fs_max_read_concurrency
-        )
-        assert (
-            fs.volume_fs_min_read_block_size
-            == DatabricksFileSystem.volume_fs_min_read_block_size
-        )
-        assert (
-            fs.volume_fs_max_read_block_size
-            == DatabricksFileSystem.volume_fs_max_read_block_size
-        )
-
-        assert (
-            fs.volume_fs_max_write_concurrency
-            == DatabricksFileSystem.volume_fs_max_write_concurrency
-        )
-        assert (
-            fs.volume_fs_min_write_block_size
-            == DatabricksFileSystem.volume_fs_min_write_block_size
-        )
-        assert (
-            fs.volume_fs_max_write_block_size
-            == DatabricksFileSystem.volume_fs_max_write_block_size
-        )
-
-        assert (
-            fs.volume_min_multipart_upload_size
-            == DatabricksFileSystem.volume_min_multipart_upload_size
-        )
-
         assert fs.use_local_fs_in_workspace
 
     with DatabricksFileSystem(
-        volume_fs_max_read_concurrency=1,
-        volume_fs_min_read_block_size=2 * 1024 * 1024,
-        volume_fs_max_read_block_size=3 * 1024 * 1024,
-        volume_fs_max_write_concurrency=4,
-        volume_fs_min_write_block_size=5 * 1024 * 1024,
-        volume_fs_max_write_block_size=6 * 1024 * 1024,
-        volume_min_multipart_upload_size=7 * 1024 * 1024,
+        operation_concurrency=3,
+        io_concurrency=4,
         use_local_fs_in_workspace=False,
     ) as fs:
-        assert fs.volume_fs_max_read_concurrency == 1
-        assert fs.volume_fs_min_read_block_size == 2 * 1024 * 1024
-        assert fs.volume_fs_max_read_block_size == 3 * 1024 * 1024
-
-        assert fs.volume_fs_max_write_concurrency == 4
-        assert fs.volume_fs_min_write_block_size == 5 * 1024 * 1024
-        assert fs.volume_fs_max_write_block_size == 6 * 1024 * 1024
-
-        assert fs.volume_min_multipart_upload_size == 7 * 1024 * 1024
+        assert fs._volume_fs.operation_concurrency == 3
+        assert fs._volume_fs.io_concurrency == 4
 
         assert not fs.use_local_fs_in_workspace
 
 
 def test_dbx_fs_close():
-    fs = DatabricksFileSystem(verbose_debug_log=True)
+    fs = DatabricksFileSystem()
     _ = fs._legacy_fs
     _ = fs._volume_fs
     _ = fs._workspace_fs
@@ -218,6 +293,7 @@ def test_dbx_fs_serialization():
     assert fs._local_fs is fs2._local_fs  # Local FS is cacheable
 
 
+@pytest.mark.backend("volume", "workspace")
 def test_dbx_fs_copy_file(
     client: WorkspaceClient, volume_test_root, workspace_test_root
 ):
@@ -250,6 +326,7 @@ def test_dbx_fs_copy_file(
     assert volume_download(client, dest) == data_ws
 
 
+@pytest.mark.backend("volume", "workspace")
 def test_dbx_fs_copy(client: WorkspaceClient, volume_test_root, workspace_test_root):
     data_vol1 = randbytes(65536)
     data_vol2 = randbytes(65536)
@@ -294,6 +371,7 @@ def test_dbx_fs_copy(client: WorkspaceClient, volume_test_root, workspace_test_r
     assert volume_download(client, dest + "/file2.bin") == data_ws2
 
 
+@pytest.mark.backend("volume", "workspace")
 def test_dbx_fs_move(client: WorkspaceClient, volume_test_root, workspace_test_root):
     data_vol_1 = randbytes(65536)
     data_vol_3 = randbytes(65536)
