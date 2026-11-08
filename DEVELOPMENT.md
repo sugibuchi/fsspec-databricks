@@ -74,7 +74,7 @@ The options combine, e.g. `--api=live --fs=volume`. A test id names its backends
 | File                | Tests of                                          |
 |---------------------|---------------------------------------------------|
 | `test_spec.py`      | `DatabricksFileSystem` and its routing            |
-| `test_base.py`      | `DatabricksTreeFileSystem` and the client mixin   |
+| `test_base.py`      | `BaseDatabricksFileSystem` and the client mixin   |
 | `test_volume.py`    | `VolumeFileSystem` and its file objects           |
 | `test_workspace.py` | `WorkspaceFileSystem`                             |
 | `test_dbfs.py`      | `DBFS`                                            |
@@ -319,7 +319,7 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 - **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends, created on first use. It is the library's
   `AsyncRoutingFileSystem`.
 - **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies. Each
-  subclasses `DatabricksTreeFileSystem`, in `base.py`.
+  subclasses `BaseDatabricksFileSystem`, in `base.py`.
 - **The file objects** are the library's. Volume files read and write ranges concurrently. Workspace files are
   sync `WorkspaceFile`s of `workspace.py`, transferred whole. DBFS files are the SDK's own.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
@@ -375,7 +375,7 @@ The router needs async backends. The local file system is sync, so the library's
 
 `DatabricksFileSystem` takes the mixin with the library's `AsyncRoutingFileSystem`.
 
-`DatabricksTreeFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
+`BaseDatabricksFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
 - `_sdk` runs an SDK call in a thread. Each backend has `operation_concurrency` threads of its own, made on first
   use.
@@ -438,7 +438,7 @@ system's message.
 
 ### Volumes
 
-`VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `DatabricksTreeFileSystem`, a
+`VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `BaseDatabricksFileSystem`, a
 `TreeFileSystem` of the copy of fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`,
 `_rm_file`, `_rmdir`, `_create_directory` and `_cp_file`. It adds an aiohttp session, closed by `close()`. Its
 `io_concurrency` defaults to 24.

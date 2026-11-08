@@ -99,7 +99,7 @@ class DatabricksClientSupport:
         return self._active_client
 
 
-class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
+class BaseDatabricksFileSystem(DatabricksClientSupport, TreeFileSystem):
     """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
 
     A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
@@ -264,7 +264,7 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
 
 
 __all__ = [
+    "BaseDatabricksFileSystem",
     "DatabricksClientSupport",
-    "DatabricksTreeFileSystem",
     "root_dir_info",
 ]

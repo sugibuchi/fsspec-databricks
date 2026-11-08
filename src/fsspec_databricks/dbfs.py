@@ -22,7 +22,7 @@ from ._contrib.strategy.files.fsspec_transaction import (
     TempPathTransaction,
     TransactionFile,
 )
-from .base import DatabricksTreeFileSystem
+from .base import BaseDatabricksFileSystem
 from .error import (
     error_mapping,
     file_exists_error,
@@ -61,7 +61,7 @@ decoded data.
 """
 
 
-class DBFS(DatabricksTreeFileSystem):
+class DBFS(BaseDatabricksFileSystem):
     """Legacy DBFS file system, on the DBFS API.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in

@@ -16,7 +16,7 @@ from fsspec_alt_strategies_common.profile import StorageProfile
 
 from ._contrib.strategy.files.fsspec_async import SyncFileAdapter
 from ._contrib.strategy.files.fsspec_transaction import FileTransaction, TransactionFile
-from .base import DatabricksTreeFileSystem, root_dir_info
+from .base import BaseDatabricksFileSystem, root_dir_info
 from .error import (
     error_mapping,
     file_exists_error,
@@ -73,7 +73,7 @@ def _parse(path: str) -> str:
         raise file_not_found_error(path) from None
 
 
-class WorkspaceFileSystem(DatabricksTreeFileSystem):
+class WorkspaceFileSystem(BaseDatabricksFileSystem):
     """Databricks Workspace file system.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in

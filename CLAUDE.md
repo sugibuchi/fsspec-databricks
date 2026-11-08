@@ -63,7 +63,7 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - `_route(path)` gives the backend and its path. Inside a workspace, that path is a local path, and `_outer` maps the
   names returned back with `from_local_path`.
 - Every backend must be async. The local file system is wrapped in the library's `SyncTreeWrapper`.
-- Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `DatabricksTreeFileSystem` in `base.py`,
+- Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `BaseDatabricksFileSystem` in `base.py`,
   and call the SDK in threads with `_sdk`.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.

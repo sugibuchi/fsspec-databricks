@@ -39,7 +39,7 @@ from ._contrib.strategy.files.fsspec_transaction import (
     AdaptiveWritableTransaction,
     TransactionFile,
 )
-from .base import DatabricksTreeFileSystem, root_dir_info
+from .base import BaseDatabricksFileSystem, root_dir_info
 from .error import (
     access_error,
     error_mapping,
@@ -126,7 +126,7 @@ def _parse(path: str) -> tuple[str | None, str | None, str | None, str | None, s
         raise file_not_found_error(path) from None
 
 
-class VolumeFileSystem(DatabricksTreeFileSystem):
+class VolumeFileSystem(BaseDatabricksFileSystem):
     """Unity Catalog Volume file system.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop. Its recursive

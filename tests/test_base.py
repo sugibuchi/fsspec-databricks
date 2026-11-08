@@ -7,10 +7,10 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from fsspec_alt_strategies_common import StorageProfile
 
-from fsspec_databricks.base import DatabricksTreeFileSystem
+from fsspec_databricks.base import BaseDatabricksFileSystem
 
 
-class DummyTreeFileSystem(DatabricksTreeFileSystem):
+class DummyTreeFileSystem(BaseDatabricksFileSystem):
     # The client and the threads need none of the primitives.
     storage_profile = StorageProfile()
     _cp_file = _info = _ls = _open = _rm_file = _rmdir = open_async = None
