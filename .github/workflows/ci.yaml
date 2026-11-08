@@ -108,6 +108,8 @@ jobs:
       ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
       VOLUME_ROOT: ${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}
       WORKSPACE_ROOT: ${{ vars.FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT }}
+      # The backends this workspace has, e.g. "volume,workspace" where legacy DBFS is disabled. Unset: all.
+      FSSPEC_DATABRICKS_TEST_FS: ${{ vars.FSSPEC_DATABRICKS_TEST_FS }}
     steps:
       # A cloud whose environment is not set up yet is skipped, not failed.
       - name: Check the environment

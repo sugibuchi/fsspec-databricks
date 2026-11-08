@@ -215,6 +215,7 @@ Every environment has these:
 | `DATABRICKS_HOST` (secret)                         | The workspace's URL                            |
 | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)    | The POSIX path of the Volume work directory    |
 | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable) | The POSIX path of the Workspace work directory |
+| `FSSPEC_DATABRICKS_TEST_FS` (variable, optional)   | The backends tested, e.g. `volume,workspace`   |
 
 The variable `DATABRICKS_AUTH_TYPE` chooses how the tests authenticate:
 
