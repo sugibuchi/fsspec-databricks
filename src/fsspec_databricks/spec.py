@@ -11,6 +11,8 @@ from fsspec.asyn import AsyncFileSystem
 from fsspec_alt_strategies_common.profile import StorageProfile
 
 from ._contrib.strategy.routing import AsyncRoutingFileSystem
+from ._contrib.strategy.tree.filesystem import TreeFileSystem
+from ._contrib.strategy.tree.transfer import tree_transfer
 from ._contrib.strategy.tree.wrapper import SyncTreeWrapper
 from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
 from .dbfs import DBFS
@@ -396,6 +398,24 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     async def _root_info(self, path: str) -> dict[str, Any]:
         # _route gives None for the root only.
         return dict(root_dir_info)
+
+    def _transfer(self, fs1, path1, fs2, path2, *, copy_file):
+        # Every backend is a TreeFileSystem; anything else gets fsspec's own copy.
+        if not isinstance(fs1, TreeFileSystem):
+            return None
+        return tree_transfer(
+            path1,
+            path2,
+            ls=fs1._ls,
+            info=fs1._info,
+            copy_file=copy_file,
+            dst_info=fs2._info,
+            dst_makedirs=fs2._makedirs,
+            dst_rm_file=fs2._rm_file,
+            profile=getattr(fs2, "storage_profile", None) or StorageProfile(),
+            # Not transfer_limit: copy_file holds one of its permits.
+            concurrency_limit=fs1.operation_limit,
+        )
 
     ## File I/O
     def open(

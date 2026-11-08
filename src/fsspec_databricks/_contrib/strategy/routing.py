@@ -5,11 +5,11 @@
 `AsyncRoutingFileSystem` is the base of filesystems spanning several storages
 under one namespace, e.g. a cloud's volumes or containers, each with its own
 filesystem. It knows no family: each inner filesystem runs its own strategies,
-and a copy across two storages is the source's ``_transfer``, whatever its
-family.
+and a copy across two storages runs the strategy its subclass's ``_transfer``
+picks.
 
-This module depends on `streams`, and on `common`: `filesystem`, `operation`,
-`paths` and `types`.
+This module depends on `common`: `filesystem`, `operation`, `paths`, `streams`
+and `types`.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from .common.filesystem import (
 )
 from .common.operation import _collected
 from .common.paths import _trim
-from .streams import streaming_copy
+from .common.streams import streaming_copy
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -49,6 +49,9 @@ if TYPE_CHECKING:
 
     from fsspec.callbacks import Callback
 
+    from fsspec_alt_strategies_common.states import CpState
+
+    from .common.operation import Operation
     from .common.types import _Request
 
 __all__ = ["AsyncRoutingFileSystem"]
@@ -93,11 +96,11 @@ class AsyncRoutingFileSystem(
     catalog, raises PermissionError.
 
     A copy or move between two paths of one storage is the inner filesystem's
-    own: ``_same_storage`` names that filesystem, and both paths as its own. Between two storages, it is the
-    source's ``_transfer``, of a `TreeFileSystem` or a `FlatFileSystem`, given
-    a ``copy_file`` trying ``_server_copy``, then streaming the data. An inner
-    filesystem without ``_transfer`` gets fsspec's own copy instead, a file at
-    a time. A move between two storages deletes each source file once its
+    own: ``_same_storage`` names that filesystem, and both paths as its own. Between two storages, it is
+    the strategy ``_transfer`` returns, e.g. `tree_transfer`, given a
+    ``copy_file`` trying ``_server_copy``, then streaming the data. Where it
+    returns None, as it does unless overridden, it is fsspec's own copy, a
+    file at a time. A move between two storages deletes each source file once its
     copy succeeds, then the source folders left empty.
 
     Inner filesystems are async, on the router's loop: a sync one raises
@@ -263,6 +266,31 @@ class AsyncRoutingFileSystem(
         copy fails otherwise. Here, it always returns False.
         """
         return False
+
+    def _transfer(
+        self,
+        fs1: AsyncFileSystem,
+        path1: str | list[str],
+        fs2: AsyncFileSystem,
+        path2: str,
+        *,
+        copy_file: _Request,
+    ) -> Operation[tuple[str, str], CpState] | None:
+        """The recursive copy of ``path1`` in ``fs1`` to ``path2`` in ``fs2``, or None.
+
+        The router knows no family, so the strategy is the subclass's to pick,
+        as it knows its inner filesystems: e.g. `tree_transfer` between two
+        `TreeFileSystem`s, given ``fs1``'s ``_ls`` and ``_info``, ``fs2``'s
+        ``_info``, ``_makedirs`` and ``_rm_file``, its profile from
+        `storage_profile_of`, and ``copy_file``. ``copy_file`` holds a permit
+        of ``transfer_limit``, so the strategy's ``concurrency_limit`` must be
+        another semaphore, e.g. ``fs1.operation_limit``.
+
+        The operation is returned not yet started. The paths are the inner
+        filesystems' own. Here, it returns None: the copy is fsspec's own, a
+        file at a time.
+        """
+        return None
 
     def _backend(
         self, key: Hashable, make: Callable[[], AsyncFileSystem]
@@ -851,9 +879,17 @@ class AsyncRoutingFileSystem(
                         **kwargs,
                     ),
                 )
-            elif recursive and maxdepth is None and hasattr(fs1, "_transfer"):
+            elif (
+                recursive
+                and maxdepth is None
+                and (
+                    op := self._transfer(
+                        fs1, sources, fs2, inner2, copy_file=self._copy_file(fs1, fs2)
+                    )
+                )
+            ):
                 errors = await self._transferred(
-                    fs1, sources, fs2, inner2, outers, path2, callback
+                    op, fs1, sources, fs2, inner2, outers, path2, callback
                 )
                 _raise(_copy_errors(errors, on_error), "Copying")
             else:
@@ -914,8 +950,21 @@ class AsyncRoutingFileSystem(
                     fs._copy(p1, p2, recursive, "raise", maxdepth, **kwargs),
                 )
                 await self._on(fs, p1, outer, fs._rm(p1, recursive=recursive))
-            elif recursive and maxdepth is None and hasattr(fs1, "_transfer"):
+            elif (
+                recursive
+                and maxdepth is None
+                and (
+                    op := self._transfer(
+                        fs1,
+                        sources,
+                        fs2,
+                        inner2,
+                        copy_file=self._copy_file(fs1, fs2, delete=True),
+                    )
+                )
+            ):
                 errors = await self._transferred(
+                    op,
                     fs1,
                     sources,
                     fs2,
@@ -942,6 +991,7 @@ class AsyncRoutingFileSystem(
 
     async def _transferred(
         self,
+        op: Operation[tuple[str, str], CpState],
         fs1: AsyncFileSystem,
         path1: str | list[str],
         fs2: AsyncFileSystem,
@@ -951,13 +1001,10 @@ class AsyncRoutingFileSystem(
         callback: Any,
         delete: bool = False,
     ) -> list[Exception]:
-        """Copy between two storages with the source's ``_transfer``: the errors.
+        """Run the copy `_transfer` gave between two storages: the errors.
 
         The call is the router's own, watched by the monitors as such.
         """
-        op = fs1._transfer(  # type: ignore[attr-defined]
-            path1, fs2, path2, copy_file=self._copy_file(fs1, fs2, delete=delete)
-        )
         call = Call(self, "mv" if delete else "copy", outer1, outer2)
         _, errors = await _collected(op, call, callback)
         for error in errors:

@@ -343,8 +343,8 @@ The library's router does the rest:
   tree strategies, which monitors see as calls to the backend, with the router in `Call.via`.
 - A path or pattern at the root is walked by fsspec's own methods, over `_roots`.
 - A change of the root raises `PermissionError`.
-- A copy or move between two backends is the source backend's `_transfer`, a tree strategy, under one call of the
-  router. Each file is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
+- A recursive copy or move between two backends is `tree_transfer`, which the router's `_transfer` gives, under one
+  call of the router. Each file is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
 - A move between backends deletes each source file once it is copied, then the source folders.
 
 No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
@@ -563,7 +563,7 @@ Their shared interface is not copied. It is the dependency `fsspec-alt-strategie
 
 To refresh the copy:
 
-1. Copy `common/`, `files/`, `tree/`, `__init__.py`, `monitor.py`, `routing.py` and `streams.py` over the old ones.
+1. Copy `common/`, `files/`, `tree/`, `__init__.py`, `monitor.py` and `routing.py` over the old ones.
    Delete the modules the library no longer has.
 2. Run `uv lock --upgrade-package fsspec-alt-strategies-common`, so that the interface matches.
 3. Run the tests.

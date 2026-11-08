@@ -8,11 +8,7 @@ file objects: its ``_cat_file``, ``_pipe_file``, ``_get_file`` and
 The functions below it shape the answers and errors of fsspec's methods, as
 the families' classes give them.
 
-Its ``_transfer``, a copy to another storage, each family implements with its
-strategy, given the destination's arguments by ``_destination``.
-
-This module depends on the package's `streams`, and on `operation` and
-`types` for types only.
+This module depends on `types`, for types only.
 """
 
 from __future__ import annotations
@@ -23,7 +19,7 @@ import functools
 import io
 import os
 import weakref
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta
 from concurrent.futures import ThreadPoolExecutor
 from glob import has_magic
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -34,18 +30,12 @@ from fsspec.callbacks import DEFAULT_CALLBACK
 from fsspec_alt_strategies_common.monitor import Monitored
 from fsspec_alt_strategies_common.profile import StorageProfile
 
-from ..streams import streaming_copy
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from fsspec import AbstractFileSystem
     from fsspec.callbacks import Callback
 
-    from fsspec_alt_strategies_common.states import CpState
-
-    from .operation import Operation
-    from .types import _Request
 
 _MiB = 1024 * 1024
 T = TypeVar("T")
@@ -178,90 +168,6 @@ class _StrategyFileSystem(
         something to some, e.g. a glob of folders only, or a copy into a folder.
         """
         return _plain(self, path)
-
-    @abstractmethod
-    def _transfer(
-        self,
-        path1: str | Sequence[str],
-        other: AsyncFileSystem,
-        path2: str,
-        *,
-        copy_file: _Request | None = None,
-    ) -> Operation[tuple[str, str], CpState]:
-        """Copy a folder and everything in it from this storage to ``other``.
-
-        It is a recursive copy between two storages, placed as ``_copy``
-        places paths within one. The source drives it: its family's strategy
-        lists the source, `tree_transfer` for a `TreeFileSystem` and
-        `flat_transfer` for a `FlatFileSystem`. So a caller, e.g. a router of
-        several storages, needs to know neither family.
-
-        ``other`` is any async fsspec filesystem: one made with
-        ``asynchronous=True``, on the same loop. Its ``_info``, ``_makedirs``
-        and ``_rm_file`` serve, called as the strategy's ``dst_`` operations.
-        Its ``storage_profile`` tells what it does: a filesystem without one,
-        such as a plain fsspec one, is taken as unknown, ``StorageProfile()``.
-
-        Each file is copied by ``copy_file``, called as
-        ``copy_file(source, destination)``. By default, it streams the data
-        from this filesystem's ``open_async`` to ``other``'s, a
-        ``transfer_size`` block at a time. A caller may give its own, e.g. a
-        server-side copy between two of a cloud's storages, falling back on
-        streaming where it fails.
-
-        The requests hold permits of this filesystem's ``operation_limit``, as
-        ``_copy``'s do, those on ``other`` too. The files opened hold each
-        filesystem's own ``io_limit``.
-
-        Parameters
-        ----------
-        path1 : str or sequence of str
-            The folder or file of this storage to copy, a glob pattern, or a
-            list of them, with or without the protocol.
-        other : AsyncFileSystem
-            The destination's filesystem.
-        path2 : str
-            Where to copy it in ``other``, with or without its protocol.
-        copy_file : callable, optional
-            Copies a file across, as above.
-
-        Returns
-        -------
-        Operation
-            The strategy's, not yet started: yielding ``(source,
-            destination)`` for each file copied, or an error. Its state is a
-            `CpState`.
-
-        Examples
-        --------
-        >>> async with src._transfer("data/2024", dst, "backup/") as op:
-        ...     async for copied in op:
-        ...         if isinstance(copied, Exception):
-        ...             print("failed:", copied)
-        """
-
-    def _destination(
-        self, other: AsyncFileSystem, copy_file: _Request | None
-    ) -> dict[str, Any]:
-        """The arguments of a transfer to ``other`` the families share: all but the source's."""
-        if not getattr(other, "async_impl", False):
-            raise TypeError(f"other must be an async filesystem: {other!r}")
-        profile = getattr(other, "storage_profile", None)
-        if copy_file is None:
-            copy_file = streaming_copy(
-                self.open_async, other.open_async, block_size=self.transfer_size
-            )
-        return {
-            "copy_file": copy_file,
-            "dst_info": other._info,
-            "dst_makedirs": other._makedirs,
-            "dst_rm_file": other._rm_file,
-            # Not declared, the destination is unknown: the way right on any.
-            "profile": profile
-            if isinstance(profile, StorageProfile)
-            else StorageProfile(),
-            "concurrency_limit": self.operation_limit,
-        }
 
     async def _single_file(self, path: str | Sequence[str]) -> bool:
         """Whether ``path`` names one existing file, with no pattern.

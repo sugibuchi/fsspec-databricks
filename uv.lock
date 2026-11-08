@@ -934,8 +934,8 @@ wheels = [
 
 [[package]]
 name = "fsspec-alt-strategies-common"
-version = "0.0.post197+g3f2c6568a"
-source = { git = "https://github.com/sugibuchi/fsspec-alt-strategies?subdirectory=packages%2Fcommon&rev=wip#3f2c6568a2f6efc94a894a3adfafa9b8e47e816c" }
+version = "0.0.post201+g277f54b24"
+source = { git = "https://github.com/sugibuchi/fsspec-alt-strategies?subdirectory=packages%2Fcommon&rev=wip#277f54b24a4ffb198aefb2bb1b12bdbfb7776069" }
 dependencies = [
     { name = "fsspec" },
 ]
