@@ -70,6 +70,10 @@ log_cli_date_format = "%Y-%m-%d %H:%M:%S.%f"
 source = [
     "src/",
 ]
+# The copy of fsspec-alt-strategies is tested there, and only partly used here.
+omit = [
+    "src/fsspec_databricks/_contrib/*",
+]
 
 [tool.hatch.version]
 source = "vcs"
