@@ -1,6 +1,10 @@
 # fsspec-databricks
 
 [![PyPI - Version](https://img.shields.io/pypi/v/fsspec-databricks?color=blue)](https://pypi.org/project/fsspec-databricks/)
+[![Python versions](https://img.shields.io/pypi/pyversions/fsspec-databricks)](https://pypi.org/project/fsspec-databricks/)
+[![License](https://img.shields.io/github/license/sugibuchi/fsspec-databricks)](https://github.com/sugibuchi/fsspec-databricks/blob/main/LICENSE)
+[![CI](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/ci.yaml)
+[![CodeQL](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/codeql.yaml/badge.svg?branch=main)](https://github.com/sugibuchi/fsspec-databricks/actions/workflows/codeql.yaml)
 [![codecov](https://codecov.io/github/sugibuchi/fsspec-databricks/graph/badge.svg?token=RKC8T20CEE)](https://codecov.io/github/sugibuchi/fsspec-databricks)
 
 An [fsspec](https://filesystem-spec.readthedocs.io/en/latest/) file system for Databricks:
