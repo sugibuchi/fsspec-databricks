@@ -8,7 +8,7 @@ file objects: its ``_cat_file``, ``_pipe_file``, ``_get_file`` and
 The functions below it shape the answers and errors of fsspec's methods, as
 the families' classes give them.
 
-This module depends on `types`, for types only.
+This module depends on nothing else in the package.
 """
 
 from __future__ import annotations
@@ -241,10 +241,10 @@ async def _skip(f: Any, start: int, chunk_size: int) -> None:
 
 
 def _with(func: Callable[..., Any], kwargs: dict[str, Any]) -> Callable[..., Any]:
-    """``func``, given ``kwargs`` too at each call, e.g. ``_ls`` with refresh=True.
+    """``func``, given ``kwargs`` too at each call, e.g. ``_ils`` with refresh=True.
 
     fsspec's recursive methods pass their extra keyword arguments on to the
-    listing, which the strategies call with the path and ``detail`` alone.
+    listing, which the strategies call with the path alone.
     """
     return functools.partial(func, **kwargs) if kwargs else func
 

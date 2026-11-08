@@ -122,9 +122,9 @@ def flat_rm(
     --------
     >>> rm = flat_rm(
     ...     "data/2024",
-    ...     iexpand=my_ils,
+    ...     iexpand=fs._iexpand,
     ...     info=fs._info,
-    ...     rm_files=my_rm_files,
+    ...     rm_files=fs._rm_files,
     ...     batch_size=1000,
     ...     concurrency_limit=asyncio.Semaphore(32),
     ... )

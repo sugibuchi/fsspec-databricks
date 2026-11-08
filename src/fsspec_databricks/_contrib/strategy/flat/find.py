@@ -99,7 +99,9 @@ def flat_find(
     Examples
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
-    >>> find = flat_find("data", iexpand=my_ils, info=fs._info, concurrency_limit=limit)
+    >>> find = flat_find(
+    ...     "data", iexpand=fs._iexpand, info=fs._info, concurrency_limit=limit
+    ... )
     >>> async with find as op:
     ...     async for entry in op:
     ...         print(entry["name"])

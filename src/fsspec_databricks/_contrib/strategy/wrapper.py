@@ -27,11 +27,11 @@ costs twice:
 - It lists the prefix's whole folder: for "data/2024-", all of "data/", the
   keys not starting with the prefix then left out.
 
-A subclass overriding ``_iexpand`` with the storage's own listing by prefix, e.g.
-from its SDK, streams it page by page, and lists only the prefix.
+A subclass overriding ``_iexpand`` with the storage's own listing by prefix,
+e.g. from its SDK, streams it page by page, and lists only the prefix.
 
-This module depends on `sync_client` of `common`, `filesystem` of `tree` and of `flat`,
-and `files.fsspec_async`.
+This module depends on `sync_client` of `common`, `filesystem` of `tree` and
+of `flat`, and `files.fsspec_async`.
 """
 
 from __future__ import annotations
@@ -263,7 +263,7 @@ class _SyncFileSystemWrapper(SyncClientSupport, _FileSystemWrapper):
 class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
     """An async filesystem, as a `TreeFileSystem`: its recursive methods the tree strategies.
 
-    Its primitives, such as ``_ls``, ``_rm_file`` and ``_mv_file``, are the
+    Its primitives, such as ``_ils``, ``_rm_file`` and ``_mv_file``, are the
     wrapped filesystem's, awaited on its loop. So are its data methods, such
     as ``_cat_file``, and its files. So is ``_rm_tree``, a recursive delete,
     when the wrapped one has it, e.g. as a `TreeFileSystem`. The wrapper runs
@@ -330,7 +330,7 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
 class SyncTreeWrapper(_SyncFileSystemWrapper, TreeFileSystem):
     """A sync filesystem, as a `TreeFileSystem`: its recursive methods the tree strategies.
 
-    Its primitives, such as ``_ls``, ``_rm_file`` and ``_mv_file``, call the
+    Its primitives, such as ``_ils``, ``_rm_file`` and ``_mv_file``, call the
     wrapped filesystem's, each in a thread, so that several run at once. Its
     ``_mv_file`` is the wrapped one's ``mv``, e.g. a local rename. Its data
     methods call the wrapped one's too, and its files are the wrapped one's,

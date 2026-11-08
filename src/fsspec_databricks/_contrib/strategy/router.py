@@ -9,9 +9,9 @@ across two storages runs the source's family's strategy, as its profile's
 ``fs_type`` says, each file by ``_cross_fs_cp_file`` or ``_cross_fs_mv_file``,
 which stream the data through the two storages' files unless overridden.
 
-This module depends on `filesystem`, `operation`, `paths` and `types` of `common`. It
-imports `cp` and `mv` of a family only to copy or move from a storage of it,
-so a copy may leave out the other family.
+This module depends on `filesystem`, `operation`, `paths` and `types` of
+`common`. It imports `cp` and `mv` of a family only to copy or move from a
+storage of it, so a copy may leave out the other family.
 """
 
 from __future__ import annotations
@@ -88,20 +88,21 @@ class AsyncRoutingFileSystem(
     the router's path, and its inner one.
 
     Above the storages, ``ls`` answers from ``_roots``, and ``info`` from
-    ``_root_info``, which a subclass may override. ``find``,
-    ``du`` and ``walk`` are fsspec's own walk, a folder after another, handing
-    each storage's folder to its filesystem. A glob whose literal prefix
+    ``_root_info``, which a subclass may override. ``find``, ``du`` and
+    ``walk`` are fsspec's own walk, a folder after another, handing each
+    storage's folder to its filesystem. A glob whose literal prefix
     routes goes whole to that filesystem. Another lists the prefix's roots, as
     fsspec's ``glob`` does. A change above the storages, e.g. ``rm`` of a
     catalog, raises PermissionError.
 
     A copy or move between two paths of one storage is the inner filesystem's
-    own: both paths route to the same inner filesystem. Between two storages, it is
-    the strategy of the source's family, as its profile's ``fs_type`` says:
+    own: both paths route to the same inner filesystem. Between two storages,
+    it is the strategy of the source's family, as its profile's ``fs_type`` says:
     `tree_cp` or `tree_mv`, `flat_cp` or `flat_mv`. Each file goes by
     ``_cross_fs_cp_file`` or ``_cross_fs_mv_file``, which stream the data
     unless a subclass overrides them, e.g. with a server-side copy. A source
-    of unknown ``fs_type`` is copied by fsspec's own copy, a file at a time.
+    of unknown ``fs_type``, or a call with ``maxdepth``, is copied by fsspec's
+    own copy, a file at a time.
     A move between two storages deletes each source file once its copy
     succeeds, and the source folders left empty.
 

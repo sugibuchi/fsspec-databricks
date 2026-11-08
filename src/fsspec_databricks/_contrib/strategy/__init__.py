@@ -3,8 +3,9 @@
 """Alternative, filesystem-independent strategies for fsspec.
 
 fsspec's defaults assume a flat key space, as object stores have. The strategies
-here are written for filesystems with a hierarchical namespace too, and work on
-any fsspec filesystem, as functions or as bases of a filesystem class.
+here come in two families: `tree`, for storages with a hierarchical namespace,
+and `flat`, for object stores. They work on any fsspec filesystem, as
+functions, as bases of a filesystem class, or through a wrapper.
 
 They are meant to be copied into a project, not installed. Each is imported
 from its module, so that a copy may leave out those it does not use. The

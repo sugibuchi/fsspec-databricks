@@ -81,6 +81,7 @@ class Operation(OperationHandler, Generic[T, S]):
     ...     info=fs._info,
     ...     rm_file=fs._rm_file,
     ...     rm_folder=fs._rmdir,
+    ...     profile=StorageProfile(),
     ...     concurrency_limit=asyncio.Semaphore(32),
     ... )
     >>> async with rm as op:

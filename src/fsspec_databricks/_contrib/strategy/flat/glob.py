@@ -113,7 +113,10 @@ def flat_glob(
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
     >>> glob = flat_glob(
-    ...     "data/2024-*.parquet", iexpand=my_ils, info=fs._info, concurrency_limit=limit
+    ...     "data/2024-*.parquet",
+    ...     iexpand=fs._iexpand,
+    ...     info=fs._info,
+    ...     concurrency_limit=limit,
     ... )
     >>> async with glob as matches:
     ...     async for match in matches:

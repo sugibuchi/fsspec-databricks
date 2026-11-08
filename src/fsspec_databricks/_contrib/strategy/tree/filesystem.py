@@ -6,8 +6,7 @@
 folder per request. A subclass implements the storage's primitives, and gets
 fsspec's recursive methods from the tree strategies.
 
-This module depends on `cp`, `du`, `find`, `glob`, `mv`, `rm`,
-`walk`, and
+This module depends on `cp`, `du`, `find`, `glob`, `mv`, `rm`, `walk`, and
 `filesystem` and `operation` of `common`.
 """
 
@@ -55,7 +54,7 @@ class TreeFileSystem(_BaseFileSystem):
 
     It suits storages with a hierarchical namespace, which list one folder per
     request, such as Azure Data Lake Storage Gen2. It overrides fsspec's
-    ``_walk``, ``_find``, ``_du``, ``_glob``, and ``_rm``, ``_copy`` and ``mv``
+    ``_walk``, ``_find``, ``_du``, ``_glob``, and ``_rm``, ``_copy`` and ``_mv``
     when recursive, with `tree_walk`, `tree_find`, `tree_du`, `tree_glob`,
     `tree_rm`, `tree_cp` and `tree_mv`. Their answers are fsspec's, and their
     failures are raised, a single one as it is, several in an ExceptionGroup.
@@ -83,8 +82,8 @@ class TreeFileSystem(_BaseFileSystem):
     unknown, and the strategies then take the way right on any storage.
 
     A recursive ``mv``, or one of a single file, moves each file with
-    ``_mv_file``, which is fsspec's copy then delete. A subclass whose storage renames a path in one request
-    overrides it. If its rename moves a folder too, with all in it, the
+    ``_mv_file``, which is fsspec's copy then delete. A subclass whose
+    storage renames a path in one request overrides it. If its rename moves a folder too, with all in it, the
     profile's ``renames_folders=True`` says so: a recursive ``mv`` then moves
     each folder whole where it can.
 

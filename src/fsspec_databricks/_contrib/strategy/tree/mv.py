@@ -81,8 +81,8 @@ def tree_mv(
     The destination is described by the ``dst_`` operations and ``profile``.
     Within one storage, they are the source's own, and ``same_storage`` is
     True. Between two, ``mv_file`` copies a file to the other storage, then
-    deletes it: e.g. the router's ``_cross_fs_mv_file``. A path may then go to the same path, or under it,
-    and nothing is moved whole.
+    deletes it: e.g. the router's ``_cross_fs_mv_file``. A path may then go
+    to the same path, or under it, and nothing is moved whole.
 
     Unlike fsspec's ``mv``, it keeps going past a failure, and reports each. A
     file that failed to move stays where it was, and so do the folders above
@@ -93,8 +93,8 @@ def tree_mv(
     and rename nothing in one request. The moves then start after the first
     listing, not after the whole tree is listed twice.
 
-    Within one storage, with the profile's ``renames_folders=True``, ``mv_file`` moves a folder
-    with all in it, in one request. Each folder root is then first moved whole
+    Within one storage, with the profile's ``renames_folders=True``,
+    ``mv_file`` moves a folder with all in it, in one request. Each folder root is then first moved whole
     by one ``mv_file``, where it can be. That wins by far on storages renaming
     a folder at once, such as Azure Data Lake Storage Gen2, HDFS or a local
     disk. A root goes whole only to a destination that does not exist, as a

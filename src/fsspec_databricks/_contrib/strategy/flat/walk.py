@@ -117,7 +117,9 @@ def flat_walk(
     Examples
     --------
     >>> limit = asyncio.Semaphore(16)  # Shared, e.g. by a filesystem's operations.
-    >>> walk = flat_walk("data", iexpand=my_ils, info=fs._info, concurrency_limit=limit)
+    >>> walk = flat_walk(
+    ...     "data", iexpand=fs._iexpand, info=fs._info, concurrency_limit=limit
+    ... )
     >>> async with walk as folders:
     ...     async for path, dirs, files in folders:
     ...         print(path, sorted(dirs), sorted(files))

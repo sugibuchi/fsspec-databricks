@@ -7,9 +7,8 @@ key under a prefix in one paginated request. A subclass implements the
 storage's primitives, that listing among them, and gets fsspec's recursive
 methods from the flat strategies.
 
-This module depends on `cp`, `du`, `find`, `glob`, `mv`, `rm`,
-`walk`, and
-`filesystem`, `operation` and `paths` of `common`.
+This module depends on `cp`, `du`, `find`, `glob`, `mv`, `rm`, `walk`, and
+`filesystem` and `operation` of `common`.
 """
 
 from __future__ import annotations
@@ -60,15 +59,18 @@ class FlatFileSystem(_BaseFileSystem):
     `flat_cp` and `flat_mv`. Their answers are fsspec's, and their failures are
     raised, a single one as it is, several in an ExceptionGroup.
 
-    A subclass implements the storage's primitives: ``_iexpand``, the listing by
-    prefix, which fsspec has not, and ``_rm_files``, a deletion of several
-    files in one request, with ``rm_batch_size``. It implements those fsspec
-    leaves abstract too: ``_ils``, a folder's listing, which ``_ls`` and so
-    fsspec's own methods list with, ``_info``, ``_rm_file`` and ``_cp_file``.
-    It implements ``open_async``, giving its
-    files ``io_limit`` as their concurrency limit, and ``_open``. The data
-    methods, ``_cat_file``, ``_pipe_file``, ``_get_file`` and ``_put_file``,
-    read and write through ``open_async``'s files.
+    A subclass implements the storage's primitives:
+
+    - ``_iexpand``, the listing by prefix, which fsspec has not;
+    - ``_rm_files``, a deletion of several files in one request, with
+      ``rm_batch_size``;
+    - ``_ils``, a folder's listing, which ``_ls`` and so fsspec's own methods
+      list with, and ``_info``, ``_rm_file`` and ``_cp_file``;
+    - ``open_async``, giving its files ``io_limit`` as their concurrency
+      limit, and ``_open``.
+
+    The data methods, ``_cat_file``, ``_pipe_file``, ``_get_file`` and
+    ``_put_file``, read and write through ``open_async``'s files.
 
     Two limits bound its requests, each an `asyncio.Semaphore` of its own:
 
@@ -78,8 +80,8 @@ class FlatFileSystem(_BaseFileSystem):
 
     ``storage_profile``, a `StorageProfile`, tells the strategies what the
     storage does. With ``renames_files=True``, a recursive ``mv``, or one of
-    a single file, moves each key by ``_mv_file``, which a subclass then overrides with its rename.
-    Otherwise it copies each key, and deletes them in batches.
+    a single file, moves each key by ``_mv_file``, which a subclass then
+    overrides with its rename. Otherwise it copies each key, and deletes them in batches.
 
     Parameters
     ----------

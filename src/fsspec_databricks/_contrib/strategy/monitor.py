@@ -53,10 +53,9 @@ def monitored(
 
     A filesystem inheriting `Monitored` is returned as it is. Any other is
     wrapped, as the entry of its class says, or of the nearest class it
-    inherits: as a `TreeFileSystem` or a `FlatFileSystem`, as its profile's
-    ``fs_type`` says, a tree if unknown, async or not, with the entry's limits
-    and profile. The wrapper is new, and may be dropped
-    once used.
+    inherits. Its profile's ``fs_type`` picks a `TreeFileSystem` or a
+    `FlatFileSystem`, a tree if unknown. The entry also says whether it is
+    async, and its limits. The wrapper is new, and may be dropped once used.
 
     A filesystem no entry names is wrapped only if ``wrap_unknown_fs``: as
     a `TreeFileSystem`, one request at a time, with an unknown profile. That

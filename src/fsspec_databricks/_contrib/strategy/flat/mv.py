@@ -163,10 +163,10 @@ def flat_mv(
     >>> mv = flat_mv(
     ...     "data/2024",
     ...     "archive/",
-    ...     iexpand=my_ils,
+    ...     iexpand=fs._iexpand,
     ...     info=fs._info,
     ...     cp_file=fs._cp_file,
-    ...     rm_files=my_rm_files,
+    ...     rm_files=fs._rm_files,
     ...     batch_size=1000,
     ...     dst_info=fs._info,
     ...     dst_makedirs=fs._makedirs,
