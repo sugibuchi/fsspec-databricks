@@ -701,19 +701,19 @@ def test_volume_copy(
         recursive=True,
     )
 
-    items = [
+    items = sorted(
         (i.path.rstrip("/"), i.is_directory)
         for i in client.files.list_directory_contents(test_dir)
-    ]
+    )
     assert items == [
         (f"{test_dir}/directory", True),
         (f"{test_dir}/directory_copied", True),
     ]
 
-    items = [
+    items = sorted(
         (i.path.rstrip("/"), i.is_directory)
         for i in client.files.list_directory_contents(f"{test_dir}/directory_copied")
-    ]
+    )
     assert items == [
         (f"{test_dir}/directory_copied/1_data.bin", False),
         (f"{test_dir}/directory_copied/2_directory", True),
