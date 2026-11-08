@@ -195,13 +195,17 @@ def test_dbx_fs_copies_between_backends(routed):
 
 
 @pytest.mark.backend("workspace", "dbfs")
-def test_dbx_fs_root_without_legacy_dbfs(routed):
+def test_dbx_fs_root_without_legacy_dbfs(routed, monkeypatch):
     """Without legacy DBFS, the root holds the Volumes and Workspace roots, and cannot be changed."""
-    fs, _, dbfs = routed
-    fs._legacy_fs._legacy_dbfs_enabled = False
+    fs, _, _ = routed
+
+    async def refused(path, **kwargs):
+        # As the DBFS API answers a workspace disabling legacy DBFS.
+        raise PermissionError(path)
+
+    monkeypatch.setattr(fs._legacy_fs, "_ls", refused)
     assert fs.ls("/", detail=False) == ["/Volumes", "/Workspace"]
     assert fs.info("dbfs:/")["type"] == "directory"
-    assert not fs.exists(dbfs)
     with pytest.raises(PermissionError):
         fs.rm("/", recursive=True)
 

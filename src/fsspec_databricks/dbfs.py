@@ -1,8 +1,6 @@
 import asyncio
 import base64
-import concurrent.futures
 import contextlib
-import contextvars
 import functools
 import logging
 from collections.abc import Callable
@@ -28,7 +26,6 @@ from .base import BaseDatabricksFileSystem
 from .error import (
     error_mapping,
     file_exists_error,
-    file_not_found_error,
     is_a_directory_error,
     not_a_directory_error,
     not_empty_error,
@@ -110,70 +107,27 @@ class DBFS(BaseDatabricksFileSystem):
             io_concurrency=io_concurrency,
             **storage_options,
         )
-        # The workspace setting, asked before the first request: runtime attributes, so a copy asks again.
+        # The workspace setting, asked only by `legacy_dbfs_enabled`: a runtime attribute, so a copy asks again.
         self._legacy_dbfs_enabled: bool | None = None
-        self._legacy_dbfs_request: concurrent.futures.Future[bool] | None = None
-
-    ### Whether the workspace has legacy DBFS
-    def _get_legacy_dbfs_enabled(self) -> bool:
-        """Ask the workspace setting `disable_legacy_dbfs`, blocking: one request, logged as `_run_in_thread` logs."""
-        api = "settings.get_public_workspace_setting"
-        try:
-            setting = self.client.workspace_settings_v2.get_public_workspace_setting(
-                "disable_legacy_dbfs"
-            )
-        except Exception as e:
-            logger.debug(
-                "%s: name=disable_legacy_dbfs, failed=%s", api, type(e).__name__
-            )
-            raise
-        logger.debug("%s: name=disable_legacy_dbfs, ok", api)
-        return not setting.effective_boolean_val.value
-
-    def _legacy_dbfs_future(self) -> concurrent.futures.Future[bool]:
-        """The one request of the setting, in the file system's threads, shared by concurrent first callers.
-
-        A concurrent future, not an asyncio one, so that callers on any loop, or none, wait for the same request.
-        """
-        future = self._legacy_dbfs_request
-        if future is None or (future.done() and future.exception() is not None):
-            # A failed request is asked again by the next caller.
-            future = self._thread_pool().submit(
-                contextvars.copy_context().run, self._get_legacy_dbfs_enabled
-            )
-            self._legacy_dbfs_request = future
-        return future
-
-    async def _is_legacy_dbfs_enabled(self) -> bool:
-        """Whether legacy DBFS is enabled, asked once without blocking the loop."""
-        if self._legacy_dbfs_enabled is None:
-            # Shielded: a cancelled caller leaves the request to the others.
-            enabled = await asyncio.shield(
-                asyncio.wrap_future(self._legacy_dbfs_future())
-            )
-            self._legacy_dbfs_enabled = enabled
-        return self._legacy_dbfs_enabled
 
     @property
     def legacy_dbfs_enabled(self) -> bool:
         """Whether legacy DBFS is enabled in the workspace.
 
-        The first call asks the workspace setting and blocks until it answers. Never call it on the event loop.
+        The first call asks the workspace setting `disable_legacy_dbfs` and blocks until it answers. Never call it
+        on the event loop. Nothing else asks it: on a workspace without legacy DBFS, each request fails with the
+        API's 403, raised as a `PermissionError`.
         """
         if self._legacy_dbfs_enabled is None:
-            self._legacy_dbfs_enabled = self._legacy_dbfs_future().result()
+            setting = self.client.workspace_settings_v2.get_public_workspace_setting(
+                "disable_legacy_dbfs"
+            )
+            self._legacy_dbfs_enabled = not setting.effective_boolean_val.value
         return self._legacy_dbfs_enabled
 
-    async def _check_legacy_dbfs(self, path: str) -> None:
-        """Refuse every path of a workspace without legacy DBFS, as missing."""
-        if not await self._is_legacy_dbfs_enabled():
-            raise file_not_found_error(path)
-
     ### File/directory information
-    # Each request checks the setting first: `_info` checks it for the methods calling it first.
     async def _info(self, path, **kwargs):
         dbfs_path = parse_dbfs_path(path)
-        await self._check_legacy_dbfs(path)
         with error_mapping(path):
             status = await self._run_in_thread(self.client.dbfs.get_status, dbfs_path)
         return map_info(status, detail=True)
@@ -181,7 +135,6 @@ class DBFS(BaseDatabricksFileSystem):
     async def _ils(self, path, **kwargs):
         """List a folder a page at a time, as the SDK's listing fetches them."""
         dbfs_path = parse_dbfs_path(path)
-        await self._check_legacy_dbfs(path)
         with error_mapping(path):
             async for entry in self._iter_in_thread(self.client.dbfs.list, dbfs_path):
                 yield map_info(entry, True)
@@ -201,13 +154,11 @@ class DBFS(BaseDatabricksFileSystem):
     async def _mv_file(self, path1, path2, **kwargs):
         """Move a file, or a directory with all in it, with the API's move: one request."""
         src, dst = parse_dbfs_path(path1), parse_dbfs_path(path2)
-        await self._check_legacy_dbfs(path1)
         with error_mapping(path1):
             await self._run_in_thread(self.client.dbfs.move, src, dst)
 
     async def _delete(self, path: str, recursive: bool) -> None:
         dbfs_path = parse_dbfs_path(path)
-        await self._check_legacy_dbfs(path)
         with error_mapping(path):
             # The API's own delete: the SDK's refuses directories unless recursive.
             await self._run_in_thread(
@@ -239,7 +190,6 @@ class DBFS(BaseDatabricksFileSystem):
 
     async def _create_directory(self, path):
         dbfs_path = parse_dbfs_path(path)
-        await self._check_legacy_dbfs(path)
         with error_mapping(path):
             await self._run_in_thread(self.client.dbfs.mkdirs, dbfs_path)
 
@@ -361,7 +311,6 @@ class DbfsReadableFile(AdaptiveReadableFile):
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
         # Opening checked it already: answered from the cache, unless the file was made directly.
-        await self.fs._check_legacy_dbfs(self.path)
         chunks = []
         offset = start
         while offset < end:
@@ -424,7 +373,6 @@ class DbfsWritableFile(AdaptiveWritableFile):
 
     async def _call(self, func: Callable[..., Any], *args, **kwargs) -> Any:
         """Call the SDK in the file system's threads, once the workspace is known to have legacy DBFS."""
-        await self.fs._check_legacy_dbfs(self.path)
         with error_mapping(self.path):
             return await self.fs._run_in_thread(func, *args, **kwargs)
 

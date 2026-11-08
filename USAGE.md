@@ -36,6 +36,9 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
 | `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                       | `8`     |
 
+On a workspace without legacy DBFS, a DBFS path raises the API's refusal as `PermissionError`. `ls("/")` then lists
+`/Volumes` and `/Workspace`.
+
 Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
 `16` and `8`. Their files are transferred whole or one block at a time, so `io_concurrency` does not limit them.
 

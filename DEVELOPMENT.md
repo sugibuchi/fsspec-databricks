@@ -351,15 +351,11 @@ The library's router does the rest:
 No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
 `_cross_fs_cp_file`, and a copy within one backend is its own only when both paths route to it.
 
-Whether legacy DBFS is enabled is checked once:
-
-- with the local file system, by whether `legacy_dbfs_local_root` exists;
-- otherwise, from the workspace setting `disable_legacy_dbfs`.
-
-`_route` asks nothing: it routes every legacy DBFS path to the DBFS backend. The backend asks the workspace setting
-before its first request, in its own threads. Concurrent first requests wait for the same one. The answer is cached on
-the instance, and a copy asks again. Without legacy DBFS, every path of the backend raises `FileNotFoundError`. `_roots`
-uses the same cached answer. Only the sync property `legacy_dbfs_enabled` blocks, when it asks first.
+No request checks whether legacy DBFS is enabled. The DBFS backend sends each request as it comes. On a workspace
+without legacy DBFS, `error_mapping` makes the API's 403 a `PermissionError`. With the API, `_roots` lists the DBFS
+root, and falls back to the roots of Volumes and Workspace on that `PermissionError`. With the local file system, it
+lists them when `legacy_dbfs_local_root` does not exist. Only the sync property `legacy_dbfs_enabled` asks the workspace
+setting `disable_legacy_dbfs`, once per instance, blocking.
 
 The backends are created on first use with the router's `_backend`, with the file system's client, config and
 options. `close()` closes them.

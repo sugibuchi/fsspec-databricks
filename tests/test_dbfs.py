@@ -1,7 +1,6 @@
 """Tests of `DBFS`, through the SDK over HTTP: on the dummy server, and on the live workspace when it enables legacy
 DBFS."""
 
-import asyncio
 import errno
 from random import randbytes
 
@@ -343,40 +342,43 @@ def test_dbfs_transaction(dbfs_client, fs_class, dbfs_test_root):
     assert [i.path for i in client.dbfs.list(test_dir)] == [f"{test_dir}/1_data.bin"]
 
 
-def test_dbfs_router_without_legacy_dbfs(dummy_client, dummy):
-    """A workspace disabling legacy DBFS has no DBFS paths: the router refuses them."""
-    dummy.legacy_dbfs_disabled = True
-    fs = DatabricksFileSystem(client=dummy_client)
-    with pytest.raises(FileNotFoundError):
-        fs.info("dbfs:/tmp")
-    assert sorted(fs.ls("/", detail=False)) == ["/Volumes", "/Workspace"]
-    # The backend refuses its paths itself, sending no DBFS request.
-    with pytest.raises(FileNotFoundError):
-        DBFS(client=dummy_client).info("/tmp")
-    assert dummy.requests_to("/api/2.0/dbfs/get-status") == []
-
-
 _setting = "/api/2.1/settings/disable_legacy_dbfs"
 
 
-def test_dbfs_router_asks_setting_once(dummy_client, dummy):
-    """The setting is asked once per instance, in the backend's threads, by concurrent first calls too."""
-
-    async def run():
-        fs = DatabricksFileSystem(client=dummy_client, asynchronous=True)
-        await asyncio.gather(*(fs._info("/") for _ in range(2)))
-        for _ in range(3):
-            with pytest.raises(FileNotFoundError):
-                await fs._info("dbfs:/missing")
-        await asyncio.gather(*(fs._exists(f"/missing{i}") for i in range(5)))
-        return fs
-
+def test_dbfs_router_without_legacy_dbfs(dummy_client, dummy):
+    """A workspace disabling legacy DBFS refuses DBFS paths by the API's 403, with no setting asked."""
+    dummy.legacy_dbfs_disabled = True
     dummy.requests.clear()
-    asyncio.run(run())
-    assert len(dummy.requests_to(_setting)) == 1
+    fs = DatabricksFileSystem(client=dummy_client)
+    with pytest.raises(PermissionError):
+        fs.info("dbfs:/tmp")
+    with pytest.raises(PermissionError):
+        fs.pipe_file("dbfs:/tmp/a.bin", b"a")
+    # The root falls back to the roots of Volumes and Workspace.
+    assert sorted(fs.ls("/", detail=False)) == ["/Volumes", "/Workspace"]
+    with pytest.raises(PermissionError):
+        DBFS(client=dummy_client).info("/tmp")
+    assert dummy.requests_to(_setting) == []
 
-    # A new instance asks again.
-    asyncio.run(run())
+
+def test_dbfs_router_root_with_legacy_dbfs(dummy_client, dummy):
+    """The root lists the DBFS root, with no setting asked."""
+    dummy.requests.clear()
+    fs = DatabricksFileSystem(client=dummy_client)
+    fs.ls("/", detail=False)
+    assert len(dummy.requests_to("/api/2.0/dbfs/list")) == 1
+    assert dummy.requests_to(_setting) == []
+
+
+def test_dbfs_legacy_dbfs_enabled_asks_once(dummy_client, dummy):
+    """The property asks the setting once per instance, and a new instance asks again."""
+    dummy.legacy_dbfs_disabled = True
+    dummy.requests.clear()
+    fs = DatabricksFileSystem(client=dummy_client)
+    assert not fs.legacy_dbfs_enabled
+    assert not fs.legacy_dbfs_enabled
+    assert len(dummy.requests_to(_setting)) == 1
+    assert not DBFS(client=dummy_client).legacy_dbfs_enabled
     assert len(dummy.requests_to(_setting)) == 2
 
 

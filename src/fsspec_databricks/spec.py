@@ -334,7 +334,7 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
 
         With the local file system, it is enabled when its local mount exists: no API is called. Otherwise, the
         legacy DBFS backend asks the workspace setting once. The first call then blocks until it answers, so never
-        call it on the event loop.
+        call it on the event loop. Nothing internal asks it outside the local file system.
         """
         if not self._uses_local_fs:
             return self._legacy_fs.legacy_dbfs_enabled
@@ -359,7 +359,7 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        # The backend refuses the paths of a workspace without legacy DBFS, asking the setting in its threads.
+        # On a workspace without legacy DBFS, the API refuses the paths: the backend raises its 403 as PermissionError.
         return self._legacy_fs, path
 
     def _outer(self, fs: AsyncFileSystem, path: str) -> str:
@@ -370,15 +370,19 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     async def _roots(self, path: str) -> list[dict[str, Any]]:
         if self._uses_local_fs:
             # A stat of the mount, which may be slow, off the loop.
-            enabled = await asyncio.to_thread(lambda: self.legacy_dbfs_enabled)
+            if not await asyncio.to_thread(lambda: self.legacy_dbfs_enabled):
+                return [dict(volumes_root_info), dict(workspace_root_info)]
             fs, inner = self._local_tree, self.legacy_dbfs_local_root
+            listing = await fs._ls(inner, detail=True)
         else:
-            fs, inner = self._legacy_fs, "/"
-            enabled = await fs._is_legacy_dbfs_enabled()
-        if not enabled:
-            return [dict(volumes_root_info), dict(workspace_root_info)]
+            # No setting asked: the API refuses the listing of a workspace without legacy DBFS.
+            fs = self._legacy_fs
+            try:
+                listing = await fs._ls("/", detail=True)
+            except PermissionError:
+                return [dict(volumes_root_info), dict(workspace_root_info)]
         # The root of legacy DBFS, which holds the mounts of the other backends.
-        return [self._entry(fs, e) for e in await fs._ls(inner, detail=True)]
+        return [self._entry(fs, e) for e in listing]
 
     async def _root_info(self, path: str) -> dict[str, Any]:
         # _route gives None for the root only.
