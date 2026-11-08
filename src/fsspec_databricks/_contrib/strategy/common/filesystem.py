@@ -19,7 +19,7 @@ import io
 import os
 from abc import ABCMeta
 from glob import has_magic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import DEFAULT_CALLBACK
@@ -110,10 +110,18 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     def close(self) -> None:
         """Release what the filesystem holds: here, nothing.
 
-        fsspec has no ``close()``, but a router closes its inner filesystems
-        with theirs. A subclass, or a mixin such as `SyncClientSupport`,
-        releases its own, e.g. a client or threads, and calls this one.
+        fsspec never calls it. A router closes its inner filesystems with it,
+        and ``with`` closes the filesystem it opened. A subclass, or a mixin
+        such as `SyncClientSupport`, releases its own, e.g. a client or
+        threads, and calls this one. It may be called more than once: each
+        releases what is held then.
         """
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def _strip_only_protocol(self, path: str | Sequence[str]) -> Any:
         """A path, or paths, without the protocol, keeping a trailing "/".
