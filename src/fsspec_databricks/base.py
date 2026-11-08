@@ -1,18 +1,15 @@
-import asyncio
 import atexit
 import contextlib
-import contextvars
-import functools
 import logging
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterable
-from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from typing import Any, TypeVar
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
 
+from ._contrib.strategy.sync_client import SyncClientSupport
 from ._contrib.strategy.tree.filesystem import TreeFileSystem
 from .error import file_exists_error, not_a_directory_error
 from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
@@ -103,7 +100,9 @@ class DatabricksClientSupport:
         return self._active_client
 
 
-class BaseDatabricksFileSystem(DatabricksClientSupport, TreeFileSystem):
+class BaseDatabricksFileSystem(
+    DatabricksClientSupport, SyncClientSupport, TreeFileSystem
+):
     """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
 
     A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
@@ -137,9 +136,6 @@ class BaseDatabricksFileSystem(DatabricksClientSupport, TreeFileSystem):
         )
         self._init_client(client, config, config_params)
 
-        # The threads of `_run_in_thread`, made on first use.
-        self._executor: ThreadPoolExecutor | None = None
-
         _register_cleanup(self)
 
     @classmethod
@@ -153,12 +149,7 @@ class BaseDatabricksFileSystem(DatabricksClientSupport, TreeFileSystem):
         """Close the file system and release any resources."""
         if not self.closed:
             self._close_client()
-        self._shutdown_executor()
-
-    def _shutdown_executor(self) -> None:
-        executor, self._executor = self._executor, None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+        self._shutdown_threads()
 
     def __enter__(self):
         if self.closed:
@@ -202,29 +193,6 @@ class BaseDatabricksFileSystem(DatabricksClientSupport, TreeFileSystem):
         ):
             for entry in batch:
                 yield entry
-
-    async def _run_in_thread(self, func: Callable[..., T], /, *args, **kwargs) -> T:
-        """Run a blocking call in one of `operation_concurrency` threads of the file system's own, unlogged."""
-        loop = asyncio.get_running_loop()
-        # The context passes, e.g. the monitors of the operation.
-        return await loop.run_in_executor(
-            self._thread_pool(),
-            contextvars.copy_context().run,
-            functools.partial(func, *args, **kwargs),
-        )
-
-    def _thread_pool(self) -> ThreadPoolExecutor:
-        """The `operation_concurrency` threads of the file system's own, made on first use."""
-        executor = self._executor
-        if executor is None:
-            executor = ThreadPoolExecutor(
-                max_workers=self.operation_concurrency,
-                thread_name_prefix=type(self).__name__,
-            )
-            # Collecting the file system shuts the threads down, without the finalizer keeping it alive.
-            weakref.finalize(self, executor.shutdown, wait=False, cancel_futures=True)
-            self._executor = executor
-        return executor
 
     def created(self, path):
         return self.info(path)["created"]

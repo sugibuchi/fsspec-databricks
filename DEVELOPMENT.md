@@ -379,7 +379,7 @@ The router needs async backends. The local file system is sync, so the library's
 `BaseDatabricksFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
 - `_sdk` runs an SDK call in a thread. Each backend has `operation_concurrency` threads of its own, made on first
-  use.
+  use, from the library's `SyncClientSupport` mixin.
 - `close()` shuts the threads down, as does collecting the file system.
 - `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
 - `operation_concurrency` and `io_concurrency` default to 16 and 8.

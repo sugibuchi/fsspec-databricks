@@ -30,8 +30,8 @@ costs twice:
 A subclass overriding ``_iexpand`` with the storage's own listing by prefix, e.g.
 from its SDK, streams it page by page, and lists only the prefix.
 
-This module depends on `filesystem` of `tree` and of `flat`, and on
-`files.fsspec_async`.
+This module depends on `sync_client`, `filesystem` of `tree` and of `flat`,
+and `files.fsspec_async`.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from .files.fsspec_async import SyncFileAdapter
 from .flat.filesystem import FlatFileSystem
+from .sync_client import SyncClientSupport
 from .tree.filesystem import TreeFileSystem
 
 if TYPE_CHECKING:
@@ -178,48 +179,56 @@ class _AsyncFileSystemWrapper(_FileSystemWrapper):
         return self.fs._open(path, mode=mode, **kwargs)
 
 
-class _SyncFileSystemWrapper(_FileSystemWrapper):
-    """The primitives of a sync filesystem, each run in a thread.
+class _SyncFileSystemWrapper(SyncClientSupport, _FileSystemWrapper):
+    """The primitives of a sync filesystem, each run in a thread of the wrapper's own.
 
-    The threads are those of the loop's default executor. ``operation_limit``
-    and ``io_limit`` bound how many run at once for the wrapper: a filesystem
-    unsafe to call from several threads needs them at 1.
+    There are as many threads as the wrapper's requests and data calls at a
+    time, ``operation_concurrency`` and ``io_concurrency``, when both are
+    numbers. ``operation_limit`` and ``io_limit`` bound how many run at once: a
+    filesystem unsafe to call from several threads needs them at 1.
     """
 
     fs: AbstractFileSystem
 
+    def _thread_count(self) -> int | None:
+        # The data methods hold no permit of operation_limit: their own too.
+        concurrencies = (self.operation_concurrency, self.io_concurrency)  # type: ignore[attr-defined]
+        if all(isinstance(c, int) for c in concurrencies):
+            return sum(concurrencies)
+        return None
+
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
-        return await asyncio.to_thread(self.fs.ls, path, detail=detail, **kwargs)
+        return await self._run_in_thread(self.fs.ls, path, detail=detail, **kwargs)
 
     async def _ils(self, path: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         # fsspec has no listing in pages: the wrapped one's ls, all at once.
-        listing = await asyncio.to_thread(self.fs.ls, path, detail=True, **kwargs)
+        listing = await self._run_in_thread(self.fs.ls, path, detail=True, **kwargs)
         for entry in listing:
             yield entry
 
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
-        return await asyncio.to_thread(self.fs.info, path, **kwargs)
+        return await self._run_in_thread(self.fs.info, path, **kwargs)
 
     async def _rm_file(self, path: str, **kwargs: Any) -> None:
-        await asyncio.to_thread(self.fs.rm_file, path, **kwargs)
+        await self._run_in_thread(self.fs.rm_file, path, **kwargs)
 
     async def _cp_file(self, path1: str, path2: str, **kwargs: Any) -> None:
-        await asyncio.to_thread(self.fs.cp_file, path1, path2, **kwargs)
+        await self._run_in_thread(self.fs.cp_file, path1, path2, **kwargs)
 
     async def _mv_file(self, path1: str, path2: str, **kwargs: Any) -> None:
         # A sync filesystem's own move, e.g. a local rename, is its mv.
-        await asyncio.to_thread(self.fs.mv, path1, path2, **kwargs)
+        await self._run_in_thread(self.fs.mv, path1, path2, **kwargs)
 
     async def _rmdir(self, path: str) -> None:
-        await asyncio.to_thread(self.fs.rmdir, path)
+        await self._run_in_thread(self.fs.rmdir, path)
 
     async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
-        await asyncio.to_thread(self.fs.makedirs, path, exist_ok=exist_ok)
+        await self._run_in_thread(self.fs.makedirs, path, exist_ok=exist_ok)
 
     async def _mkdir(
         self, path: str, create_parents: bool = True, **kwargs: Any
     ) -> None:
-        await asyncio.to_thread(
+        await self._run_in_thread(
             self.fs.mkdir, path, create_parents=create_parents, **kwargs
         )
 
@@ -227,24 +236,24 @@ class _SyncFileSystemWrapper(_FileSystemWrapper):
         self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any
     ) -> bytes:
         async with self.io_limit:
-            return await asyncio.to_thread(
+            return await self._run_in_thread(
                 self.fs.cat_file, path, start=start, end=end, **kwargs
             )
 
     async def _pipe_file(self, path: str, value: bytes, **kwargs: Any) -> None:
         async with self.io_limit:
-            await asyncio.to_thread(self.fs.pipe_file, path, value, **kwargs)
+            await self._run_in_thread(self.fs.pipe_file, path, value, **kwargs)
 
     async def _get_file(self, rpath: str, lpath: str, **kwargs: Any) -> None:
         async with self.io_limit:
-            await asyncio.to_thread(self.fs.get_file, rpath, lpath, **kwargs)
+            await self._run_in_thread(self.fs.get_file, rpath, lpath, **kwargs)
 
     async def _put_file(self, lpath: str, rpath: str, **kwargs: Any) -> None:
         async with self.io_limit:
-            await asyncio.to_thread(self.fs.put_file, lpath, rpath, **kwargs)
+            await self._run_in_thread(self.fs.put_file, lpath, rpath, **kwargs)
 
     async def open_async(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
-        file = await asyncio.to_thread(self.fs.open, path, mode, **kwargs)
+        file = await self._run_in_thread(self.fs.open, path, mode, **kwargs)
         return SyncFileAdapter(file)
 
     def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
@@ -547,7 +556,7 @@ class SyncFlatWrapper(_SyncFileSystemWrapper, FlatFileSystem):
         )
 
     async def _iexpand(self, prefix: str) -> AsyncIterator[dict[str, Any]]:
-        found = await asyncio.to_thread(
+        found = await self._run_in_thread(
             self.fs.find, prefix.rpartition("/")[0], detail=True
         )
         for entry in _under(found, prefix):
@@ -555,14 +564,14 @@ class SyncFlatWrapper(_SyncFileSystemWrapper, FlatFileSystem):
 
     async def _rm_files(self, paths: list[str]) -> None:
         try:
-            await asyncio.to_thread(self.fs.rm, list(paths))
+            await self._run_in_thread(self.fs.rm, list(paths))
         except FileNotFoundError:
             # A key gone meanwhile: the rest one by one, a missing key no error.
             await asyncio.gather(*(self._rm_if_there(p) for p in paths))
 
     async def _rm_if_there(self, path: str) -> None:
         with contextlib.suppress(FileNotFoundError):
-            await asyncio.to_thread(self.fs.rm_file, path)
+            await self._run_in_thread(self.fs.rm_file, path)
 
 
 def _under(found: dict[str, dict[str, Any]], prefix: str) -> list[dict[str, Any]]:
