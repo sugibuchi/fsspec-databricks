@@ -376,8 +376,9 @@ base. `DatabricksFileSystem` takes the mixin with the library's `AsyncRoutingFil
 
 `DatabricksTreeFileSystem` is the base of the Volume, Workspace and DBFS backends: a `TreeFileSystem` with the mixin.
 
-- `_sdk` runs an SDK call in a thread, with the library's `_blocking`. Each backend has
-  `operation_concurrency + io_concurrency` threads of its own, and `close()` shuts them down.
+- `_sdk` runs an SDK call in a thread. Each backend has `operation_concurrency` threads of its own, made on first
+  use.
+- `close()` shuts the threads down, as does collecting the file system.
 - `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
 - `operation_concurrency` and `io_concurrency` default to 16 and 8.
 - `open` writes text with `"\n"` newlines by default.

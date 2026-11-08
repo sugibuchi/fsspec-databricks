@@ -305,7 +305,7 @@ class DbfsReadableFile(AdaptiveReadableFile):
         while offset < end:
             length = min(end - offset, _max_request_size)
             with error_mapping(self.path):
-                response = await self.fs._blocking(
+                response = await self.fs._run_in_thread(
                     lambda o=offset, n=length: self.fs.client.dbfs.read(
                         self._dbfs_path, offset=o, length=n
                     )

@@ -1,8 +1,12 @@
+import asyncio
 import atexit
 import contextlib
+import contextvars
+import functools
 import logging
 import weakref
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypeVar
 
 from databricks.sdk import WorkspaceClient
@@ -187,6 +191,9 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         )
         self._init_client(client, config, config_params)
 
+        # The threads of `_run_in_thread`, made on first use.
+        self._executor: ThreadPoolExecutor | None = None
+
         _register_cleanup(self)
 
     @classmethod
@@ -200,8 +207,12 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
         """Close the file system and release any resources."""
         if not self.closed:
             self._close_client()
-            # Shuts down the threads of `_sdk`.
-            TreeFileSystem.close(self)
+        self._shutdown_executor()
+
+    def _shutdown_executor(self) -> None:
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def __enter__(self):
         if self.closed:
@@ -220,16 +231,34 @@ class DatabricksTreeFileSystem(DatabricksClientSupport, TreeFileSystem):
     ) -> T:
         """Call the blocking Databricks SDK in one of the file system's own threads, so that the event loop goes on.
 
-        `_blocking` makes `operation_concurrency + io_concurrency` threads. `api` and `path` name the request in the
-        debug log.
+        `api` and `path` name the request in the debug log.
         """
         try:
-            result = await self._blocking(lambda: func(self.client))
+            result = await self._run_in_thread(lambda: func(self.client))
         except Exception as e:
             logger.debug("%s: path=%s, failed=%s", api, path, type(e).__name__)
             raise
         logger.debug("%s: path=%s, ok", api, path)
         return result
+
+    async def _run_in_thread(self, func: Callable[..., T], /, *args, **kwargs) -> T:
+        """Run a blocking call in one of `operation_concurrency` threads of the file system's own, unlogged."""
+        executor = self._executor
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=self.operation_concurrency,
+                thread_name_prefix=type(self).__name__,
+            )
+            # Collecting the file system shuts the threads down, without the finalizer keeping it alive.
+            weakref.finalize(self, executor.shutdown, wait=False, cancel_futures=True)
+            self._executor = executor
+        loop = asyncio.get_running_loop()
+        # The context passes, e.g. the monitors of the operation.
+        return await loop.run_in_executor(
+            executor,
+            contextvars.copy_context().run,
+            functools.partial(func, *args, **kwargs),
+        )
 
     def created(self, path):
         return self.info(path)["created"]

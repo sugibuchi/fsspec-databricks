@@ -1,13 +1,26 @@
+import asyncio
 import pickle
+import threading
+import time
 
 import pytest
 from databricks.sdk import WorkspaceClient
+from fsspec_alt_strategies_common import StorageProfile
 
-from fsspec_databricks.base import AbstractDatabricksFileSystem
+from fsspec_databricks.base import (
+    AbstractDatabricksFileSystem,
+    DatabricksTreeFileSystem,
+)
 
 
 class DummyDatabricksFileSystem(AbstractDatabricksFileSystem):
     pass
+
+
+class DummyTreeFileSystem(DatabricksTreeFileSystem):
+    # The threads need none of the primitives.
+    storage_profile = StorageProfile()
+    _cp_file = _info = _ls = _open = _rm_file = _rmdir = open_async = None
 
 
 def test_abstract_dbx_fs_init(dummy_client: WorkspaceClient):
@@ -70,3 +83,54 @@ def test_abstract_dbx_fs_serialization():
     assert fs is not fs2
     assert fs.config is not fs2.config
     assert fs.client is not fs2.client
+
+
+def test_tree_fs_threads_are_its_own_and_limited():
+    fs = DummyTreeFileSystem(operation_concurrency=2)
+    lock = threading.Lock()
+    running = 0
+    peak = 0
+
+    def call():
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return threading.current_thread().name
+
+    async def main():
+        return await asyncio.gather(*(fs._run_in_thread(call) for _ in range(6)))
+
+    names = asyncio.run(main())
+
+    assert all(name.startswith("DummyTreeFileSystem") for name in names)
+    assert peak == 2
+    fs.close()
+
+
+def test_tree_fs_close_shuts_threads_down():
+    fs = DummyTreeFileSystem()
+    asyncio.run(fs._run_in_thread(lambda: None))
+    executor = fs._executor
+
+    fs.close()
+
+    assert fs._executor is None
+    assert executor._shutdown
+    # A later call makes new threads.
+    assert asyncio.run(fs._run_in_thread(lambda x: x + 1, 1)) == 2
+    assert fs._executor is not executor
+    fs.close()
+
+
+def test_tree_fs_serialization_leaves_threads_out():
+    fs = DummyTreeFileSystem()
+    asyncio.run(fs._run_in_thread(lambda: None))
+
+    fs2 = pickle.loads(pickle.dumps(fs))
+
+    assert fs2._executor is None
+    fs.close()

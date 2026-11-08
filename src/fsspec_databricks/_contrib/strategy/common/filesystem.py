@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """What the filesystem classes of the families share, e.g. `TreeFileSystem`'s.
 
-`_StrategyFileSystem` holds the two concurrency limits, and moves data through
+`_BaseFileSystem` holds the two concurrency limits, and moves data through
 file objects: its ``_cat_file``, ``_pipe_file``, ``_get_file`` and
 ``_put_file`` open the file with ``open_async``, which a subclass implements.
 The functions below it shape the answers and errors of fsspec's methods, as
@@ -14,15 +14,12 @@ This module depends on `types`, for types only.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import functools
 import io
 import os
-import weakref
 from abc import ABCMeta
-from concurrent.futures import ThreadPoolExecutor
 from glob import has_magic
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from fsspec.asyn import AsyncFileSystem
 from fsspec.callbacks import DEFAULT_CALLBACK
@@ -38,7 +35,6 @@ if TYPE_CHECKING:
 
 
 _MiB = 1024 * 1024
-T = TypeVar("T")
 
 
 class _AbstractFileSystemMeta(type(AsyncFileSystem), ABCMeta):  # type: ignore[misc]
@@ -49,9 +45,7 @@ class _AbstractFileSystemMeta(type(AsyncFileSystem), ABCMeta):  # type: ignore[m
     """
 
 
-class _StrategyFileSystem(
-    AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemMeta
-):
+class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemMeta):
     """An async filesystem with two concurrency limits, moving data through files.
 
     ``operation_limit`` bounds the requests of the strategies, such as
@@ -78,84 +72,25 @@ class _StrategyFileSystem(
         io_concurrency: int,
         **kwargs: Any,
     ) -> None:
-        for name, value in (
-            ("operation_concurrency", operation_concurrency),
-            ("io_concurrency", io_concurrency),
-        ):
-            if value < 1:
-                raise ValueError(f"{name} must be at least 1: {value}")
+        if operation_concurrency < 1:
+            raise ValueError(
+                f"operation_concurrency must be at least 1: {operation_concurrency}"
+            )
+        if io_concurrency < 1:
+            raise ValueError(f"io_concurrency must be at least 1: {io_concurrency}")
+
         super().__init__(*args, **kwargs)
-        self.operation_concurrency = operation_concurrency
-        self.io_concurrency = io_concurrency
+
         profile = getattr(self, "storage_profile", None)
         if not isinstance(profile, StorageProfile):
             raise ValueError(
                 f"storage_profile must be set, to a StorageProfile: {profile!r}"
             )
+
+        self.operation_concurrency = operation_concurrency
+        self.io_concurrency = io_concurrency
         self.operation_limit = asyncio.Semaphore(operation_concurrency)
         self.io_limit = asyncio.Semaphore(io_concurrency)
-        self._executor: ThreadPoolExecutor | None = None
-
-    async def _blocking(
-        self, func: Callable[..., T], /, *args: Any, **kwargs: Any
-    ) -> T:
-        """Run a blocking call, e.g. of a storage's sync SDK, in a thread.
-
-        It is the way to back the primitives, such as ``_ls``, with an SDK
-        whose calls block: ``return await self._blocking(client.list, path)``.
-        The loop then keeps running the other requests.
-
-        The threads are the filesystem's own, not the loop's default executor,
-        which other code shares. They are made when first needed. There are
-        ``operation_concurrency + io_concurrency`` of them, as many as the two
-        limits let run at once. So a call holding a permit of either never
-        waits for a thread as well. A call made outside the limits may.
-
-        ``close()`` shuts them down, as does collecting the filesystem. Neither
-        waits for the calls running.
-
-        Cancelling the call raises `asyncio.CancelledError` in the caller at
-        once, but the thread runs on to the end of ``func``: a thread cannot be
-        stopped. A request may then still change the storage after its
-        cancellation.
-
-        Parameters
-        ----------
-        func : callable
-            The blocking function.
-        *args, **kwargs
-            Its arguments.
-
-        Returns
-        -------
-        object
-            What ``func`` returns. What it raises is raised.
-        """
-        if self._executor is None:
-            self._executor = ThreadPoolExecutor(
-                self.operation_concurrency + self.io_concurrency,
-                thread_name_prefix=type(self).__name__,
-            )
-            # Shut down when the filesystem is collected, without keeping it
-            # alive: the callback holds the executor only.
-            weakref.finalize(
-                self, self._executor.shutdown, wait=False, cancel_futures=True
-            )
-        loop = asyncio.get_running_loop()
-        call = functools.partial(func, *args, **kwargs)
-        # The context goes with the call, as asyncio.to_thread passes it.
-        context = contextvars.copy_context()
-        return await loop.run_in_executor(self._executor, context.run, call)
-
-    def close(self) -> None:
-        """Shut down the threads of `_blocking`, without waiting for their calls.
-
-        The calls not started yet are cancelled. A call after closing makes new
-        threads.
-        """
-        executor, self._executor = self._executor, None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
 
     def _unwrapped(self) -> AsyncFileSystem:
         """The filesystem a monitor is told of: this one, or the one a wrapper wraps."""
