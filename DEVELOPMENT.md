@@ -68,7 +68,12 @@ Two options of `tests/conftest.py` choose what runs:
 - `--api` chooses where the backend tests run: `dummy`, the default, `live` or `both`.
 - `--fs` chooses the backends tested, comma-separated or repeated. By default, all three are.
 
-The options combine, e.g. `--api=live --fs=volume`. A test id names its backends and its API, e.g.
+Without the options, two environment variables choose, from the environment or `.env`:
+
+- `FSSPEC_DATABRICKS_TEST_API`: `dummy`, `live` or `both`;
+- `FSSPEC_DATABRICKS_TEST_FS`: the backends, comma-separated, e.g. `volume,dbfs`.
+
+An option overrides its variable. The options combine, e.g. `--api=live --fs=volume`. A test id names its backends and its API, e.g.
 `test_dbfs_rm[dbfs-dummy-DBFS]`.
 
 | File                | Tests of                                          |

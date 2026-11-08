@@ -1,7 +1,8 @@
 """Fixtures and options of the tests.
 
 `--api` chooses where the backend tests run: on the dummy server, on the live workspace, or both. `--fs` chooses the
-backends tested. A test of a backend takes `client`, or a fixture built on it, and runs once per API chosen.
+backends tested. Without them, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS` choose, from the
+environment or `.env`. A test of a backend takes `client`, or a fixture built on it, and runs once per API chosen.
 """
 
 import asyncio
@@ -41,17 +42,20 @@ _no_config_file = os.devnull + ".none"
 
 
 def pytest_addoption(parser):
+    # Without the options, the environment chooses, .env included: read when used, as .env is loaded after this.
     parser.addoption(
         "--api",
         choices=sorted(_apis),
-        default="dummy",
-        help="Where the backend tests run: the dummy server (default), the live workspace, or both.",
+        default=None,
+        help="Where the backend tests run: the dummy server, the live workspace, or both. "
+        "Default: $FSSPEC_DATABRICKS_TEST_API, else dummy.",
     )
     parser.addoption(
         "--fs",
         action="append",
-        default=[],
-        help="The backends tested, comma-separated or repeated: volume, workspace, dbfs. Default: all.",
+        default=None,
+        help="The backends tested, comma-separated or repeated: volume, workspace, dbfs. "
+        "Default: $FSSPEC_DATABRICKS_TEST_FS, else all.",
     )
 
 
@@ -69,12 +73,28 @@ def pytest_configure(config):
     )
 
 
+def _selected_api(config) -> str:
+    chosen = config.getoption("--api") or os.environ.get(
+        "FSSPEC_DATABRICKS_TEST_API", "dummy"
+    )
+    if chosen not in _apis:
+        raise pytest.UsageError(
+            f"Unknown FSSPEC_DATABRICKS_TEST_API: {chosen}, not one of {', '.join(sorted(_apis))}"
+        )
+    return chosen
+
+
 def _selected_backends(config) -> set[str]:
-    names = {n.strip() for v in config.getoption("--fs") for n in v.split(",")}
+    values = config.getoption("--fs") or [
+        os.environ.get("FSSPEC_DATABRICKS_TEST_FS", "")
+    ]
+    names = {n.strip() for v in values for n in v.split(",")}
     names.discard("")
     unknown = names - set(_backends)
     if unknown:
-        raise pytest.UsageError(f"Unknown --fs backends: {', '.join(sorted(unknown))}")
+        raise pytest.UsageError(
+            f"Unknown --fs or FSSPEC_DATABRICKS_TEST_FS backends: {', '.join(sorted(unknown))}"
+        )
     return names or set(_backends)
 
 
@@ -86,7 +106,7 @@ def pytest_generate_tests(metafunc):
 
     if "api" not in metafunc.fixturenames:
         return
-    chosen = metafunc.config.getoption("--api")
+    chosen = _selected_api(metafunc.config)
     only = None
     if metafunc.definition.get_closest_marker("live_only"):
         only = "live"

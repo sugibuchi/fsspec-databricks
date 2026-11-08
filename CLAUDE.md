@@ -43,6 +43,8 @@ DEVELOPMENT.md describes the layout, the tests and their setup. Read its Tests s
 
 - `uv run pytest` runs everything on the dummy server, `tests/dummy_api.py`, with no credentials. `--api=live` or
   `--api=both` runs the backend tests on the workspace too, from `.env` or the environment.
+- Without `--api` and `--fs`, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS` choose, from the
+  environment or `.env`.
 - `--fs` selects the backends. Each backend test has a `backend` marker, and a test spanning backends names them all.
 - Run live files one at a time: the Volumes tests take about 20 minutes.
 - The session fixtures `volume_test_root`, `workspace_test_root` and `dbfs_test_root` delete everything in the test
