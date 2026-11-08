@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from fsspec_alt_strategies.profile import StorageProfile
 
     from ..common.jobs import _Roots
-    from ..common.types import _Ils, _Info, _Request
+    from ..common.types import _IExpand, _Info, _Request
 
 __all__ = ["CpState", "flat_cp", "flat_local_cp"]
 
@@ -39,7 +39,7 @@ def flat_cp(
     path1: str | Sequence[str],
     path2: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     cp_file: _Request,
     dst_info: _Info,
@@ -97,7 +97,7 @@ def flat_cp(
 
     Requests: one ``dst_info`` for ``path2``, unless it ends with "/" or
     ``path1`` is a pattern or a list. Patterns, or a list, add the requests
-    of their `flat_glob`. The pages of one ``ils`` per folder copied, one
+    of their `flat_glob`. The pages of one ``iexpand`` per folder copied, one
     after another, one ``cp_file`` per key, and one ``dst_makedirs`` per
     destination folder with keys or a marker. A destination refusing to
     overwrite costs a ``dst_info``, a ``dst_rm_file`` and a ``cp_file`` more
@@ -113,11 +113,11 @@ def flat_cp(
     ----------
     path1 : str or sequence of str
         The folder or file to copy, a glob pattern, or a list of them, as
-        ``ils`` takes paths.
+        ``iexpand`` takes paths.
     path2 : str
         Where to copy it, as above.
-    ils : callable
-        Lists every key starting with a prefix, called as ``ils(prefix)``: an
+    iexpand : callable
+        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
         async iterator of entries as fsspec's ``_ls`` gives them, in order of
         their names, each key once, as an object store lists them.
     info : callable
@@ -159,7 +159,7 @@ def flat_cp(
     >>> cp = flat_cp(
     ...     "data/2024",
     ...     "backup/",
-    ...     ils=my_ils,
+    ...     iexpand=my_ils,
     ...     info=fs._info,
     ...     cp_file=fs._cp_file,
     ...     dst_info=fs._info,
@@ -177,7 +177,7 @@ def flat_cp(
         lambda op: _Copy(
             path1,
             path2,
-            ils=ils,
+            iexpand=iexpand,
             info=info,
             cp_file=cp_file,
             destination_info=dst_info,
@@ -196,7 +196,7 @@ def flat_local_cp(
     path1: str | Sequence[str],
     path2: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     cp_file: _Request,
     makedirs: _Request,
@@ -216,7 +216,7 @@ def flat_local_cp(
         The folder or file to copy, a glob pattern, or a list of them.
     path2 : str
         Where to copy it, as with `flat_cp`.
-    ils, info : callable
+    iexpand, info : callable
         The storage's operations, as with `flat_cp`.
     cp_file : callable
         Copies a file within the storage, called as
@@ -241,7 +241,7 @@ def flat_local_cp(
     return flat_cp(
         path1,
         path2,
-        ils=ils,
+        iexpand=iexpand,
         info=info,
         cp_file=cp_file,
         dst_info=info,
@@ -267,7 +267,7 @@ class _CopyOrMove(_Placing, _FlatJobs):
         path1: str | Sequence[str],
         path2: str,
         *,
-        ils: _Ils,
+        iexpand: _IExpand,
         info: _Info,
         destination_info: _Info,
         makedirs: _Request,
@@ -276,12 +276,12 @@ class _CopyOrMove(_Placing, _FlatJobs):
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
     ) -> None:
-        super().__init__(ils, info, concurrency_limit, op)
+        super().__init__(iexpand, info, concurrency_limit, op)
 
         self.path1 = path1
         self.path2 = path2
 
-        # ils and info are the source's. destination_info, makedirs and the
+        # iexpand and info are the source's. destination_info, makedirs and the
         # profile are the destination's.
         self.makedirs = makedirs
         self._placing(destination_info, same_storage=same_storage)
@@ -310,7 +310,7 @@ class _CopyOrMove(_Placing, _FlatJobs):
         )
 
     async def expand(self, pattern: str | Sequence[str]) -> _Roots:
-        return await _expand(self.ils, self.info, pattern, self.concurrency_limit)
+        return await _expand(self.iexpand, self.info, pattern, self.concurrency_limit)
 
     def add(self, entry: dict[str, Any]) -> None:
         name = entry["name"]

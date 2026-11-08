@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, Callable
 
-    from ..common.types import _Ils, _Info
+    from ..common.types import _IExpand, _Info
 
 __all__ = ["FindState", "flat_find"]
 
@@ -32,7 +32,7 @@ __all__ = ["FindState", "flat_find"]
 def flat_find(
     path: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     maxdepth: int | None = None,
     withdirs: bool = False,
@@ -60,15 +60,15 @@ def flat_find(
     Once cancelled, it takes nothing more from the listing. An error from the
     listing ends the operation, raised by its iteration.
 
-    Requests: the pages of one ``ils`` of ``path``, one after another. One
+    Requests: the pages of one ``iexpand`` of ``path``, one after another. One
     ``info`` for ``path`` itself, if nothing is under it, or with ``withdirs``.
 
     Parameters
     ----------
     path : str
-        The folder to search, as ``ils`` takes paths.
-    ils : callable
-        Lists every key starting with a prefix, called as ``ils(prefix)``: an
+        The folder to search, as ``iexpand`` takes paths.
+    iexpand : callable
+        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
         async iterator of entries as fsspec's ``_ls`` gives them, in order of
         their names, each key once, as an object store lists them.
     info : callable
@@ -99,7 +99,7 @@ def flat_find(
     Examples
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
-    >>> find = flat_find("data", ils=my_ils, info=fs._info, concurrency_limit=limit)
+    >>> find = flat_find("data", iexpand=my_ils, info=fs._info, concurrency_limit=limit)
     >>> async with find as op:
     ...     async for entry in op:
     ...         print(entry["name"])
@@ -110,7 +110,7 @@ def flat_find(
         op: Operation[dict[str, Any], FindState],
     ) -> AsyncGenerator[dict[str, Any]]:
         steps = _find_entries(
-            ils,
+            iexpand,
             info,
             path,
             maxdepth=maxdepth,
@@ -128,7 +128,7 @@ def flat_find(
 
 
 async def _find_entries(
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     path: str,
     *,
@@ -158,7 +158,7 @@ async def _find_entries(
     # The folders of the key listed last.
     before: list[str] = []
 
-    entries = ils(prefix)
+    entries = iexpand(prefix)
     try:
         async for entry in entries:
             under = True

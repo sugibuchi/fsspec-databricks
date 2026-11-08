@@ -181,13 +181,14 @@ class DBFS(BaseDatabricksFileSystem):
             )
         return map_info(status, detail=True)
 
-    async def _ls(self, path, detail=True, **kwargs):
+    async def _ils(self, path, **kwargs):
+        """List a folder a page at a time, as the SDK's listing fetches them."""
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
-            entries = await self._sdk(
-                "dbfs.list", dbfs_path, lambda c: list(c.dbfs.list(dbfs_path))
-            )
-        return [map_info(i, detail) for i in entries]
+            async for entry in self._sdk_iter(
+                "dbfs.list", dbfs_path, lambda c: c.dbfs.list(dbfs_path)
+            ):
+                yield map_info(entry, True)
 
     ### File/directory operations
     async def _cp_file(self, path1, path2, **kwargs):

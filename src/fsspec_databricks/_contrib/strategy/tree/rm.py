@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from fsspec_alt_strategies.profile import StorageProfile
 
-    from ..common.types import _Info, _Ls, _Request
+    from ..common.types import _Ils, _Info, _Request
     from .walk import _Listing
 
 __all__ = ["RmState", "tree_rm"]
@@ -35,7 +35,7 @@ __all__ = ["RmState", "tree_rm"]
 def tree_rm(
     path: str | Sequence[str],
     *,
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     rm_file: _Request,
     rm_folder: _Request,
@@ -81,7 +81,7 @@ def tree_rm(
     unknown. Iterating it raises FileNotFoundError if ``path`` does not exist,
     or matches nothing.
 
-    Requests: one ``ls`` per folder, one ``rm_file`` per file, and one
+    Requests: one ``ils`` per folder, one ``rm_file`` per file, and one
     ``rm_folder`` per folder. Patterns, or a list, add the requests of their
     `tree_glob`. With ``rm_tree``, a root deleted whole costs one ``rm_tree``
     instead. A single ``path`` then costs an ``info`` first, as ``rm_tree``
@@ -95,12 +95,13 @@ def tree_rm(
     Parameters
     ----------
     path : str or sequence of str
-        The folder to delete, as ``ls`` takes it. If it is a file, that file is
+        The folder to delete, as ``ils`` takes it. If it is a file, that file is
         deleted. If it is a glob pattern, or a list of paths and patterns, all
         they match is deleted.
-    ls : callable
-        Lists a folder, called as ``ls(path, detail=True)``: e.g. the
-        filesystem's ``_ls``.
+    ils : callable
+        Lists a folder, called as ``ils(path)``: an async iterator of its
+        entries, as fsspec's ``_ls`` gives them, e.g. the filesystem's
+        ``_ils``.
     info : callable
         Describes a path, called as ``info(path)``: e.g. the filesystem's
         ``_info``. Only patterns use it.
@@ -135,7 +136,7 @@ def tree_rm(
     --------
     >>> rm = tree_rm(
     ...     "data/2024",
-    ...     ls=fs._ls,
+    ...     ils=fs._ils,
     ...     info=fs._info,
     ...     rm_file=fs._rm_file,
     ...     rm_folder=fs._rmdir,
@@ -152,7 +153,7 @@ def tree_rm(
     """
     return Operation(
         lambda op: _Deletion(
-            ls,
+            ils,
             info,
             rm_file,
             rm_folder,
@@ -171,7 +172,7 @@ class _Deletion(_TreeJobs):
 
     def __init__(
         self,
-        ls: _Ls,
+        ils: _Ils,
         info: _Info,
         rm_file: _Request,
         rm_folder: _Request,
@@ -181,7 +182,7 @@ class _Deletion(_TreeJobs):
         concurrency_limit: asyncio.Semaphore,
         op: Operation[str, RmState],
     ) -> None:
-        super().__init__(ls, info, concurrency_limit, op)
+        super().__init__(ils, info, concurrency_limit, op)
 
         self.path = path
         self.rm_file = rm_file
@@ -198,7 +199,9 @@ class _Deletion(_TreeJobs):
     async def prepare(self) -> _Roots:
         """Find the roots, then delete whole the folders that can be: the rest are walked."""
         if not isinstance(self.path, str) or has_magic(self.path):
-            roots = await _expand(self.ls, self.info, self.path, self.concurrency_limit)
+            roots = await _expand(
+                self.ils, self.info, self.path, self.concurrency_limit
+            )
             known = True  # The glob found the folders to be folders.
         else:
             roots = _Roots([self.path])
@@ -266,7 +269,8 @@ class _Deletion(_TreeJobs):
                 self.files_found += 1
                 self.waiting.append(_Job("file", entry["name"].rstrip("/")))
 
-        if not listing.entries:
+        # Empty, or all in it deleted before its last part came.
+        if listing.last and self.finished(listing.folder):
             self.remove(listing.folder)
 
     def run(self, job: _Job) -> Awaitable[Any]:

@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator
 
-    from ..common.types import _Info, _Ls
+    from ..common.types import _Ils, _Info
 
 __all__ = ["DuState", "tree_du"]
 
@@ -32,14 +32,14 @@ __all__ = ["DuState", "tree_du"]
 def tree_du(
     path: str,
     *,
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[dict[str, Any], DuState]:
     """Measure a tree's size from its listings, listing several folders at a time.
 
-    It assumes that ``ls`` gives each file's size, as fsspec's filesystems do.
+    It assumes that ``ils`` gives each file's size, as fsspec's filesystems do.
     It yields the entry of each file counted, with its ``size``, as fsspec's
     ``_du`` gives with ``total=False``. Its state's ``size`` is their total, as
     fsspec's ``_du`` gives by default.
@@ -55,16 +55,17 @@ def tree_du(
 
     Once cancelled, it lists no new folder, and counts the listings in flight.
 
-    Requests: one ``ls`` per folder, as ``concurrency_limit`` allows. One
+    Requests: one ``ils`` per folder, as ``concurrency_limit`` allows. One
     ``info`` for ``path``, if a file.
 
     Parameters
     ----------
     path : str
-        The folder to measure, as ``ls`` takes it.
-    ls : callable
-        Lists a folder, called as ``ls(path, detail=True)``: e.g. the
-        filesystem's ``_ls``.
+        The folder to measure, as ``ils`` takes it.
+    ils : callable
+        Lists a folder, called as ``ils(path)``: an async iterator of its
+        entries, as fsspec's ``_ls`` gives them, e.g. the filesystem's
+        ``_ils``.
     info : callable
         Describes a path, called as ``info(path)``: e.g. the filesystem's
         ``_info``.
@@ -78,7 +79,7 @@ def tree_du(
     Returns
     -------
     Operation
-        Yielding the ``ls`` entry of each file counted, or the error of a
+        Yielding the ``ils`` entry of each file counted, or the error of a
         folder that failed to list. Its state is a `DuState`.
 
     Raises
@@ -93,7 +94,7 @@ def tree_du(
     Examples
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
-    >>> du = tree_du("data", ls=fs._ls, info=fs._info, concurrency_limit=limit)
+    >>> du = tree_du("data", ils=fs._ils, info=fs._info, concurrency_limit=limit)
     >>> async with du as op:
     ...     async for entry in op:
     ...         if isinstance(entry, Exception):
@@ -107,7 +108,7 @@ def tree_du(
         op: Operation[dict[str, Any], DuState],
     ) -> AsyncGenerator[dict[str, Any] | Exception]:
         steps = _find_listings(
-            ls,
+            ils,
             info,
             path,
             maxdepth=maxdepth,
@@ -124,7 +125,8 @@ def tree_du(
                     errors=state.errors + (listing.error is not None),
                     current=listing.folder,
                     # Depth 0 is the root's own entry: no folder listed.
-                    folders_listed=state.folders_listed + (listing.depth > 0),
+                    folders_listed=state.folders_listed
+                    + (listing.depth > 0 and listing.last),
                     files=state.files + len(files),
                     size=state.size + sum(e.get("size") or 0 for e in files),
                 )

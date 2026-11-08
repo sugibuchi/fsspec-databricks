@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, Sequence
 
-    from ..common.types import _Ils, _Info
+    from ..common.types import _IExpand, _Info
 
 __all__ = ["GlobState", "flat_glob"]
 
@@ -39,7 +39,7 @@ __all__ = ["GlobState", "flat_glob"]
 def flat_glob(
     path: str | Sequence[str],
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     maxdepth: int | None = None,
     withdirs: bool = True,
@@ -71,16 +71,16 @@ def flat_glob(
     Once cancelled, it takes nothing more from the listings. An error from a
     listing ends the operation, raised by its iteration.
 
-    Requests: the pages of one ``ils`` per listing, one after another. One
+    Requests: the pages of one ``iexpand`` per listing, one after another. One
     ``info`` per pattern without wildcards.
 
     Parameters
     ----------
     path : str or sequence of str
-        The pattern, or patterns, of paths as ``ils`` takes them. A trailing
+        The pattern, or patterns, of paths as ``iexpand`` takes them. A trailing
         "/" matches only folders.
-    ils : callable
-        Lists every key starting with a prefix, called as ``ils(prefix)``: an
+    iexpand : callable
+        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
         async iterator of entries as fsspec's ``_ls`` gives them, in order of
         their names, each key once, as an object store lists them.
     info : callable
@@ -113,7 +113,7 @@ def flat_glob(
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
     >>> glob = flat_glob(
-    ...     "data/2024-*.parquet", ils=my_ils, info=fs._info, concurrency_limit=limit
+    ...     "data/2024-*.parquet", iexpand=my_ils, info=fs._info, concurrency_limit=limit
     ... )
     >>> async with glob as matches:
     ...     async for match in matches:
@@ -143,7 +143,7 @@ def flat_glob(
         for prefix, group in _listings(searches):
             if op.cancelling():
                 return
-            async for match in _matches(ils, prefix, group, op, found):
+            async for match in _matches(iexpand, prefix, group, op, found):
                 yield match
 
     return Operation(run, GlobState())
@@ -163,7 +163,7 @@ def _listings(
 
 
 async def _matches(
-    ils: _Ils,
+    iexpand: _IExpand,
     prefix: str,
     searches: list[_Search],
     op: Operation[dict[str, Any], GlobState],
@@ -173,7 +173,7 @@ async def _matches(
     # The folders of the key listed last.
     before: list[str] = []
 
-    entries = ils(prefix)
+    entries = iexpand(prefix)
     try:
         async for entry in entries:
             name = entry["name"]

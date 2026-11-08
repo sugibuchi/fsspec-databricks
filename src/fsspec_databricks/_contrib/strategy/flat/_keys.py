@@ -7,7 +7,7 @@ folder exists as the common prefix of keys, or as an empty marker object whose
 key ends with "/". fsspec's ``_find`` and ``_glob`` answer with folders too, so
 the strategies derive them from the keys, as `_folders` does.
 
-The listing, ``ils``, holds no permit of the concurrency limit: its pages come
+The listing, ``iexpand``, holds no permit of the concurrency limit: its pages come
 one after another, and the strategy never sees them. Only the other requests,
 such as an ``info``, hold one.
 

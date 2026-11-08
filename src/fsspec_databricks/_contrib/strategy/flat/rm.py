@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import Awaitable, Sequence
 
-    from ..common.types import _Ils, _Info, _Requests
+    from ..common.types import _IExpand, _Info, _Requests
 
 __all__ = ["RmState", "flat_rm"]
 
@@ -34,7 +34,7 @@ __all__ = ["RmState", "flat_rm"]
 def flat_rm(
     path: str | Sequence[str],
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     rm_files: _Requests,
     batch_size: int,
@@ -66,7 +66,7 @@ def flat_rm(
     without yielding them. Iterating it raises FileNotFoundError if ``path``
     does not exist, or matches nothing. An error from the listing ends it too.
 
-    Requests: the pages of one ``ils`` per folder, one after another, and one
+    Requests: the pages of one ``iexpand`` per folder, one after another, and one
     ``rm_files`` per batch, as ``concurrency_limit`` allows. One ``info`` for
     ``path`` if nothing is under it. Patterns, or a list, add the requests of
     their `flat_glob`.
@@ -74,11 +74,11 @@ def flat_rm(
     Parameters
     ----------
     path : str or sequence of str
-        The folder to delete, as ``ils`` takes paths. If it is a file, that
+        The folder to delete, as ``iexpand`` takes paths. If it is a file, that
         file is deleted. If it is a glob pattern, or a list of paths and
         patterns, all they match is deleted.
-    ils : callable
-        Lists every key starting with a prefix, called as ``ils(prefix)``: an
+    iexpand : callable
+        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
         async iterator of entries as fsspec's ``_ls`` gives them, in order of
         their names, each key once, as an object store lists them.
     info : callable
@@ -112,7 +112,7 @@ def flat_rm(
     --------
     >>> rm = flat_rm(
     ...     "data/2024",
-    ...     ils=my_ils,
+    ...     iexpand=my_ils,
     ...     info=fs._info,
     ...     rm_files=my_rm_files,
     ...     batch_size=1000,
@@ -131,7 +131,7 @@ def flat_rm(
     return Operation(
         lambda op: _Deletion(
             path,
-            ils=ils,
+            iexpand=iexpand,
             info=info,
             rm_files=rm_files,
             batch_size=batch_size,
@@ -149,14 +149,14 @@ class _Deletion(_FlatJobs):
         self,
         path: str | Sequence[str],
         *,
-        ils: _Ils,
+        iexpand: _IExpand,
         info: _Info,
         rm_files: _Requests,
         batch_size: int,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[str, RmState],
     ) -> None:
-        super().__init__(ils, info, concurrency_limit, op)
+        super().__init__(iexpand, info, concurrency_limit, op)
 
         self.path = path
         self.rm_files = rm_files
@@ -168,7 +168,9 @@ class _Deletion(_FlatJobs):
 
     async def prepare(self) -> _Roots:
         if not isinstance(self.path, str) or has_magic(self.path):
-            return await _expand(self.ils, self.info, self.path, self.concurrency_limit)
+            return await _expand(
+                self.iexpand, self.info, self.path, self.concurrency_limit
+            )
         return _Roots([_trim(self.path)])
 
     def state(self) -> RmState:

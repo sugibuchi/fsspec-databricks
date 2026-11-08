@@ -13,7 +13,7 @@ from fsspec_databricks.base import BaseDatabricksFileSystem
 class DummyTreeFileSystem(BaseDatabricksFileSystem):
     # The client and the threads need none of the primitives.
     storage_profile = StorageProfile()
-    _cp_file = _info = _ls = _open = _rm_file = _rmdir = open_async = None
+    _cp_file = _ils = _info = _open = _rm_file = _rmdir = open_async = None
 
 
 def test_tree_fs_client(dummy_client: WorkspaceClient):

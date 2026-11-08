@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, Callable
 
-    from ..common.types import _Ils, _Info
+    from ..common.types import _IExpand, _Info
 
 __all__ = ["WalkState", "flat_walk"]
 
@@ -34,7 +34,7 @@ __all__ = ["WalkState", "flat_walk"]
 def flat_walk(
     path: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     maxdepth: int | None = None,
     topdown: bool = True,
@@ -45,7 +45,7 @@ def flat_walk(
 
     It yields each folder as ``(path, dirs, files)``, as `tree_walk` does:
     ``path`` itself, then each folder below it. ``dirs`` and ``files`` map the
-    names in the folder to their entries. The files are the keys, as ``ils``
+    names in the folder to their entries. The files are the keys, as ``iexpand``
     gives them. The folders are derived from the keys, as fsspec's filesystems
     derive them for object stores, and a key ending with "/" is a folder's
     marker. A derived folder's entry has only its ``name``, ``size`` 0 and
@@ -73,15 +73,15 @@ def flat_walk(
     - NotADirectoryError, if ``path`` is a file;
     - the error of the listing, as there is no other to go on with.
 
-    Requests: the pages of one ``ils`` of ``path``, one after another. One
+    Requests: the pages of one ``iexpand`` of ``path``, one after another. One
     ``info`` for ``path``, if nothing is under it.
 
     Parameters
     ----------
     path : str
-        The folder to start from, as ``ils`` takes paths.
-    ils : callable
-        Lists every key starting with a prefix, called as ``ils(prefix)``: an
+        The folder to start from, as ``iexpand`` takes paths.
+    iexpand : callable
+        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
         async iterator of entries as fsspec's ``_ls`` gives them, in order of
         their names, each key once, as an object store lists them.
     info : callable
@@ -117,7 +117,7 @@ def flat_walk(
     Examples
     --------
     >>> limit = asyncio.Semaphore(16)  # Shared, e.g. by a filesystem's operations.
-    >>> walk = flat_walk("data", ils=my_ils, info=fs._info, concurrency_limit=limit)
+    >>> walk = flat_walk("data", iexpand=my_ils, info=fs._info, concurrency_limit=limit)
     >>> async with walk as folders:
     ...     async for path, dirs, files in folders:
     ...         print(path, sorted(dirs), sorted(files))
@@ -128,7 +128,7 @@ def flat_walk(
         op: Operation[tuple[str, dict[str, Any], dict[str, Any]], WalkState],
     ) -> AsyncGenerator[tuple[str, dict[str, Any], dict[str, Any]]]:
         folders = _folders_done(
-            ils,
+            iexpand,
             info,
             path,
             maxdepth=maxdepth,
@@ -160,7 +160,7 @@ def flat_walk(
 
 
 async def _folders_done(
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     path: str,
     *,
@@ -183,7 +183,7 @@ async def _folders_done(
     # The folders open, the root first, each with its entries so far.
     open_: list[tuple[str, list[dict[str, Any]]]] = [(root, [])]
 
-    keys = ils(prefix)
+    keys = iexpand(prefix)
     try:
         async for key in keys:
             under = True

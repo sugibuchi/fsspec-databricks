@@ -137,18 +137,21 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             )
         return _map_info(status, detail=True)
 
-    async def _ls(self, path, detail=True, **kwargs):
+    async def _ils(self, path, **kwargs):
+        """List a folder a page at a time, as the SDK's listing fetches them."""
         if self._strip_protocol(path) == dbfs_root:
-            return [dict(workspace_root_info)] if detail else [workspace_root]
+            yield dict(workspace_root_info)
+            return
 
         workspace_path = _parse(path)
         with error_mapping(path):
-            entries = await self._sdk(
+            listing = self._sdk_iter(
                 "workspace.list",
                 workspace_path,
-                lambda c: list(c.workspace.list(workspace_path)),
+                lambda c: c.workspace.list(workspace_path),
             )
-        return [_map_info(i, detail) for i in entries]
+            async for entry in listing:
+                yield _map_info(entry, True)
 
     ### File/directory operations
     async def _cp_file(self, path1, path2, **kwargs):

@@ -302,6 +302,32 @@ def test_volume_rm_requests(client, volume_test_root, dummy):
             fs.rm(root, recursive=True)
 
 
+def test_volume_rm_streams_a_large_directory(client, volume_test_root, dummy):
+    """A directory listing many pages is deleted as its pages come, not once all are listed."""
+    root = init_volume_test_dir(client, volume_test_root)
+    for i in range(2001):  # Three pages of the Files API's listing.
+        dummy.vol_write(f"{root}/file-{i:04}", b"x")
+
+    with VolumeFileSystem(client=client) as fs:
+        requests = _requests_of(dummy, lambda: fs.rm(root, recursive=True))
+        assert not fs.exists(root)
+
+    pages = [
+        i
+        for i, (m, p) in enumerate(requests)
+        if (m, p) == ("GET", f"/directories{root}")
+    ]
+    deletes = [
+        i
+        for i, (m, p) in enumerate(requests)
+        if m == "DELETE" and p.startswith("/files")
+    ]
+    assert len(pages) == 3
+    assert len(deletes) == 2001
+    # The first files were deleted before the last page was listed.
+    assert deletes[0] < pages[-1]
+
+
 ### On both APIs
 
 

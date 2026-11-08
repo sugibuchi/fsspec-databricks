@@ -383,49 +383,27 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
         except Exception:
             return False
 
-    async def _ls(
-        self, path, detail=True, include_browse: bool | None = None, **kwargs
-    ):
+    async def _ils(self, path, include_browse: bool | None = None, **kwargs):
+        """List a folder a page at a time, as the SDK's listing fetches them: a catalog, a schema, a volume or a directory."""
         if self._strip_protocol(path) == dbfs_root:
-            return [dict(volumes_root_info)] if detail else [volumes_root_info["name"]]
+            yield dict(volumes_root_info)
+            return
 
         catalog, schema, volume, _, full_path = _parse(path)
-
+        api, name, listing = _listing(
+            path, catalog, schema, volume, full_path, include_browse
+        )
+        listed = False
         with error_mapping(path):
-            if catalog is None:
-                entries = await self._sdk(
-                    "catalogs.list",
-                    path,
-                    lambda c: list(c.catalogs.list(include_browse=include_browse)),
-                )
-            elif schema is None:
-                entries = await self._sdk(
-                    "schemas.list",
-                    catalog,
-                    lambda c: list(
-                        c.schemas.list(catalog, include_browse=include_browse)
-                    ),
-                )
-            elif volume is None:
-                entries = await self._sdk(
-                    "volumes.list",
-                    f"{catalog}.{schema}",
-                    lambda c: list(
-                        c.volumes.list(catalog, schema, include_browse=include_browse)
-                    ),
-                )
-            else:
-                try:
-                    entries = await self._sdk(
-                        "files.list_directory_contents",
-                        full_path,
-                        lambda c: list(c.files.list_directory_contents(full_path)),
-                    )
-                except (NotFound, BadRequest):
-                    # A file lists as itself
-                    info = await self._file_info(full_path)
-                    return [info if detail else info["name"]]
-        return [_map_info(e, detail=detail) for e in entries]
+            try:
+                async for entry in self._sdk_iter(api, name, listing):
+                    listed = True
+                    yield _map_info(entry, detail=True)
+            except (NotFound, BadRequest):
+                if volume is None or listed:
+                    raise
+                # A file lists as itself
+                yield await self._file_info(full_path)
 
     ### File/directory operations
     async def _cp_file(self, path1, path2, **kwargs):
@@ -1172,3 +1150,30 @@ __all__ = [
     "VolumeWritableFile",
     "volumes_root_info",
 ]
+
+
+def _listing(path, catalog, schema, volume, full_path, include_browse):
+    """The SDK listing of a path: its API and the name both logged, and the call making it."""
+    if catalog is None:
+        return (
+            "catalogs.list",
+            path,
+            lambda c: c.catalogs.list(include_browse=include_browse),
+        )
+    if schema is None:
+        return (
+            "schemas.list",
+            catalog,
+            lambda c: c.schemas.list(catalog, include_browse=include_browse),
+        )
+    if volume is None:
+        return (
+            "volumes.list",
+            f"{catalog}.{schema}",
+            lambda c: c.volumes.list(catalog, schema, include_browse=include_browse),
+        )
+    return (
+        "files.list_directory_contents",
+        full_path,
+        lambda c: c.files.list_directory_contents(full_path),
+    )

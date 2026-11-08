@@ -996,7 +996,7 @@ class AsyncRoutingFileSystem(
             return tree_cp(
                 path1,
                 path2,
-                ls=fs1._ls,
+                ils=fs1._ils,
                 cp_file=self._across(fs1, fs2),
                 dst_rm_file=fs2._rm_file,
                 **destination,
@@ -1007,7 +1007,7 @@ class AsyncRoutingFileSystem(
             return flat_cp(
                 path1,
                 path2,
-                ils=fs1._ils,  # type: ignore[attr-defined]
+                iexpand=fs1._iexpand,  # type: ignore[attr-defined]
                 cp_file=self._across(fs1, fs2),
                 dst_rm_file=fs2._rm_file,
                 **destination,
@@ -1040,7 +1040,7 @@ class AsyncRoutingFileSystem(
             return tree_mv(
                 path1,
                 path2,
-                ls=fs1._ls,
+                ils=fs1._ils,
                 mv_file=self._across(fs1, fs2, move=True),
                 rm_folder=fs1._rmdir,
                 **destination,
@@ -1051,7 +1051,7 @@ class AsyncRoutingFileSystem(
             return flat_mv(
                 path1,
                 path2,
-                ils=fs1._ils,  # type: ignore[attr-defined]
+                iexpand=fs1._iexpand,  # type: ignore[attr-defined]
                 cp_file=self._across(fs1, fs2),
                 rm_files=fs1._rm_files,  # type: ignore[attr-defined]
                 batch_size=fs1.rm_batch_size,  # type: ignore[attr-defined]

@@ -30,18 +30,20 @@ if TYPE_CHECKING:
 
     from ..common.jobs import _Roots
     from ..common.operation import Operation
-    from ..common.types import _Ils, _Info
+    from ..common.types import _IExpand, _Info
 
 
 async def _expand(
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     pattern: str | Sequence[str],
     concurrency_limit: asyncio.Semaphore,
 ) -> _Roots:
     """The roots matching glob patterns, found with `flat_glob`."""
     matches, errors = await _collect_with_errors(
-        flat_glob(pattern, ils=ils, info=info, concurrency_limit=concurrency_limit)
+        flat_glob(
+            pattern, iexpand=iexpand, info=info, concurrency_limit=concurrency_limit
+        )
     )
     return _roots_of(matches, errors, pattern)
 
@@ -58,14 +60,14 @@ class _FlatJobs(_Jobs):
 
     def __init__(
         self,
-        ils: _Ils,
+        iexpand: _IExpand,
         info: _Info,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
     ) -> None:
         super().__init__(concurrency_limit, op)
 
-        self.ils = ils
+        self.iexpand = iexpand
         self.info = info
 
     @abstractmethod
@@ -87,7 +89,7 @@ class _FlatJobs(_Jobs):
         return []
 
     async def _keys(self, folders: Sequence[str]) -> AsyncGenerator[dict[str, Any]]:
-        """The keys under each folder, as ``ils`` lists them.
+        """The keys under each folder, as ``iexpand`` lists them.
 
         A folder with nothing under it is asked for with ``info``: a file is
         yielded as a key, and a missing one raises FileNotFoundError, ending the
@@ -95,7 +97,7 @@ class _FlatJobs(_Jobs):
         """
         for folder in folders:
             under = False
-            entries = self.ils(f"{folder}/" if folder else "")
+            entries = self.iexpand(f"{folder}/" if folder else "")
             try:
                 async for entry in entries:
                     under = True

@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, Sequence
 
-    from ..common.types import _Info, _Ls
+    from ..common.types import _Ils, _Info
     from .walk import _Listing
 
 __all__ = ["GlobState", "tree_glob"]
@@ -45,7 +45,7 @@ __all__ = ["GlobState", "tree_glob"]
 def tree_glob(
     path: str | Sequence[str],
     *,
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     maxdepth: int | None = None,
     withdirs: bool = True,
@@ -80,7 +80,7 @@ def tree_glob(
     Once cancelled, it lists no new folder, and yields the matches of the
     listings in flight.
 
-    Requests: one ``ls`` per folder a pattern can match in, as
+    Requests: one ``ils`` per folder a pattern can match in, as
     ``concurrency_limit`` allows. One ``info`` per pattern without wildcards,
     and per literal root folder walked that a pattern matches, e.g. that of
     ``data/**``.
@@ -88,11 +88,12 @@ def tree_glob(
     Parameters
     ----------
     path : str or sequence of str
-        The pattern, or patterns, of paths as ``ls`` takes them. A trailing
+        The pattern, or patterns, of paths as ``ils`` takes them. A trailing
         "/" matches only folders.
-    ls : callable
-        Lists a folder, called as ``ls(path, detail=True)``: e.g. the
-        filesystem's ``_ls``.
+    ils : callable
+        Lists a folder, called as ``ils(path)``: an async iterator of its
+        entries, as fsspec's ``_ls`` gives them, e.g. the filesystem's
+        ``_ils``.
     info : callable
         Describes a path, called as ``info(path)``: e.g. the filesystem's
         ``_info``.
@@ -107,7 +108,7 @@ def tree_glob(
     Returns
     -------
     Operation
-        Yielding the ``ls`` entry of each path matched, or the error of a
+        Yielding the ``ils`` entry of each path matched, or the error of a
         folder that failed to list. Its state is a `GlobState`.
 
     Raises
@@ -124,7 +125,7 @@ def tree_glob(
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
     >>> glob = tree_glob(
-    ...     "data/*/2024/*.parquet", ls=fs._ls, info=fs._info, concurrency_limit=limit
+    ...     "data/*/2024/*.parquet", ils=fs._ils, info=fs._info, concurrency_limit=limit
     ... )
     >>> async with glob as matches:
     ...     async for match in matches:
@@ -154,7 +155,7 @@ def tree_glob(
         for root, group in _walks(searches):
             if op.cancelling():
                 return
-            walk = _walk(ls, info, root, group, concurrency_limit, op, found)
+            walk = _walk(ils, info, root, group, concurrency_limit, op, found)
             async for match in walk:
                 yield match
 
@@ -176,7 +177,7 @@ def _walks(searches: list[_Search]) -> list[tuple[str, list[_Search]]]:
 
 
 async def _walk(
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     root: str,
     searches: list[_Search],
@@ -191,7 +192,7 @@ async def _walk(
     # nothing. Its find includes the root folder itself, which few patterns
     # match.
     steps = _find_listings(
-        ls,
+        ils,
         info,
         root,
         maxdepth=None if None in depths else max(d for d in depths if d is not None),
@@ -231,7 +232,7 @@ def _matches_in(
         errors=state.errors + (listing.error is not None),
         current=listing.folder,
         # Depth 0 is the root's own entry: no folder listed.
-        folders_listed=state.folders_listed + (listing.depth > 0),
+        folders_listed=state.folders_listed + (listing.depth > 0 and listing.last),
         matched=state.matched + len(matches) - (listing.error is not None),
     )
 

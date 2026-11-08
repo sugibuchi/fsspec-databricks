@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     from fsspec_alt_strategies.profile import StorageProfile
 
-    from ..common.types import _Ils, _Info, _Request, _Requests
+    from ..common.types import _IExpand, _Info, _Request, _Requests
 
 __all__ = ["MvState", "flat_local_mv", "flat_mv"]
 
@@ -37,7 +37,7 @@ def flat_mv(
     path1: str | Sequence[str],
     path2: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     mv_file: _Request | None = None,
     cp_file: _Request | None = None,
@@ -105,11 +105,11 @@ def flat_mv(
     ----------
     path1 : str or sequence of str
         The folder or file to move, a glob pattern, or a list of them, as
-        ``ils`` takes paths.
+        ``iexpand`` takes paths.
     path2 : str
         Where to move it, as with `flat_cp`.
-    ils, info : callable
-        The storage's operations, as with `flat_cp`: ``ils`` lists each key
+    iexpand, info : callable
+        The storage's operations, as with `flat_cp`: ``iexpand`` lists each key
         once.
     mv_file : callable, optional
         Moves a file, called as ``mv_file(source, destination)``: e.g. the
@@ -153,7 +153,7 @@ def flat_mv(
     >>> mv = flat_mv(
     ...     "data/2024",
     ...     "archive/",
-    ...     ils=my_ils,
+    ...     iexpand=my_ils,
     ...     info=fs._info,
     ...     cp_file=fs._cp_file,
     ...     rm_files=my_rm_files,
@@ -197,7 +197,7 @@ def flat_mv(
             lambda op: _Rename(
                 path1,
                 path2,
-                ils=ils,
+                iexpand=iexpand,
                 info=info,
                 mv_file=mv_file,
                 concurrency_limit=concurrency_limit,
@@ -211,7 +211,7 @@ def flat_mv(
         lambda op: _Move(
             path1,
             path2,
-            ils=ils,
+            iexpand=iexpand,
             info=info,
             cp_file=cp_file,  # type: ignore[arg-type]
             rm_files=rm_files,  # type: ignore[arg-type]
@@ -228,7 +228,7 @@ def flat_local_mv(
     path1: str | Sequence[str],
     path2: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     mv_file: _Request | None = None,
     cp_file: _Request | None = None,
@@ -251,7 +251,7 @@ def flat_local_mv(
         The folder or file to move, a glob pattern, or a list of them.
     path2 : str
         Where to move it, as with `flat_mv`.
-    ils, info, mv_file, cp_file, rm_files, batch_size : callable or int
+    iexpand, info, mv_file, cp_file, rm_files, batch_size : callable or int
         The storage's operations, as with `flat_mv`.
     makedirs, rm_file : callable
         The storage's, as `flat_mv`'s ``dst_makedirs`` and ``dst_rm_file``.
@@ -277,7 +277,7 @@ def flat_local_mv(
     return flat_mv(
         path1,
         path2,
-        ils=ils,
+        iexpand=iexpand,
         info=info,
         mv_file=mv_file,
         cp_file=cp_file,

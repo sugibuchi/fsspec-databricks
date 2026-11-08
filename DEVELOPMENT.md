@@ -440,12 +440,16 @@ system's message.
 ### Volumes
 
 `VolumeFileSystem`, in `volume.py`, is an async fsspec file system: it subclasses `BaseDatabricksFileSystem`, a
-`TreeFileSystem` of the copy of fsspec-alt-strategies. It implements the primitives, such as `_ls`, `_info`,
+`TreeFileSystem` of the copy of fsspec-alt-strategies. It implements the primitives, such as `_ils`, `_info`,
 `_rm_file`, `_rmdir`, `_create_directory` and `_cp_file`. It adds an aiohttp session, closed by `close()`. Its
 `io_concurrency` defaults to 24.
 
 The recursive operations are the library's tree strategies: `find`, `walk`, `du`, `glob`, and recursive `rm`, `copy`
 and `mv`.
+
+Each backend lists a folder with `_ils`, an async iterator, and its `_ls` lists with it. `_ils` takes the SDK's
+paged listing a batch at a time, with `_sdk_iter` in `base.py`, in the file system's threads. So the strategies act on
+a folder's first page while the next ones are fetched: a folder of many files is never held whole.
 
 fsspec mirrors the async methods as synchronous ones, which run on fsspec's event loop. `DatabricksFileSystem` calls
 those. The SDK's calls block, so they run in the file system's own threads, with `_sdk`. The Workspace and DBFS

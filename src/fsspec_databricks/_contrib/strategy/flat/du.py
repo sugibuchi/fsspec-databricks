@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator
 
-    from ..common.types import _Ils, _Info
+    from ..common.types import _IExpand, _Info
 
 __all__ = ["DuState", "flat_du"]
 
@@ -32,14 +32,14 @@ __all__ = ["DuState", "flat_du"]
 def flat_du(
     path: str,
     *,
-    ils: _Ils,
+    iexpand: _IExpand,
     info: _Info,
     maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[dict[str, Any], DuState]:
     """Measure the files under a prefix, from one listing streamed as it comes.
 
-    It assumes that ``ils`` gives each file's size, as listings of object
+    It assumes that ``iexpand`` gives each file's size, as listings of object
     stores do. It yields the entry of each file counted, with its ``size``, as
     fsspec's ``_du`` gives with ``total=False``. Its state's ``size`` is their
     total, as fsspec's ``_du`` gives by default.
@@ -54,15 +54,15 @@ def flat_du(
     Once cancelled, it takes nothing more from the listing. An error from the
     listing ends the operation, raised by its iteration.
 
-    Requests: the pages of one ``ils`` of ``path``, one after another. One
+    Requests: the pages of one ``iexpand`` of ``path``, one after another. One
     ``info`` for ``path``, if nothing is under it.
 
     Parameters
     ----------
     path : str
-        The folder to measure, as ``ils`` takes paths.
-    ils : callable
-        Lists every key starting with a prefix, called as ``ils(prefix)``: an
+        The folder to measure, as ``iexpand`` takes paths.
+    iexpand : callable
+        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
         async iterator of entries as fsspec's ``_ls`` gives them, in order of
         their names, each key once, as an object store lists them.
     info : callable
@@ -91,7 +91,7 @@ def flat_du(
     Examples
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
-    >>> op = flat_du("data", ils=my_ils, info=fs._info, concurrency_limit=limit)
+    >>> op = flat_du("data", iexpand=my_ils, info=fs._info, concurrency_limit=limit)
     >>> async for _ in op:
     ...     pass
     >>> op.state.size, op.state.files
@@ -103,7 +103,7 @@ def flat_du(
         op: Operation[dict[str, Any], DuState],
     ) -> AsyncGenerator[dict[str, Any]]:
         steps = _find_entries(
-            ils,
+            iexpand,
             info,
             path,
             maxdepth=maxdepth,

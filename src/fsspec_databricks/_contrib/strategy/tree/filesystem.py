@@ -41,7 +41,7 @@ from .walk import tree_walk
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 
     from fsspec_alt_strategies.profile import StorageProfile
 
@@ -63,8 +63,9 @@ class TreeFileSystem(_BaseFileSystem):
     fsspec's applies it to the root only, as its walk recurses without it.
 
     A subclass implements the storage's primitives, which fsspec leaves
-    abstract: ``_ls``, ``_info``, ``_rm_file``, ``_rmdir``, ``_cp_file`` and
-    ``_makedirs``. It implements ``open_async`` too, giving its files
+    abstract: ``_info``, ``_rm_file``, ``_rmdir``, ``_cp_file`` and
+    ``_makedirs``, and ``_ils``, a folder's listing as an async iterator,
+    which ``_ls`` lists with. It implements ``open_async`` too, giving its files
     ``io_limit`` as their concurrency limit, and ``_open``. ``_cat_file``,
     ``_pipe_file``, ``_get_file`` and ``_put_file`` read and write through
     ``open_async``'s files. It may implement ``_rm_tree`` too, a storage's
@@ -112,7 +113,7 @@ class TreeFileSystem(_BaseFileSystem):
     ...     protocol = "my"
     ...     storage_profile = StorageProfile()  # Unknown.
     ...
-    ...     async def _ls(self, path, detail=True, **kwargs): ...
+    ...     async def _ils(self, path, **kwargs): ...
     ...     async def _info(self, path, **kwargs): ...
     ...     async def _rm_file(self, path, **kwargs): ...
     ...     async def _rmdir(self, path): ...
@@ -157,8 +158,18 @@ class TreeFileSystem(_BaseFileSystem):
     # What a subclass implements: the storage's primitives, as fsspec names them.
 
     @abstractmethod
+    def _ils(self, path: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+        """List a folder, as an async iterator of its entries, as the strategies list.
+
+        The entries are as fsspec's ``_ls`` gives them with ``detail``: a
+        storage listing a folder in pages yields each page's as it comes. A
+        file yields itself, as fsspec's ``_ls`` lists it.
+        """
+
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
-        """List a folder: its entries, with ``detail``, else their names."""
+        """List a folder, as fsspec's ``_ls`` does: all of ``_ils``'s entries, or their names."""
+        entries = [entry async for entry in self._ils(path, **kwargs)]
+        return entries if detail else [e["name"] for e in entries]
 
     @abstractmethod
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -209,7 +220,7 @@ class TreeFileSystem(_BaseFileSystem):
         root = self._strip_protocol(path)
         walk = tree_walk(
             root,
-            ls=_with(self._ls, kwargs),
+            ils=_with(self._ils, kwargs),
             maxdepth=maxdepth,
             topdown=topdown,
             # The failed folders' errors, which fsspec's on_error then handles:
@@ -260,7 +271,7 @@ class TreeFileSystem(_BaseFileSystem):
         entries, _ = await _collect_with_monitors(
             tree_find(
                 self._strip_protocol(path),
-                ls=_with(self._ls, kwargs),
+                ils=_with(self._ils, kwargs),
                 info=self._info,
                 maxdepth=maxdepth,
                 withdirs=withdirs,
@@ -281,7 +292,7 @@ class TreeFileSystem(_BaseFileSystem):
 
         op = tree_du(
             self._strip_protocol(path),
-            ls=_with(self._ls, kwargs),
+            ils=_with(self._ils, kwargs),
             info=self._info,
             maxdepth=maxdepth,
             concurrency_limit=self.operation_limit,
@@ -298,7 +309,7 @@ class TreeFileSystem(_BaseFileSystem):
         entries, _ = await _collect_with_monitors(
             tree_glob(
                 self._strip_only_protocol(path),
-                ls=_with(self._ls, kwargs),
+                ils=_with(self._ils, kwargs),
                 info=self._info,
                 maxdepth=maxdepth,
                 withdirs=withdirs,
@@ -324,7 +335,7 @@ class TreeFileSystem(_BaseFileSystem):
         _, errors = await _collect_with_monitors(
             tree_rm(
                 self._strip_only_protocol(path),
-                ls=self._ls,
+                ils=self._ils,
                 info=self._info,
                 rm_file=self._rm_file,
                 rm_folder=self._rmdir,
@@ -358,7 +369,7 @@ class TreeFileSystem(_BaseFileSystem):
             tree_local_cp(
                 self._strip_only_protocol(path1),
                 self._strip_only_protocol(path2),
-                ls=self._ls,
+                ils=self._ils,
                 info=self._info,
                 cp_file=self._cp_file,
                 makedirs=self._makedirs,
@@ -400,7 +411,7 @@ class TreeFileSystem(_BaseFileSystem):
             tree_local_mv(
                 self._strip_only_protocol(path1),
                 self._strip_only_protocol(path2),
-                ls=self._ls,
+                ils=self._ils,
                 info=self._info,
                 mv_file=self._mv_file,
                 makedirs=self._makedirs,

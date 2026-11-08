@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from fsspec_alt_strategies.profile import StorageProfile
 
-    from ..common.types import _Info, _Ls, _Request
+    from ..common.types import _Ils, _Info, _Request
     from .walk import _Listing
 
 __all__ = ["MvState", "tree_local_mv", "tree_mv"]
@@ -40,7 +40,7 @@ def tree_mv(
     path1: str | Sequence[str],
     path2: str,
     *,
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     mv_file: _Request,
     rm_folder: _Request,
@@ -126,10 +126,10 @@ def tree_mv(
     ----------
     path1 : str or sequence of str
         The folder or file to move, a glob pattern, or a list of them, as
-        ``ls`` takes paths.
+        ``ils`` takes paths.
     path2 : str
         Where to move it, as above.
-    ls, info : callable
+    ils, info : callable
         The source's operations, as with `tree_cp`.
     mv_file : callable
         Moves a file, called as ``mv_file(source, destination)``: e.g. the
@@ -162,7 +162,7 @@ def tree_mv(
     >>> mv = tree_mv(
     ...     "data/2024",
     ...     "archive/",
-    ...     ls=fs._ls,
+    ...     ils=fs._ils,
     ...     info=fs._info,
     ...     mv_file=fs._mv_file,
     ...     rm_folder=fs._rmdir,
@@ -184,7 +184,7 @@ def tree_mv(
         lambda op: _Move(
             path1,
             path2,
-            ls=ls,
+            ils=ils,
             info=info,
             mv_file=mv_file,
             rm_folder=rm_folder,
@@ -203,7 +203,7 @@ def tree_local_mv(
     path1: str | Sequence[str],
     path2: str,
     *,
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     mv_file: _Request,
     makedirs: _Request,
@@ -223,7 +223,7 @@ def tree_local_mv(
         The folder or file to move, a glob pattern, or a list of them.
     path2 : str
         Where to move it, as with `tree_mv`.
-    ls, info, mv_file, rm_folder : callable
+    ils, info, mv_file, rm_folder : callable
         The storage's operations, as with `tree_mv`.
     makedirs : callable
         The storage's, as `tree_mv`'s ``dst_makedirs``.
@@ -244,7 +244,7 @@ def tree_local_mv(
     return tree_mv(
         path1,
         path2,
-        ls=ls,
+        ils=ils,
         info=info,
         mv_file=mv_file,
         rm_folder=rm_folder,
@@ -361,9 +361,16 @@ class _Move(_CopyOrMove):
         renamed, self.renamed = self.renamed, []
         return [*renamed, *await super().begin(roots, source)]
 
-    def add(self, listing: _Listing) -> None:
+    def add(self, listing: _Listing) -> list[Any] | None:
         self.track(listing)
         super().add(listing)
+
+        # All in it moved before its last part came. An empty folder goes once
+        # made at the destination, in done.
+        empty = listing.first and not listing.entries
+        if listing.last and not empty and self.finished(listing.folder):
+            return self.remove(listing.folder)
+        return None
 
     def run(self, job: _Job) -> Awaitable[Any]:
         if job.kind == "rmdir":
@@ -382,7 +389,7 @@ class _Move(_CopyOrMove):
         if job.kind == "mkdir":
             outcome = super().done(job)
             # An empty folder: made at the destination, it can go.
-            if job.source and self.remaining[job.source] == 0:
+            if job.source and self.finished(job.source):
                 outcome += self.remove(job.source)
             return outcome
 

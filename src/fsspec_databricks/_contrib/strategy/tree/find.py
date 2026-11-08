@@ -18,13 +18,13 @@ from fsspec_alt_strategies.states import FindState
 
 from ..common.operation import Operation
 from ..common.paths import _check_maxdepth, _trim
-from .walk import _Listing, _listings
+from .walk import _chunks, _Listing
 
 if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, Callable
 
-    from ..common.types import _Info, _Ls
+    from ..common.types import _Ils, _Info
 
 __all__ = ["FindState", "tree_find"]
 
@@ -32,7 +32,7 @@ __all__ = ["FindState", "tree_find"]
 def tree_find(
     path: str,
     *,
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     maxdepth: int | None = None,
     withdirs: bool = False,
@@ -55,17 +55,18 @@ def tree_find(
     Once cancelled, it lists no new folder, and yields the paths of the
     listings in flight.
 
-    Requests: one ``ls`` per folder, as ``concurrency_limit`` allows. One
+    Requests: one ``ils`` per folder, as ``concurrency_limit`` allows. One
     ``info`` more for ``path`` itself, if a file, or a folder with
     ``withdirs``.
 
     Parameters
     ----------
     path : str
-        The folder to search, as ``ls`` takes it.
-    ls : callable
-        Lists a folder, called as ``ls(path, detail=True)``: e.g. the
-        filesystem's ``_ls``.
+        The folder to search, as ``ils`` takes it.
+    ils : callable
+        Lists a folder, called as ``ils(path)``: an async iterator of its
+        entries, as fsspec's ``_ls`` gives them, e.g. the filesystem's
+        ``_ils``.
     info : callable
         Describes a path, called as ``info(path)``: e.g. the filesystem's
         ``_info``.
@@ -81,7 +82,7 @@ def tree_find(
     Returns
     -------
     Operation
-        Yielding the ``ls`` entry of each path found, or the error of a folder
+        Yielding the ``ils`` entry of each path found, or the error of a folder
         that failed to list. Its state is a `FindState`.
 
     Raises
@@ -96,7 +97,7 @@ def tree_find(
     Examples
     --------
     >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
-    >>> find = tree_find("data", ls=fs._ls, info=fs._info, concurrency_limit=limit)
+    >>> find = tree_find("data", ils=fs._ils, info=fs._info, concurrency_limit=limit)
     >>> found = [item async for item in find]
     >>> sorted(e["name"] for e in found if not isinstance(e, Exception))
     ['data/2024/01/part-0.parquet', 'data/2024/02/part-0.parquet']
@@ -108,7 +109,7 @@ def tree_find(
     ) -> AsyncGenerator[dict[str, Any] | Exception]:
         root = _trim(path)
         steps = _find_listings(
-            ls,
+            ils,
             info,
             root,
             maxdepth=maxdepth,
@@ -128,7 +129,8 @@ def tree_find(
                     errors=state.errors + (listing.error is not None),
                     current=listing.folder,
                     # Depth 0 is the root's own entry: no folder listed.
-                    folders_listed=state.folders_listed + (listing.depth > 0),
+                    folders_listed=state.folders_listed
+                    + (listing.depth > 0 and listing.last),
                     found=state.found + len(found),
                 )
 
@@ -142,7 +144,7 @@ def tree_find(
 
 
 async def _find_listings(
-    ls: _Ls,
+    ils: _Ils,
     info: _Info,
     path: str,
     *,
@@ -155,22 +157,22 @@ async def _find_listings(
 ) -> AsyncGenerator[_Listing]:
     """Walk as the strategies that only read do, such as find, du and glob.
 
-    It yields each folder's listing, as ``_listings`` does, but treats ``path``
+    It yields each folder's listing in parts, as ``_chunks`` does, but treats ``path``
     itself as fsspec's ``_find`` and ``_glob`` do:
 
     - missing, it yields nothing;
     - a file, it yields the file's ``info`` entry if ``file_root``, else
       nothing;
-    - a folder, it yields the folder's own ``info`` entry after its listing,
-      if ``folder_root`` and the walk is not stopping.
+    - a folder, it yields the folder's own ``info`` entry after its listing's
+      last part, if ``folder_root`` and the walk is not stopping.
 
     The root's own entry comes as a `_Listing` of depth 0, which is no listing.
     So the strategies filter and count it as any entry, but count no folder
     listed for it.
     """
     root = _trim(path)
-    listings = _listings(
-        ls,
+    listings = _chunks(
+        ils,
         root,
         maxdepth=maxdepth,
         descend=descend,
@@ -192,11 +194,30 @@ async def _find_listings(
             return
 
         yield root_listing
-
-        if folder_root and not (stopping and stopping()):
-            async with concurrency_limit:
-                entry = await info(root)
-            yield _Listing(root, 0, [entry])
+        if root_listing.last:
+            async for listing in _root_entry(
+                info, root, folder_root, concurrency_limit, stopping
+            ):
+                yield listing
 
         async for listing in listings:
             yield listing
+            if listing.folder == root and listing.last:
+                async for entry in _root_entry(
+                    info, root, folder_root, concurrency_limit, stopping
+                ):
+                    yield entry
+
+
+async def _root_entry(
+    info: _Info,
+    root: str,
+    folder_root: bool,
+    concurrency_limit: asyncio.Semaphore,
+    stopping: Callable[[], object] | None,
+) -> AsyncGenerator[_Listing]:
+    """The root folder's own ``info`` entry, as a listing of depth 0, if asked."""
+    if folder_root and not (stopping and stopping()):
+        async with concurrency_limit:
+            entry = await info(root)
+        yield _Listing(root, 0, [entry])

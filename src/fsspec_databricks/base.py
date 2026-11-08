@@ -5,8 +5,9 @@ import contextvars
 import functools
 import logging
 import weakref
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from typing import Any, TypeVar
 
 from databricks.sdk import WorkspaceClient
@@ -18,6 +19,9 @@ from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
 from .utils import write_mode
 
 T = TypeVar("T")
+
+# The most entries taken from an SDK listing at a time, in one of the threads.
+_LISTING_BATCH = 1000
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +186,22 @@ class BaseDatabricksFileSystem(DatabricksClientSupport, TreeFileSystem):
             raise
         logger.debug("%s: path=%s, ok", api, path)
         return result
+
+    async def _sdk_iter(
+        self, api: str, path: str, func: Callable[[WorkspaceClient], Iterable[T]]
+    ) -> AsyncIterator[T]:
+        """Iterate an SDK listing, a batch at a time, each taken in the file system's own threads.
+
+        The SDK's listings are iterators fetching a page as they come to it. So the entries are yielded as the pages
+        come, and a folder of many entries is never held whole: the strategies act on the first page while the next
+        ones are fetched.
+        """
+        entries = iter(await self._sdk(api, path, func))
+        while batch := await self._sdk(
+            api, path, lambda _: list(islice(entries, _LISTING_BATCH))
+        ):
+            for entry in batch:
+                yield entry
 
     async def _run_in_thread(self, func: Callable[..., T], /, *args, **kwargs) -> T:
         """Run a blocking call in one of `operation_concurrency` threads of the file system's own, unlogged."""

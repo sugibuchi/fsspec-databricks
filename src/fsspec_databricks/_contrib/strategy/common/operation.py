@@ -77,7 +77,7 @@ class Operation(OperationHandler, Generic[T, S]):
     --------
     >>> rm = tree_rm(
     ...     "data/2024",
-    ...     ls=fs._ls,
+    ...     ils=fs._ils,
     ...     info=fs._info,
     ...     rm_file=fs._rm_file,
     ...     rm_folder=fs._rmdir,
