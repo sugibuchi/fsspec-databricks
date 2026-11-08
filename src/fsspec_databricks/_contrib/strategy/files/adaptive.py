@@ -239,50 +239,6 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         self._kept: OrderedDict[int, tuple[int, bytes]] = OrderedDict()
         self._kept_bytes = 0
 
-    # What a subclass implements, and calls.
-
-    @abstractmethod
-    async def _fetch_range(self, start: int, end: int) -> bytes:
-        """Fetch the bytes [start, end) of the file in one request.
-
-        It asks for ``version`` if the storage can, and passes the version the
-        response came from to `_check_version` if the storage tells it.
-        """
-
-    async def _current_version(self) -> str | None:
-        """The file's version now, for a storage whose responses name none.
-
-        Each fetch awaits it after `_fetch_range`, and passes what it returns to
-        `_check_version`. A subclass returns a token, e.g. the modification time
-        and size from the filesystem's ``_info``, as ``version`` was given. None,
-        the default, checks nothing and sends no request.
-        """
-        return None
-
-    async def _fetch_checked(self, start: int, end: int) -> bytes:
-        """Fetch [start, end), then check the version the file has after it."""
-        data = await self._fetch_range(start, end)
-        if (version := await self._current_version()) is not None:
-            self._check_version(version)
-        return data
-
-    def _check_version(self, version: str) -> None:
-        """Check the version a response came from, e.g. its ETag.
-
-        `_fetch_range` calls it for every response. The first call, when no
-        ``version`` was given, sets it: fetches run at once, so it is the first
-        response to arrive. Any later response from another version raises
-        OSError with ``errno.ESTALE``, so that the read never mixes two.
-        """
-        if self.version is None:
-            self.version = version
-        elif version != self.version:
-            raise OSError(
-                errno.ESTALE,
-                f"Changed while read, from version {self.version} to {version}",
-                self.path,
-            )
-
     # The file's API: io's methods, each with its async counterpart.
 
     def readable(self) -> bool:
@@ -351,6 +307,50 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     def tell(self) -> int:
         self._check_open()
         return self._pos
+
+    # What a subclass implements, and calls.
+
+    @abstractmethod
+    async def _fetch_range(self, start: int, end: int) -> bytes:
+        """Fetch the bytes [start, end) of the file in one request.
+
+        It asks for ``version`` if the storage can, and passes the version the
+        response came from to `_check_version` if the storage tells it.
+        """
+
+    async def _current_version(self) -> str | None:
+        """The file's version now, for a storage whose responses name none.
+
+        Each fetch awaits it after `_fetch_range`, and passes what it returns to
+        `_check_version`. A subclass returns a token, e.g. the modification time
+        and size from the filesystem's ``_info``, as ``version`` was given. None,
+        the default, checks nothing and sends no request.
+        """
+        return None
+
+    async def _fetch_checked(self, start: int, end: int) -> bytes:
+        """Fetch [start, end), then check the version the file has after it."""
+        data = await self._fetch_range(start, end)
+        if (version := await self._current_version()) is not None:
+            self._check_version(version)
+        return data
+
+    def _check_version(self, version: str) -> None:
+        """Check the version a response came from, e.g. its ETag.
+
+        `_fetch_range` calls it for every response. The first call, when no
+        ``version`` was given, sets it: fetches run at once, so it is the first
+        response to arrive. Any later response from another version raises
+        OSError with ``errno.ESTALE``, so that the read never mixes two.
+        """
+        if self.version is None:
+            self.version = version
+        elif version != self.version:
+            raise OSError(
+                errno.ESTALE,
+                f"Changed while read, from version {self.version} to {version}",
+                self.path,
+            )
 
     # Finishing and aborting, for _AsyncFile.
     #
@@ -628,33 +628,24 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         self._buffer = bytearray()
         self._multipart = False
 
-    # What a subclass implements: the storage's requests.
+    # Leaving a with block by an exception aborts, as the garbage collector
+    # does: the file is written whole, or not at all.
 
-    @abstractmethod
-    async def _upload_all(self, data: bytes) -> None:
-        """Upload the whole file in one request."""
+    def __exit__(
+        self, exc_type: object, exc: BaseException | None, *rest: object
+    ) -> None:
+        if exc is None or self.closed:
+            self.close()
+        else:
+            self._sync(self._aexit_by(exc))
 
-    @abstractmethod
-    async def _start_multipart_upload(self) -> None:
-        """Start a multipart upload of the file."""
-
-    @abstractmethod
-    async def _upload_part(
-        self, data: bytes, start: int, end: int, index: int, last: bool
-    ) -> Any:
-        """Upload the part [start, end) of the file, the ``index``th from 0.
-
-        Parts may be uploaded out of order. What this returns, such as an ETag,
-        is passed on to ``_complete_multipart_upload``.
-        """
-
-    @abstractmethod
-    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        """Commit the parts uploaded, given what each upload returned, in order."""
-
-    @abstractmethod
-    async def _abort_multipart_upload(self) -> None:
-        """Discard the parts uploaded, leaving no file."""
+    async def __aexit__(
+        self, exc_type: object, exc: BaseException | None, *rest: object
+    ) -> None:
+        if exc is None or self.closed:
+            await self.aclose()
+        else:
+            await self._aexit_by(exc)
 
     # The file's API: io's methods, each with its async counterpart.
 
@@ -682,6 +673,34 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     def tell(self) -> int:
         self._check_open()
         return self._pos
+
+    # What a subclass implements: the storage's requests.
+
+    @abstractmethod
+    async def _upload_all(self, data: bytes) -> None:
+        """Upload the whole file in one request."""
+
+    @abstractmethod
+    async def _start_multipart_upload(self) -> None:
+        """Start a multipart upload of the file."""
+
+    @abstractmethod
+    async def _upload_part(
+        self, data: bytes, start: int, end: int, index: int, last: bool
+    ) -> Any:
+        """Upload the part [start, end) of the file, the ``index``th from 0.
+
+        Parts may be uploaded out of order. What this returns, such as an ETag,
+        is passed on to ``_complete_multipart_upload``.
+        """
+
+    @abstractmethod
+    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
+        """Commit the parts uploaded, given what each upload returned, in order."""
+
+    @abstractmethod
+    async def _abort_multipart_upload(self) -> None:
+        """Discard the parts uploaded, leaving no file."""
 
     # Finishing and aborting, for _AsyncFile.
 
@@ -726,25 +745,6 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
             cause.add_note(
                 f"Aborting the upload of {self.path!r} failed: {abort_error!r}"
             )
-
-    # Leaving a with block by an exception aborts, as the garbage collector
-    # does: the file is written whole, or not at all.
-
-    def __exit__(
-        self, exc_type: object, exc: BaseException | None, *rest: object
-    ) -> None:
-        if exc is None or self.closed:
-            self.close()
-        else:
-            self._sync(self._aexit_by(exc))
-
-    async def __aexit__(
-        self, exc_type: object, exc: BaseException | None, *rest: object
-    ) -> None:
-        if exc is None or self.closed:
-            await self.aclose()
-        else:
-            await self._aexit_by(exc)
 
     async def _aexit_by(self, exc: BaseException) -> None:
         """Close without finishing, as an exception leaves the with block."""

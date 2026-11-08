@@ -203,6 +203,7 @@ async def _chunks(
     path: str | Collection[str],
     *,
     maxdepth: int | None = None,
+    matched: Collection[str] = (),
     descend: Callable[[dict[str, Any]], bool] | None = None,
     raise_on_error: bool = False,
     concurrency_limit: asyncio.Semaphore,
@@ -222,6 +223,10 @@ async def _chunks(
     FileNotFoundError, or NotADirectoryError for a file. Any other failed
     listing is yielded as its last part, with its error, and its subfolders not
     listed yet are not walked. With ``raise_on_error``, it raises instead.
+
+    The roots in ``matched`` start one level down, at depth 2: a pattern's
+    matches are walked one level less deep than ``maxdepth``, as fsspec's
+    ``_expand_path`` walks them.
 
     The parts of a folder come in order, but those of several folders mix, as
     the listings run at once. Each listing holds a permit of
@@ -252,7 +257,9 @@ async def _chunks(
             )
         )
 
-    folders.waiting.extend((root, 1) for root in sorted(roots))
+    folders.waiting.extend(
+        (root, 2 if root in matched else 1) for root in sorted(roots)
+    )
     await start()
 
     try:

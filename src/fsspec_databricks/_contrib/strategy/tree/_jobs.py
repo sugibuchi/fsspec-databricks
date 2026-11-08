@@ -11,16 +11,19 @@ runs, and what its outcome is.
 A glob pattern is expanded first, as fsspec's ``_expand_path`` expands it:
 its matching folders are then walked at once.
 
-This module depends on `glob`, `walk`, and `jobs` and `operation` of `common`.
+This module depends on `glob`, `walk`, and `jobs`, `operation` and `paths` of
+`common`.
 """
 
 from __future__ import annotations
 
 from abc import abstractmethod
+from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
 from ..common.jobs import _Jobs, _roots_of
 from ..common.operation import _collect_with_errors
+from ..common.paths import _trim
 from .glob import tree_glob
 from .walk import _chunks
 
@@ -39,16 +42,28 @@ async def _expand(
     info: _Info,
     pattern: str | Sequence[str],
     concurrency_limit: asyncio.Semaphore,
+    maxdepth: int | None = None,
 ) -> _Roots:
     """The roots matching glob patterns, found with `tree_glob`."""
     matches, errors = await _collect_with_errors(
-        tree_glob(pattern, ils=ils, info=info, concurrency_limit=concurrency_limit)
+        tree_glob(
+            pattern,
+            ils=ils,
+            info=info,
+            maxdepth=maxdepth,
+            concurrency_limit=concurrency_limit,
+        )
     )
     return _roots_of(matches, errors, pattern)
 
 
 class _TreeJobs(_Jobs):
-    """The jobs of one operation, run while its tree is walked."""
+    """The jobs of one operation, run while its tree is walked.
+
+    With ``maxdepth``, the walk lists no folder deeper than it, as fsspec's
+    ``_expand_path`` finds paths. Each subfolder the walk leaves unlisted goes
+    to `at_limit`, as fsspec finds it, but not what is in it.
+    """
 
     def __init__(
         self,
@@ -56,11 +71,17 @@ class _TreeJobs(_Jobs):
         info: _Info,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
+        maxdepth: int | None = None,
     ) -> None:
         super().__init__(concurrency_limit, op)
 
         self.ils = ils
         self.info = info
+        self.maxdepth = maxdepth
+
+        # The folder roots a pattern matched: fsspec walks them one level less
+        # deep than a path named, as its glob counted that level already.
+        self.matched: set[str] = set()
 
         # The paths in each folder listed that are not done yet, for strategies
         # finishing a folder after all in it, as a deletion does. A folder with
@@ -79,13 +100,31 @@ class _TreeJobs(_Jobs):
         It returns what is done at once, if anything, e.g. a folder found gone.
         """
 
+    async def glob_roots(self, pattern: str | Sequence[str]) -> _Roots:
+        """The roots matching glob patterns, noting those a pattern matched."""
+        roots = await _expand(
+            self.ils, self.info, pattern, self.concurrency_limit, self.maxdepth
+        )
+        if self.maxdepth is not None:
+            named = [pattern] if isinstance(pattern, str) else pattern
+            literal = {_trim(p) for p in named if not has_magic(p)}
+            self.matched = {f for f in roots.folders if f not in literal}
+        return roots
+
+    def unlisted(self, folder: str) -> bool:
+        """Whether a root folder is at the depth limit already: a match, at 1."""
+        return self.maxdepth == 1 and folder in self.matched
+
     def source(self, roots: _Roots) -> AsyncGenerator[_Listing] | None:
         """The listings of the root folders, if any, walked at once."""
-        if not roots.folders:
+        folders = [f for f in roots.folders if not self.unlisted(f)]
+        if not folders:
             return None
         return _chunks(
             self.ils,
-            roots.folders,
+            folders,
+            maxdepth=self.maxdepth,
+            matched=self.matched,
             concurrency_limit=self.concurrency_limit,
             stopping=self.op.cancelling,
         )
@@ -98,6 +137,10 @@ class _TreeJobs(_Jobs):
         A single root of unknown kind is among the folders: if it is a file,
         its listing says so, and its jobs are queued instead.
         """
+        for folder in roots.folders:
+            if self.unlisted(folder):
+                self.at_limit(folder)
+
         try:
             return await super().begin(roots, source)
         except NotADirectoryError as e:
@@ -109,7 +152,19 @@ class _TreeJobs(_Jobs):
         if item.error is not None:
             self.errors += 1
             return [item.error]
+
+        if self.maxdepth is not None and item.depth >= self.maxdepth:
+            # The walk lists none of these subfolders: fsspec finds them, but
+            # nothing in them.
+            for entry in item.entries:
+                if entry["type"] == "directory":
+                    self.at_limit(entry["name"].rstrip("/"))
+
         return self.add(item) or []
+
+    # A hook, not abstract: only a deletion acts on a folder it does not list.
+    def at_limit(self, folder: str) -> None:
+        """Queue the jobs for a folder at the depth limit, found but not listed."""
 
     def track(self, listing: _Listing) -> None:
         """Count the paths in a part of a folder's listing, for `child_done`.

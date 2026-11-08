@@ -8,7 +8,8 @@ prefix first. `flat_mv` moves each key as soon as the listing gives it: by one
 ``mv_file``, or by a copy, deleting the copied keys in batches while the
 listing goes on.
 
-This module depends on `_jobs`, `cp`, and `jobs` and `operation` of `common`.
+This module depends on `_jobs`, `cp`, and `jobs`, `operation` and `paths` of
+`common`.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from fsspec_alt_strategies.states import MvState
 
 from ..common.jobs import _Job
 from ..common.operation import Operation
+from ..common.paths import _check_maxdepth
 from ._jobs import _keys_of
 from .cp import _Copy, _CopyOrMove
 
@@ -48,6 +50,7 @@ def flat_mv(
     dst_rm_file: _Request,
     same_storage: bool,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], MvState]:
     """Move the keys under a prefix, each as soon as it is listed.
@@ -81,6 +84,10 @@ def flat_mv(
     A folder's marker, a key ending with "/", is moved too, but not yielded. In
     batches, it is deleted without being copied, as `flat_cp` copies none: its
     folder is made at the destination instead, as `flat_cp` makes it.
+
+    With ``maxdepth``, it moves the keys `flat_cp` copies with it, and no
+    marker. fsspec's ``mv`` copies as its ``copy`` does with ``maxdepth``, but
+    then deletes the whole source prefix, deeper keys too. This keeps them.
 
     Unlike fsspec's ``mv``, it keeps going past a failure, and reports each. A
     key that failed to move, or to copy, stays where it was. If a batch fails
@@ -126,6 +133,9 @@ def flat_mv(
     profile : StorageProfile
         What the destination does: ``StorageProfile()`` if it is unknown. Its
         ``renames_files`` chooses the way when both are given.
+    maxdepth : int, optional
+        The deepest level to move: 1 moves only the keys right in ``path1``.
+        No limit by default.
     concurrency_limit : asyncio.Semaphore
         Held by each request but the listing while it runs. Share one to
         limit several operations, or files, together.
@@ -141,7 +151,7 @@ def flat_mv(
     ValueError
         If neither ``mv_file`` nor all of ``cp_file``, ``rm_files`` and
         ``batch_size`` are given, only some of those three, or
-        ``batch_size`` is less than 1.
+        ``batch_size`` or ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -176,6 +186,7 @@ def flat_mv(
         raise ValueError("Give mv_file, or all of cp_file, rm_files and batch_size")
     if batch_size is not None and batch_size < 1:
         raise ValueError(f"batch_size must be at least 1: {batch_size}")
+    _check_maxdepth(maxdepth)
 
     # Both given, a rename wins only where the storage is known to rename.
     renames = same_storage and profile.renames_files is True
@@ -190,6 +201,7 @@ def flat_mv(
         "rm_file": dst_rm_file,
         "same_storage": same_storage,
         "profile": profile,
+        "maxdepth": maxdepth,
     }
 
     if mv_file is not None:
@@ -237,6 +249,7 @@ def flat_local_mv(
     makedirs: _Request,
     rm_file: _Request,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], MvState]:
     """Move the keys under a prefix within one storage, as `flat_mv` does.
@@ -257,6 +270,8 @@ def flat_local_mv(
         The storage's, as `flat_mv`'s ``dst_makedirs`` and ``dst_rm_file``.
     profile : StorageProfile
         What the storage does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to move, as with `flat_mv`.
     concurrency_limit : asyncio.Semaphore
         Held by each request but the listing while it runs.
 
@@ -288,6 +303,7 @@ def flat_local_mv(
         dst_rm_file=rm_file,
         same_storage=True,
         profile=profile,
+        maxdepth=maxdepth,
         concurrency_limit=concurrency_limit,
     )
 
@@ -334,7 +350,9 @@ class _Rename(_CopyOrMove):
     def add(self, entry: dict[str, Any]) -> None:
         name = entry["name"]
         if name.endswith("/"):
-            self.waiting.append(_Job("marker", name, self.target(name)))
+            # With maxdepth, folders stay, as fsspec's copy leaves them out.
+            if self.maxdepth is None:
+                self.waiting.append(_Job("marker", name, self.target(name)))
             return
         super().add(entry)
 
@@ -388,6 +406,8 @@ class _Move(_Copy):
         if name in self.copied:
             return
         if name.endswith("/"):
+            if self.maxdepth is not None:
+                return  # Folders stay, as fsspec's copy leaves them out.
             # A folder's marker: deleted, its folder made as flat_cp makes it.
             self.copied[name] = None
             self.delete_later(name)

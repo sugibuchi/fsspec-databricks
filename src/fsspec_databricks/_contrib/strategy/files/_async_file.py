@@ -91,6 +91,118 @@ class _AsyncFile(io.RawIOBase):
         # not try again.
         self._forced = False
 
+    # The conventions of Python's file objects, and the garbage collector's abort.
+
+    def __repr__(self) -> str:
+        return f"<{type(self).__name__} {self.path!r}>"
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
+
+    def __del__(self) -> None:
+        # Unlike io.IOBase, never closes: see the class docstring.
+        if self.closed:
+            return
+
+        if getattr(self, "loop", None) is None:
+            # The constructor failed before the loop was set: no request was sent.
+            io.RawIOBase.close(self)
+            return
+
+        if self._forced:
+            # A forced flush finished the file: nothing is left to undo.
+            io.RawIOBase.close(self)
+            return
+
+        warnings.warn(
+            f"Unclosed file {self.path!r}, aborted: nothing written is kept",
+            ResourceWarning,
+            stacklevel=1,  # A finalizer has no caller to point at.
+            source=self,
+        )
+
+        try:
+            # On the file's loop, nothing can wait for the abort.
+            try:
+                on_its_loop = asyncio.get_running_loop() is self.loop
+            except RuntimeError:
+                on_its_loop = False  # No loop runs on this thread.
+
+            if on_its_loop:
+                self._do_abort_soon()
+            elif self.loop.is_running() and not sys.is_finalizing():
+                try:
+                    self._sync(self._abort())
+                except Exception:
+                    # Nobody is there to catch it: requests may stay on the storage.
+                    logger.warning(
+                        "Aborting the unclosed file %r failed", self.path, exc_info=True
+                    )
+            # Else nothing can undo the requests, e.g. at exit: they stay, as
+            # if the process had died.
+        finally:
+            io.RawIOBase.close(self)
+
+    # Flushing and closing.
+
+    def flush(self, force: bool = False) -> None:
+        """Send nothing, or, if ``force``, finish the file as closing does.
+
+        Unforced, it sends nothing: what a file sends before closing, it sends
+        as the writes allow. So io's closing, which flushes, can call it on the
+        loop too.
+
+        Raises
+        ------
+        ValueError
+            If forced twice, as fsspec's files do.
+        """
+        if force:
+            self._sync(self._flush(force=True))
+        else:
+            self._check_open()
+
+    async def _flush(self, force: bool = False) -> None:
+        """Flush as ``flush`` does."""
+        self._check_open()
+        if not force:
+            return
+
+        if self._forced:
+            raise ValueError(
+                f"Force flush cannot be called more than once: {self.path}"
+            )
+
+        self._forced = True
+        await self._finish()
+
+    async def aclose(self) -> None:
+        """Close the file: finish it, unless a forced flush did, and end its requests."""
+        if self.closed:
+            return
+        try:
+            if not self._forced:
+                await self._finish()
+        finally:
+            try:
+                await self._requests.cancel_all()
+            finally:
+                super().close()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+
+        if getattr(self, "loop", None) is None:
+            # The constructor failed before the loop was set: no request was sent.
+            super().close()
+            return
+
+        self._sync(self.aclose())
+
     # What a subclass overrides, besides io.RawIOBase's own methods.
     #
     # io.RawIOBase's read and write raise a bare NotImplementedError: these
@@ -167,118 +279,6 @@ class _AsyncFile(io.RawIOBase):
         io.RawIOBase.close(self)
         return future
 
-    # The checks before an operation.
-
-    def _check_open(self) -> None:
-        if self.closed:
-            raise ValueError(f"I/O operation on closed file: {self.path}")
-
-    def _check_not_forced(self) -> None:
-        """Refuse a write once a forced flush finished the file, as fsspec's files do."""
-        if self._forced:
-            raise ValueError(f"Force-flushed, can only close: {self.path}")
-
-    # Flushing and closing, and the garbage collector's abort.
-
-    def flush(self, force: bool = False) -> None:
-        """Send nothing, or, if ``force``, finish the file as closing does.
-
-        Unforced, it sends nothing: what a file sends before closing, it sends
-        as the writes allow. So io's closing, which flushes, can call it on the
-        loop too.
-
-        Raises
-        ------
-        ValueError
-            If forced twice, as fsspec's files do.
-        """
-        if force:
-            self._sync(self._flush(force=True))
-        else:
-            self._check_open()
-
-    async def _flush(self, force: bool = False) -> None:
-        """Flush as ``flush`` does."""
-        self._check_open()
-        if not force:
-            return
-
-        if self._forced:
-            raise ValueError(
-                f"Force flush cannot be called more than once: {self.path}"
-            )
-
-        self._forced = True
-        await self._finish()
-
-    async def aclose(self) -> None:
-        """Close the file: finish it, unless a forced flush did, and end its requests."""
-        if self.closed:
-            return
-        try:
-            if not self._forced:
-                await self._finish()
-        finally:
-            try:
-                await self._requests.cancel_all()
-            finally:
-                super().close()
-
-    def close(self) -> None:
-        if self.closed:
-            return
-
-        if getattr(self, "loop", None) is None:
-            # The constructor failed before the loop was set: no request was sent.
-            super().close()
-            return
-
-        self._sync(self.aclose())
-
-    def __del__(self) -> None:
-        # Unlike io.IOBase, never closes: see the class docstring.
-        if self.closed:
-            return
-
-        if getattr(self, "loop", None) is None:
-            # The constructor failed before the loop was set: no request was sent.
-            io.RawIOBase.close(self)
-            return
-
-        if self._forced:
-            # A forced flush finished the file: nothing is left to undo.
-            io.RawIOBase.close(self)
-            return
-
-        warnings.warn(
-            f"Unclosed file {self.path!r}, aborted: nothing written is kept",
-            ResourceWarning,
-            stacklevel=1,  # A finalizer has no caller to point at.
-            source=self,
-        )
-
-        try:
-            # On the file's loop, nothing can wait for the abort.
-            try:
-                on_its_loop = asyncio.get_running_loop() is self.loop
-            except RuntimeError:
-                on_its_loop = False  # No loop runs on this thread.
-
-            if on_its_loop:
-                self._do_abort_soon()
-            elif self.loop.is_running() and not sys.is_finalizing():
-                try:
-                    self._sync(self._abort())
-                except Exception:
-                    # Nobody is there to catch it: requests may stay on the storage.
-                    logger.warning(
-                        "Aborting the unclosed file %r failed", self.path, exc_info=True
-                    )
-            # Else nothing can undo the requests, e.g. at exit: they stay, as
-            # if the process had died.
-        finally:
-            io.RawIOBase.close(self)
-
     def _warn_if_abort_failed(self, future: concurrent.futures.Future[None]) -> None:
         # The garbage collector's abort, scheduled: nobody awaits its future.
         if future.cancelled():
@@ -290,16 +290,16 @@ class _AsyncFile(io.RawIOBase):
                 "Aborting the unclosed file %r failed", self.path, exc_info=error
             )
 
-    # The conventions of Python's file objects.
+    # The checks before an operation.
 
-    def __repr__(self) -> str:
-        return f"<{type(self).__name__} {self.path!r}>"
+    def _check_open(self) -> None:
+        if self.closed:
+            raise ValueError(f"I/O operation on closed file: {self.path}")
 
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        await self.aclose()
+    def _check_not_forced(self) -> None:
+        """Refuse a write once a forced flush finished the file, as fsspec's files do."""
+        if self._forced:
+            raise ValueError(f"Force-flushed, can only close: {self.path}")
 
 
 @dataclass(eq=False)

@@ -15,6 +15,8 @@ copies in a project share it.
 `monitored`, which wraps a filesystem so that the monitors see its calls, is
 re-exported here. It needs the wrappers of both families: a copy keeping it
 keeps `tree` and `flat`.
+
+Source, documentation and releases: https://github.com/sugibuchi/fsspec-alt-strategies
 """
 
 from __future__ import annotations

@@ -7,8 +7,8 @@ fsspec's lists every key first, then copies them. `flat_cp` copies each key as
 soon as the listing gives it. The destination may be another storage, flat or
 a tree: within one, it is the same storage's operations given twice.
 
-This module depends on `_jobs`, and `jobs`, `operation` and `placement` of
-`common`.
+This module depends on `_jobs`, and `jobs`, `operation`, `paths` and
+`placement` of `common`.
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from fsspec_alt_strategies.states import CpState
 
 from ..common.jobs import _Job
 from ..common.operation import Operation
+from ..common.paths import _check_maxdepth
 from ..common.placement import _Placing
-from ._jobs import _expand, _FlatJobs
+from ._jobs import _FlatJobs
 
 if TYPE_CHECKING:
     import asyncio
@@ -47,6 +48,7 @@ def flat_cp(
     dst_rm_file: _Request,
     same_storage: bool,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], CpState]:
     """Copy the keys under a prefix, copying as the listing goes on.
@@ -72,6 +74,12 @@ def flat_cp(
     marker, a key ending with "/", is no file to copy: its folder is made at
     the destination instead, so that a tree keeps it even when empty, unless
     the destination's folders are implicit.
+
+    With ``maxdepth``, it copies the keys fsspec's ``copy`` copies with it:
+    those at most ``maxdepth`` levels below ``path1``, or below a pattern's
+    matches one level less. The keys deeper are listed, but not copied. As
+    fsspec's, it then makes no folder for a marker. It places the keys as
+    without ``maxdepth``, as `tree_cp` does.
 
     The copies run concurrently, so the destination's keys are created in
     another order than the source's. A storage listing in creation order
@@ -139,6 +147,9 @@ def flat_cp(
         Whether the destination is the source's storage.
     profile : StorageProfile
         What the destination does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to copy: 1 copies only the keys right in ``path1``.
+        No limit by default.
     concurrency_limit : asyncio.Semaphore
         Held by each request but the listing while it runs, on either
         storage. Share one to limit several operations, or files, together.
@@ -148,6 +159,11 @@ def flat_cp(
     Operation
         Yielding ``(source, destination)`` for each key copied, or an error.
         Its state is a `CpState`.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -173,6 +189,7 @@ def flat_cp(
     ...     if isinstance(copied, Exception):
     ...         print("failed:", copied)
     """
+    _check_maxdepth(maxdepth)
     return Operation(
         lambda op: _Copy(
             path1,
@@ -185,6 +202,7 @@ def flat_cp(
             rm_file=dst_rm_file,
             same_storage=same_storage,
             profile=profile,
+            maxdepth=maxdepth,
             concurrency_limit=concurrency_limit,
             op=op,
         ).outcomes(),
@@ -202,6 +220,7 @@ def flat_local_cp(
     makedirs: _Request,
     rm_file: _Request,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], CpState]:
     """Copy the keys under a prefix within one storage, as `flat_cp` does.
@@ -226,6 +245,8 @@ def flat_local_cp(
         ``dst_rm_file``.
     profile : StorageProfile
         What the storage does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to copy, as with `flat_cp`.
     concurrency_limit : asyncio.Semaphore
         Held by each request but the listing while it runs.
 
@@ -233,6 +254,11 @@ def flat_local_cp(
     -------
     Operation
         As `flat_cp`'s.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -249,6 +275,7 @@ def flat_local_cp(
         dst_rm_file=rm_file,
         same_storage=True,
         profile=profile,
+        maxdepth=maxdepth,
         concurrency_limit=concurrency_limit,
     )
 
@@ -273,10 +300,11 @@ class _CopyOrMove(_Placing, _FlatJobs):
         makedirs: _Request,
         same_storage: bool,
         profile: StorageProfile,
+        maxdepth: int | None,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
     ) -> None:
-        super().__init__(iexpand, info, concurrency_limit, op)
+        super().__init__(iexpand, info, concurrency_limit, op, maxdepth)
 
         self.path1 = path1
         self.path2 = path2
@@ -310,13 +338,14 @@ class _CopyOrMove(_Placing, _FlatJobs):
         )
 
     async def expand(self, pattern: str | Sequence[str]) -> _Roots:
-        return await _expand(self.iexpand, self.info, pattern, self.concurrency_limit)
+        return await self.glob_roots(pattern)
 
     def add(self, entry: dict[str, Any]) -> None:
         name = entry["name"]
         if name.endswith("/"):
-            # A folder's marker: a tree destination keeps the folder.
-            if not self.implicit_folders:
+            # A folder's marker: a tree destination keeps the folder. With
+            # maxdepth, fsspec's copy leaves out folders, and copies files only.
+            if not self.implicit_folders and self.maxdepth is None:
                 self.queue(self.target(name.rstrip("/")), [], always=True)
             return
 

@@ -88,3 +88,6 @@ downstream/*
 # Claude Code
 CLAUDE.local.md
 .claude/settings.local.json
+
+# The copied strategies' version, written by their build: kept with the copy.
+!src/fsspec_databricks/_contrib/strategy/_version.py

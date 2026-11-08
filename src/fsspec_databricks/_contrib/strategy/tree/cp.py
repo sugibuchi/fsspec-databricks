@@ -7,8 +7,8 @@ whole tree first, then copies each path. `tree_cp` copies each folder's files
 as soon as the folder is listed. The destination may be another storage:
 within one, it is the same storage's operations given twice.
 
-This module depends on `_jobs`, and `jobs`, `operation` and `placement` of
-`common`.
+This module depends on `_jobs`, and `jobs`, `operation`, `paths` and
+`placement` of `common`.
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from fsspec_alt_strategies.states import CpState
 
 from ..common.jobs import _Job
 from ..common.operation import Operation
+from ..common.paths import _check_maxdepth
 from ..common.placement import _Placing
-from ._jobs import _expand, _TreeJobs
+from ._jobs import _TreeJobs
 
 if TYPE_CHECKING:
     import asyncio
@@ -48,6 +49,7 @@ def tree_cp(
     dst_rm_file: _Request,
     same_storage: bool,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], CpState]:
     """Copy a folder and everything in it, copying while the tree is walked.
@@ -79,6 +81,13 @@ def tree_cp(
     as soon as the folder is listed, each by a ``cp_file``. A folder is
     created at the destination before files are copied into it, and for each
     empty folder.
+
+    With ``maxdepth``, it copies the files fsspec's ``copy`` copies with it:
+    those at most ``maxdepth`` levels below ``path1``, or below a pattern's
+    matches one level less. Folders deeper are not listed. As fsspec's, it
+    then makes no empty folder. Unlike fsspec's, it places the files as
+    without ``maxdepth``: fsspec places them by the common prefix of the files
+    found, which moves them when all are in one subfolder.
 
     The destination is described by the ``dst_`` operations and ``profile``.
     Within one storage, they are the source's own, and ``same_storage`` is
@@ -152,6 +161,9 @@ def tree_cp(
         Whether the destination is the source's storage.
     profile : StorageProfile
         What the destination does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to copy: 1 copies only the files in ``path1``. No
+        limit by default.
     concurrency_limit : asyncio.Semaphore
         Held by each request while it runs, on either storage. Share one to
         limit several operations, or files, together.
@@ -161,6 +173,11 @@ def tree_cp(
     Operation
         Yielding ``(source, destination)`` for each file copied, or an error.
         Its state is a `CpState`.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -205,6 +222,7 @@ def tree_cp(
     ...     concurrency_limit=asyncio.Semaphore(32),
     ... )
     """
+    _check_maxdepth(maxdepth)
     return Operation(
         lambda op: _Copy(
             path1,
@@ -217,6 +235,7 @@ def tree_cp(
             rm_file=dst_rm_file,
             same_storage=same_storage,
             profile=profile,
+            maxdepth=maxdepth,
             concurrency_limit=concurrency_limit,
             op=op,
         ).outcomes(),
@@ -234,6 +253,7 @@ def tree_local_cp(
     makedirs: _Request,
     rm_file: _Request,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], CpState]:
     """Copy a folder and everything in it within one storage, as `tree_cp` does.
@@ -258,6 +278,8 @@ def tree_local_cp(
         ``dst_rm_file``.
     profile : StorageProfile
         What the storage does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to copy, as with `tree_cp`.
     concurrency_limit : asyncio.Semaphore
         Held by each request while it runs.
 
@@ -265,6 +287,11 @@ def tree_local_cp(
     -------
     Operation
         As `tree_cp`'s.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -281,6 +308,7 @@ def tree_local_cp(
         dst_rm_file=rm_file,
         same_storage=True,
         profile=profile,
+        maxdepth=maxdepth,
         concurrency_limit=concurrency_limit,
     )
 
@@ -306,10 +334,11 @@ class _CopyOrMove(_Placing, _TreeJobs):
         makedirs: _Request,
         same_storage: bool,
         profile: StorageProfile,
+        maxdepth: int | None,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
     ) -> None:
-        super().__init__(ils, info, concurrency_limit, op)
+        super().__init__(ils, info, concurrency_limit, op, maxdepth)
 
         self.path1 = path1
         self.path2 = path2
@@ -345,7 +374,7 @@ class _CopyOrMove(_Placing, _TreeJobs):
         )
 
     async def expand(self, pattern: str | Sequence[str]) -> _Roots:
-        return await _expand(self.ils, self.info, pattern, self.concurrency_limit)
+        return await self.glob_roots(pattern)
 
     def file_root(self, path: str) -> None:
         self.files_found += 1
@@ -361,7 +390,10 @@ class _CopyOrMove(_Placing, _TreeJobs):
                 copies.append(_Job("copy", name, self.target(name)))
 
         if listing.first and listing.last and not listing.entries:
-            # An empty folder is made, whatever the storage.
+            # An empty folder is made, whatever the storage. With maxdepth,
+            # fsspec's copy leaves out folders, and copies files only.
+            if self.maxdepth is not None:
+                return None
             self.queue(self.target(listing.folder), listing.folder, [], always=True)
         elif copies:
             # A folder holding only folders needs no mkdir: theirs create it.

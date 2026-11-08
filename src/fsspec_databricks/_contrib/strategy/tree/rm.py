@@ -6,7 +6,8 @@
 whole tree first, then deletes each path. `tree_rm` deletes each folder's files
 as soon as the folder is listed, and each folder once it is empty.
 
-This module depends on `_jobs`, and `jobs` and `operation` of `common`.
+This module depends on `_jobs`, and `jobs`, `operation` and `paths` of
+`common`.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ from fsspec_alt_strategies.states import RmState
 
 from ..common.jobs import _Job, _Roots
 from ..common.operation import Operation
-from ._jobs import _expand, _TreeJobs
+from ..common.paths import _check_maxdepth
+from ._jobs import _TreeJobs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Sequence
@@ -41,6 +43,7 @@ def tree_rm(
     rm_folder: _Request,
     rm_tree: _Request | None = None,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[str, RmState]:
     """Delete a folder and everything in it, deleting while the tree is walked.
@@ -74,6 +77,14 @@ def tree_rm(
     ``_rm`` with ``recursive=True`` does. So does a list of paths and
     patterns. They are matched as `tree_glob` matches them, in one search,
     then the folders matched are walked at once.
+
+    With ``maxdepth``, it deletes what fsspec's ``_rm`` deletes with it: the
+    paths at most ``maxdepth`` levels below ``path``, or below a pattern's
+    matches one level less, then ``path`` itself. Folders deeper are not
+    listed. A folder at the limit is found but not listed, so it is deleted
+    by one ``rm_folder``, as fsspec deletes each path it finds. One with
+    anything in it then fails, and the folders above it are kept.
+    ``rm_tree`` is not used, as it would delete what is deeper.
 
     Once cancelled, it starts no new listing or deletion, and yields the
     outcomes of the deletions already sent. Closed, it waits for those
@@ -119,6 +130,9 @@ def tree_rm(
         Without it, every folder is walked.
     profile : StorageProfile
         What the storage does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to delete: 1 deletes only what is in ``path``, and
+        ``path`` if it is then empty. No limit by default.
     concurrency_limit : asyncio.Semaphore
         Held by each request while it runs. Share one to limit several
         operations, or files, together.
@@ -127,6 +141,11 @@ def tree_rm(
     -------
     Operation
         Yielding each path deleted, or an error. Its state is an `RmState`.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -151,15 +170,18 @@ def tree_rm(
     >>> op.state.files_deleted
     1234
     """
+    _check_maxdepth(maxdepth)
     return Operation(
         lambda op: _Deletion(
             ils,
             info,
             rm_file,
             rm_folder,
-            rm_tree,
+            # A folder deleted whole would take what is deeper than maxdepth.
+            rm_tree if maxdepth is None else None,
             path,
             profile,
+            maxdepth,
             concurrency_limit,
             op,
         ).outcomes(),
@@ -179,10 +201,11 @@ class _Deletion(_TreeJobs):
         rm_tree: _Request | None,
         path: str | Sequence[str],
         profile: StorageProfile,
+        maxdepth: int | None,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[str, RmState],
     ) -> None:
-        super().__init__(ils, info, concurrency_limit, op)
+        super().__init__(ils, info, concurrency_limit, op, maxdepth)
 
         self.path = path
         self.rm_file = rm_file
@@ -199,9 +222,7 @@ class _Deletion(_TreeJobs):
     async def prepare(self) -> _Roots:
         """Find the roots, then delete whole the folders that can be: the rest are walked."""
         if not isinstance(self.path, str) or has_magic(self.path):
-            roots = await _expand(
-                self.ils, self.info, self.path, self.concurrency_limit
-            )
+            roots = await self.glob_roots(self.path)
             known = True  # The glob found the folders to be folders.
         else:
             roots = _Roots([self.path])
@@ -260,6 +281,12 @@ class _Deletion(_TreeJobs):
     def file_root(self, path: str) -> None:
         self.files_found = 1
         self.waiting.append(_Job("file", path))
+
+    def at_limit(self, folder: str) -> None:
+        # Deleted only if empty: one that is not fails, as fsspec's deletion
+        # of each path found does. An implicit folder is no path to delete.
+        if not self.implicit_folders:
+            self.waiting.append(_Job("folder", folder))
 
     def add(self, listing: _Listing) -> None:
         self.track(listing)

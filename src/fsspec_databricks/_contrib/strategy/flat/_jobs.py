@@ -11,17 +11,21 @@ A glob pattern is expanded first, with `flat_glob`, as fsspec's
 ``_expand_path`` expands it: the keys under its matching folders are then
 listed.
 
-This module depends on `_keys`, `glob`, and `jobs` and `operation` of `common`.
+This module depends on `_keys`, `find`, `glob`, and `jobs`, `operation` and
+`paths` of `common`.
 """
 
 from __future__ import annotations
 
 from abc import abstractmethod
+from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
 from ..common.jobs import _Jobs, _roots_of
 from ..common.operation import _collect_with_errors
+from ..common.paths import _trim
 from ._keys import _close
+from .find import _within
 from .glob import flat_glob
 
 if TYPE_CHECKING:
@@ -38,11 +42,16 @@ async def _expand(
     info: _Info,
     pattern: str | Sequence[str],
     concurrency_limit: asyncio.Semaphore,
+    maxdepth: int | None = None,
 ) -> _Roots:
     """The roots matching glob patterns, found with `flat_glob`."""
     matches, errors = await _collect_with_errors(
         flat_glob(
-            pattern, iexpand=iexpand, info=info, concurrency_limit=concurrency_limit
+            pattern,
+            iexpand=iexpand,
+            info=info,
+            maxdepth=maxdepth,
+            concurrency_limit=concurrency_limit,
         )
     )
     return _roots_of(matches, errors, pattern)
@@ -56,7 +65,11 @@ def _keys_of(paths: tuple[str, ...]) -> str:
 
 
 class _FlatJobs(_Jobs):
-    """The jobs of one operation, run while the keys under its roots are listed."""
+    """The jobs of one operation, run while the keys under its roots are listed.
+
+    With ``maxdepth``, the keys deeper than it are listed, but left out, as
+    fsspec's ``_expand_path`` finds paths. A prefix lists every key under it.
+    """
 
     def __init__(
         self,
@@ -64,11 +77,28 @@ class _FlatJobs(_Jobs):
         info: _Info,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[Any, Any],
+        maxdepth: int | None = None,
     ) -> None:
         super().__init__(concurrency_limit, op)
 
         self.iexpand = iexpand
         self.info = info
+        self.maxdepth = maxdepth
+
+        # The folder roots a pattern matched: fsspec takes them one level less
+        # deep than a path named, as its glob counted that level already.
+        self.matched: set[str] = set()
+
+    async def glob_roots(self, pattern: str | Sequence[str]) -> _Roots:
+        """The roots matching glob patterns, noting those a pattern matched."""
+        roots = await _expand(
+            self.iexpand, self.info, pattern, self.concurrency_limit, self.maxdepth
+        )
+        if self.maxdepth is not None:
+            named = [pattern] if isinstance(pattern, str) else pattern
+            literal = {_trim(p) for p in named if not has_magic(p)}
+            self.matched = {f for f in roots.folders if f not in literal}
+        return roots
 
     @abstractmethod
     def add(self, entry: dict[str, Any]) -> None:
@@ -96,12 +126,20 @@ class _FlatJobs(_Jobs):
         operation, as a missing root does.
         """
         for folder in folders:
+            depth = self.maxdepth
+            if depth is not None and folder in self.matched:
+                depth -= 1
+                if depth < 1:
+                    continue  # At the limit already: nothing in it is taken.
+
             under = False
-            entries = self.iexpand(f"{folder}/" if folder else "")
+            prefix = f"{folder}/" if folder else ""
+            entries = self.iexpand(prefix)
             try:
                 async for entry in entries:
                     under = True
-                    yield entry
+                    if _within(entry["name"].rstrip("/")[len(prefix) :], depth):
+                        yield entry
                     if self.op.cancelling():
                         return
             finally:

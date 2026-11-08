@@ -123,14 +123,6 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def _strip_only_protocol(self, path: str | Sequence[str]) -> Any:
-        """A path, or paths, without the protocol, keeping a trailing "/".
-
-        The strategies take paths without a protocol. A trailing "/" means
-        something to some, e.g. a glob of folders only, or a copy into a folder.
-        """
-        return _strip_only_protocol(self, path)
-
     async def _single_file(self, path: str | Sequence[str]) -> bool:
         """Whether ``path`` names one existing file, with no pattern.
 
@@ -215,7 +207,11 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
 
 
 def _strip_only_protocol(fs: AbstractFileSystem, path: str | Sequence[str]) -> Any:
-    """A path, or paths, of ``fs`` without its protocol, keeping a trailing "/"."""
+    """A path, or paths, of ``fs`` without its protocol, keeping a trailing "/".
+
+    The strategies take paths without a protocol. A trailing "/" means
+    something to some, e.g. a glob of folders only, or a copy into a folder.
+    """
     if not isinstance(path, str):
         return [_strip_only_protocol(fs, p) for p in path]
     plain = fs._strip_protocol(path)

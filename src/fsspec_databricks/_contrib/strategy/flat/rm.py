@@ -19,8 +19,8 @@ from fsspec_alt_strategies.states import RmState
 
 from ..common.jobs import _Job, _Roots
 from ..common.operation import Operation
-from ..common.paths import _trim
-from ._jobs import _expand, _FlatJobs, _keys_of
+from ..common.paths import _check_maxdepth, _trim
+from ._jobs import _FlatJobs, _keys_of
 
 if TYPE_CHECKING:
     import asyncio
@@ -38,6 +38,7 @@ def flat_rm(
     info: _Info,
     rm_files: _Requests,
     batch_size: int,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[str, RmState]:
     """Delete the keys under a prefix, in batches sent as the listing goes on.
@@ -48,6 +49,12 @@ def flat_rm(
     a list of paths and patterns, deletes all they match, as with fsspec's
     ``_rm``. They are matched as `flat_glob` matches them, then the keys under
     the folders matched are listed, one folder after another.
+
+    With ``maxdepth``, it deletes the keys fsspec's ``_rm`` deletes with it:
+    those at most ``maxdepth`` levels below ``path``, or below a pattern's
+    matches one level less. A folder's marker counts at its folder's level.
+    The keys deeper are listed all the same, as a prefix lists every key
+    under it, but kept.
 
     The keys are grouped in batches of ``batch_size``, each deleted by one
     ``rm_files``, while the listing goes on. The last batch, smaller, goes once
@@ -90,6 +97,9 @@ def flat_rm(
         error. It raises if any is not deleted, as the whole batch then fails.
     batch_size : int
         The most keys of one ``rm_files``, e.g. 1000 on S3.
+    maxdepth : int, optional
+        The deepest level to delete: 1 deletes only the keys right in
+        ``path``. No limit by default.
     concurrency_limit : asyncio.Semaphore
         Held by each ``rm_files`` and ``info`` while it runs. The listing holds
         none. Share one to limit several operations, or files, together.
@@ -102,7 +112,7 @@ def flat_rm(
     Raises
     ------
     ValueError
-        If ``batch_size`` is less than 1.
+        If ``batch_size`` or ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -127,6 +137,7 @@ def flat_rm(
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be at least 1: {batch_size}")
+    _check_maxdepth(maxdepth)
 
     return Operation(
         lambda op: _Deletion(
@@ -135,6 +146,7 @@ def flat_rm(
             info=info,
             rm_files=rm_files,
             batch_size=batch_size,
+            maxdepth=maxdepth,
             concurrency_limit=concurrency_limit,
             op=op,
         ).outcomes(),
@@ -153,10 +165,11 @@ class _Deletion(_FlatJobs):
         info: _Info,
         rm_files: _Requests,
         batch_size: int,
+        maxdepth: int | None,
         concurrency_limit: asyncio.Semaphore,
         op: Operation[str, RmState],
     ) -> None:
-        super().__init__(iexpand, info, concurrency_limit, op)
+        super().__init__(iexpand, info, concurrency_limit, op, maxdepth)
 
         self.path = path
         self.rm_files = rm_files
@@ -168,9 +181,7 @@ class _Deletion(_FlatJobs):
 
     async def prepare(self) -> _Roots:
         if not isinstance(self.path, str) or has_magic(self.path):
-            return await _expand(
-                self.iexpand, self.info, self.path, self.concurrency_limit
-            )
+            return await self.glob_roots(self.path)
         return _Roots([_trim(self.path)])
 
     def state(self) -> RmState:

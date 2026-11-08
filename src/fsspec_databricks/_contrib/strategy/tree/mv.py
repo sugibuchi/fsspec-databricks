@@ -11,7 +11,7 @@ Where ``mv_file`` moves a folder too, in one request, as a storage's rename
 does, the profile says so. `tree_mv` then moves each folder whole with it
 where it can, and walks only what it cannot move so.
 
-This module depends on `cp`, and `jobs` and `operation` of `common`.
+This module depends on `cp`, and `jobs`, `operation` and `paths` of `common`.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from fsspec_alt_strategies.states import MvState
 
 from ..common.jobs import _Job, _Roots
 from ..common.operation import Operation
+from ..common.paths import _check_maxdepth
 from .cp import _CopyOrMove
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ def tree_mv(
     dst_makedirs: _Request,
     same_storage: bool,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], MvState]:
     """Move a folder and everything in it, moving while the tree is walked.
@@ -103,6 +105,12 @@ def tree_mv(
     whole is yielded once, as ``(root, target)``: what is in it is neither
     listed nor yielded.
 
+    With ``maxdepth``, it moves the files `tree_cp` copies with it, and
+    nothing is moved whole. A source folder is deleted once emptied, so those
+    keeping a folder at the limit stay, and empty ones stay too. fsspec's
+    ``mv`` copies as its ``copy`` does with ``maxdepth``, but then deletes the
+    whole source tree, deeper files too. This keeps them.
+
     Once cancelled, it starts no new listing or move, and yields the outcomes
     of the moves already sent. Closed, it waits for those moves without
     yielding them, as their outcome would otherwise be unknown. Iterating it
@@ -142,6 +150,9 @@ def tree_mv(
         The destination's, as with `tree_cp`.
     profile : StorageProfile
         What the destination does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to move: 1 moves only the files in ``path1``. No
+        limit by default.
     concurrency_limit : asyncio.Semaphore
         Held by each request while it runs. Share one to limit several
         operations, or files, together.
@@ -151,6 +162,11 @@ def tree_mv(
     Operation
         Yielding ``(source, destination)`` for each file and folder moved, or
         an error. Its state is an `MvState`.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -179,7 +195,11 @@ def tree_mv(
     >>> op.state.files_moved
     1234
     """
-    renames_folders = same_storage and bool(profile.renames_folders)
+    _check_maxdepth(maxdepth)
+    # A folder moved whole would take what is deeper than maxdepth along.
+    renames_folders = (
+        same_storage and bool(profile.renames_folders) and maxdepth is None
+    )
     return Operation(
         lambda op: _Move(
             path1,
@@ -192,6 +212,7 @@ def tree_mv(
             makedirs=dst_makedirs,
             same_storage=same_storage,
             profile=profile,
+            maxdepth=maxdepth,
             concurrency_limit=concurrency_limit,
             op=op,
         ).outcomes(),
@@ -209,6 +230,7 @@ def tree_local_mv(
     makedirs: _Request,
     rm_folder: _Request,
     profile: StorageProfile,
+    maxdepth: int | None = None,
     concurrency_limit: asyncio.Semaphore,
 ) -> Operation[tuple[str, str], MvState]:
     """Move a folder and everything in it within one storage, as `tree_mv` does.
@@ -229,6 +251,8 @@ def tree_local_mv(
         The storage's, as `tree_mv`'s ``dst_makedirs``.
     profile : StorageProfile
         What the storage does: ``StorageProfile()`` if it is unknown.
+    maxdepth : int, optional
+        The deepest level to move, as with `tree_mv`.
     concurrency_limit : asyncio.Semaphore
         Held by each request while it runs.
 
@@ -236,6 +260,11 @@ def tree_local_mv(
     -------
     Operation
         As `tree_mv`'s.
+
+    Raises
+    ------
+    ValueError
+        If ``maxdepth`` is less than 1.
 
     See Also
     --------
@@ -252,6 +281,7 @@ def tree_local_mv(
         dst_makedirs=makedirs,
         same_storage=True,
         profile=profile,
+        maxdepth=maxdepth,
         concurrency_limit=concurrency_limit,
     )
 
@@ -281,8 +311,11 @@ class _Move(_CopyOrMove):
         self.rm_folder = rm_folder
 
         # The profile is the destination's: only within one storage does it
-        # tell how the source renames, or deletes its folders.
-        self.renames_folders = same_storage and bool(profile.renames_folders)
+        # tell how the source renames, or deletes its folders. A folder moved
+        # whole would take what is deeper than maxdepth along.
+        self.renames_folders = (
+            same_storage and bool(profile.renames_folders) and self.maxdepth is None
+        )
         self.implicit_folders = same_storage and self.implicit_folders
         self.folders_moved = 0
 

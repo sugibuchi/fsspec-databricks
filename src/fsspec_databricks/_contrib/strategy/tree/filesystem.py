@@ -28,6 +28,7 @@ from ..common.filesystem import (
     _du_answer,
     _failed_folder,
     _raise,
+    _strip_only_protocol,
     _with,
 )
 from ..common.operation import _collect_with_monitors, _with_monitors
@@ -308,7 +309,7 @@ class TreeFileSystem(_BaseFileSystem):
         withdirs = kwargs.pop("withdirs", True)
         entries, _ = await _collect_with_monitors(
             tree_glob(
-                self._strip_only_protocol(path),
+                _strip_only_protocol(self, path),
                 ils=_with(self._ils, kwargs),
                 info=self._info,
                 maxdepth=maxdepth,
@@ -328,19 +329,20 @@ class TreeFileSystem(_BaseFileSystem):
         maxdepth: int | None = None,
         **kwargs: Any,
     ) -> None:
-        if not recursive or maxdepth is not None:
+        if not recursive:
             await super()._rm(path, recursive, batch_size, maxdepth, **kwargs)
             return
 
         _, errors = await _collect_with_monitors(
             tree_rm(
-                self._strip_only_protocol(path),
+                _strip_only_protocol(self, path),
                 ils=self._ils,
                 info=self._info,
                 rm_file=self._rm_file,
                 rm_folder=self._rmdir,
                 rm_tree=self._rm_tree,
                 profile=self.storage_profile,
+                maxdepth=maxdepth,
                 concurrency_limit=self.operation_limit,
             ),
             Call(self._unwrapped(), "rm", path),
@@ -359,7 +361,7 @@ class TreeFileSystem(_BaseFileSystem):
         batch_size: int | None = None,
         **kwargs: Any,
     ) -> None:
-        if not recursive or maxdepth is not None or not isinstance(path2, str):
+        if not recursive or not isinstance(path2, str):
             await super()._copy(
                 path1, path2, recursive, on_error, maxdepth, batch_size, **kwargs
             )
@@ -367,14 +369,15 @@ class TreeFileSystem(_BaseFileSystem):
 
         _, errors = await _collect_with_monitors(
             tree_local_cp(
-                self._strip_only_protocol(path1),
-                self._strip_only_protocol(path2),
+                _strip_only_protocol(self, path1),
+                _strip_only_protocol(self, path2),
                 ils=self._ils,
                 info=self._info,
                 cp_file=self._cp_file,
                 makedirs=self._makedirs,
                 rm_file=self._rm_file,
                 profile=self.storage_profile,
+                maxdepth=maxdepth,
                 concurrency_limit=self.operation_limit,
             ),
             Call(self._unwrapped(), "copy", path1, path2),
@@ -399,9 +402,7 @@ class TreeFileSystem(_BaseFileSystem):
         if path1 == path2:
             return
 
-        if (not recursive or maxdepth is not None) and not await self._single_file(
-            path1
-        ):
+        if not recursive and not await self._single_file(path1):
             # fsspec's own: a copy, then the deletion of its sources.
             await self._copy(path1, path2, recursive, "raise", maxdepth, **kwargs)
             await self._rm(path1, recursive=recursive)
@@ -409,14 +410,15 @@ class TreeFileSystem(_BaseFileSystem):
 
         _, errors = await _collect_with_monitors(
             tree_local_mv(
-                self._strip_only_protocol(path1),
-                self._strip_only_protocol(path2),
+                _strip_only_protocol(self, path1),
+                _strip_only_protocol(self, path2),
                 ils=self._ils,
                 info=self._info,
                 mv_file=self._mv_file,
                 makedirs=self._makedirs,
                 rm_folder=self._rmdir,
                 profile=self.storage_profile,
+                maxdepth=maxdepth,
                 concurrency_limit=self.operation_limit,
             ),
             Call(self._unwrapped(), "mv", path1, path2),
