@@ -248,6 +248,23 @@ Repository rules protect the release path:
 - The `pypi` environment deploys only from `v*` tags.
 - The ruleset "Default branch" blocks force-pushes to `main` and its deletion.
 
+### Release notes
+
+`release.yaml` creates the GitHub release with notes generated from the pull requests. Once it has succeeded, rewrite
+the notes for users, e.g. with `gh release edit v0.4.0 --notes-file notes.md`. They hold, in order:
+
+1. An opening line, only when the release as a whole needs one.
+2. The sections that apply, in this order:
+   - `## New`: each feature as a bold title, a colon, then what it does for the user;
+   - `## Changes`: what behaves differently, breaking changes first;
+   - `## Fixes`: what was wrong, and is now right.
+3. A `Documentation:` list linking the sections of the README, USAGE.md or AUTHENTICATION.md about the changes.
+4. `## Install`, with the command to upgrade, and what else to do after upgrading, if anything.
+5. The generated sections, kept as they are: `## What's Changed`, `## New Contributors` and `**Full Changelog**`.
+
+The notes describe what users see, not how it is built. They follow the rules for writing docs of CLAUDE.md, and
+link files by absolute URL.
+
 ## Design
 
 ### One file system for all of Databricks' paths

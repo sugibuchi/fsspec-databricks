@@ -131,6 +131,8 @@ Write docs so that people can review them. That covers this file, DEVELOPMENT.md
 Update the docs when behaviour, parameters or options change. Keep user docs short and compact: what users do, not how
 it works or why.
 
+After each release, rewrite its GitHub release notes as DEVELOPMENT.md's "Release notes" says, without being asked.
+
 ### Links
 
 README.md, USAGE.md and AUTHENTICATION.md are user docs. README.md uses absolute GitHub URLs for links to files, as
