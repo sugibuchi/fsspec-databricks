@@ -1,0 +1,152 @@
+# Lint the code and the workflows, and test, on every push to main and pull
+# request. The offline tests run on the dummy server, with no credentials, on
+# every supported Python version. The coverage is uploaded to Codecov from one
+# Python version: uploading needs the repository secret CODECOV_TOKEN.
+#
+# The live tests then run on a Databricks workspace per cloud, each in the
+# GitHub environment of its name: aws, azure or gcp. DEVELOPMENT.md lists what
+# each environment holds. An environment without DATABRICKS_HOST is skipped.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false  # no job pushes: the token is not left in .git/config
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.12.22"  # not the latest uv: the same in every run
+
+      - name: Ruff check
+        run: uvx ruff check .
+
+      - name: Ruff format check
+        run: uvx ruff format --check .
+
+      # The workflows: their security (zizmor) and their syntax (actionlint).
+      - name: Workflow check
+        run: |
+          uvx zizmor --offline .github/workflows
+          uvx --from actionlint-py actionlint
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false  # no job pushes: the token is not left in .git/config
+          fetch-depth: 0  # the version comes from the git tags (hatch-vcs)
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          version: "0.12.22"  # not the latest uv: the same in every run
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the project
+        run: uv sync --locked  # fails if uv.lock is out of date
+
+      # The dummy server only, whatever a variable says: this job has no credentials.
+      - name: Test with coverage
+        run: uv run --no-sync pytest --api=dummy --cov --cov-report=term --cov-report=xml:coverage.xml
+
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && matrix.python-version == '3.14' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+
+  live:
+    needs: test
+    # Pull requests from forks and Dependabot get neither the environments'
+    # secrets nor an OIDC token trusted by the workspaces: they run offline only.
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.event.pull_request.head.repo.full_name == github.repository
+          && github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    environment: ${{ matrix.cloud }}
+    permissions:
+      contents: read
+      id-token: write  # GitHub's OIDC token, for identity federation with Databricks
+    concurrency:
+      # One run per cloud and ref: two would share the work directories.
+      group: live-${{ matrix.cloud }}-${{ github.ref }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        cloud: [aws, azure, gcp]
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      # The environment's DATABRICKS_AUTH_TYPE chooses identity federation.
+      # Without it, the client secret is used, and with it never passed.
+      DATABRICKS_AUTH_TYPE: ${{ vars.DATABRICKS_AUTH_TYPE || 'oauth-m2m' }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ !vars.DATABRICKS_AUTH_TYPE && secrets.DATABRICKS_CLIENT_SECRET || '' }}
+      DATABRICKS_TOKEN_AUDIENCE: ${{ vars.DATABRICKS_TOKEN_AUDIENCE }}
+      ARM_CLIENT_ID: ${{ vars.ARM_CLIENT_ID }}
+      VOLUME_ROOT: ${{ vars.FSSPEC_DATABRICKS_VOLUME_TEST_ROOT }}
+      WORKSPACE_ROOT: ${{ vars.FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT }}
+    steps:
+      # A cloud whose environment is not set up yet is skipped, not failed.
+      - name: Check the environment
+        id: configured
+        run: |
+          if [[ -z "$DATABRICKS_HOST" ]]; then
+            echo "::notice::The environment ${{ matrix.cloud }} has no DATABRICKS_HOST: skipped."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -z "$VOLUME_ROOT" || -z "$WORKSPACE_ROOT" ]]; then
+            echo "::error::FSSPEC_DATABRICKS_VOLUME_TEST_ROOT and FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT must be set."
+            exit 1
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: ${{ steps.configured.outputs.ok == 'true' }}
+        with:
+          persist-credentials: false  # no job pushes: the token is not left in .git/config
+          fetch-depth: 0  # the version comes from the git tags (hatch-vcs)
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        if: ${{ steps.configured.outputs.ok == 'true' }}
+        with:
+          version: "0.12.22"  # not the latest uv: the same in every run
+          python-version: "3.14"
+          enable-cache: false  # this job holds credentials: nothing restored from a cache
+
+      - name: Install the project
+        if: ${{ steps.configured.outputs.ok == 'true' }}
+        run: uv sync --locked  # fails if uv.lock is out of date
+
+      # Each ref works in its own directories, so that branches do not collide.
+      - name: Test on the live workspace
+        if: ${{ steps.configured.outputs.ok == 'true' }}
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          export FSSPEC_DATABRICKS_VOLUME_TEST_ROOT="$VOLUME_ROOT/$REF_NAME"
+          export FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT="$WORKSPACE_ROOT/$REF_NAME"
+          bash .github/scripts/with-id-token-file.sh uv run --no-sync pytest --api=live

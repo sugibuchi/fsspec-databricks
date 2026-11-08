@@ -19,23 +19,24 @@ uvx ruff format .                               # format
 uvx pre-commit run --all-files                  # the hooks: ruff, whitespace, end of files, YAML
 ```
 
-CI, in `.github/workflows/on_push.yaml`, runs on pushes:
+CI, in `.github/workflows/ci.yaml`, runs on pull requests and pushes to `main`:
 
-- ruff check and ruff format check, with the latest ruff;
-- pytest with `--api=both` on Python 3.14, against the dummy server and the default workspace, with coverage on `main`;
-- on `main`, pytest on the other supported Python versions;
-- pytest on Azure, AWS or GCP workspaces named in the `TEST_ENVIRONMENTS` variable.
+- `lint`: ruff check, ruff format check, zizmor and actionlint;
+- `test`: pytest on the dummy server on Python 3.11 to 3.14, with coverage to Codecov from 3.14;
+- `live`: pytest `--api=live` on Python 3.14, on the `aws`, `azure` and `gcp` environments, never for forks.
 
-Releases are published GitHub releases. DEVELOPMENT.md describes them.
+`codeql.yaml` scans the code and workflows. `release.yaml` releases a pushed `v*` tag: DEVELOPMENT.md describes it.
 
-The test jobs hold Databricks credentials. Keep their supply chain fixed:
+The live jobs hold Databricks credentials. Keep their supply chain fixed:
 
 - `uv.lock` is committed, and CI installs with `uv sync --locked`. After changing dependencies, run `uv lock` and
   commit `uv.lock`.
-- Actions are pinned to commit SHAs, with the version in a comment, e.g. `@<sha> # v7.0.1`. Dependabot updates both.
-- `astral-sh/setup-uv` publishes no major-version tags: pin a full version's SHA.
+- Pin every action to a full commit SHA, with its version in a comment, e.g. `@<sha>  # v7.0.1`. Dependabot updates
+  them. Also pin uv's `version`.
+- Check out with `persist-credentials: false`: no job pushes.
 - Never add a `pull_request_target` trigger, or give secrets to `pull_request` runs from forks.
 - Each workflow declares `permissions:`, with only what it needs.
+- Check changes with `uvx zizmor --offline .github/workflows` and `uvx --from actionlint-py actionlint`.
 
 ## Tests and layout
 

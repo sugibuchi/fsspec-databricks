@@ -172,40 +172,40 @@ The references leave some behaviour open. The dummy then makes an assumption, ma
 
 The workflows are in `.github/workflows/`:
 
-| Workflow          | Runs on               | Does                                                                     |
-|-------------------|-----------------------|--------------------------------------------------------------------------|
-| `on_push.yaml`    | Pushes                | `check.yaml`, then `test.yaml` for each Python version and workspace.    |
-| `check.yaml`      | Called                | ruff check and ruff format check, with the latest ruff.                  |
-| `test.yaml`       | Called, or by hand    | pytest in one GitHub environment, optionally with coverage to Codecov.  |
-| `on_release.yaml` | Published releases    | `publish.yaml` to PyPI.                                                  |
-| `publish.yaml`    | Called                | `uv build` and `uv publish`.                                             |
+| Workflow       | Runs on                                 | Does                                                     |
+|----------------|-----------------------------------------|----------------------------------------------------------|
+| `ci.yaml`      | Pull requests, pushes to `main`, by hand | Lint, offline tests, then live tests on each cloud.     |
+| `codeql.yaml`  | Pull requests, pushes to `main`, weekly  | CodeQL scan of the Python code and the workflows.       |
+| `release.yaml` | Pushed `v*` tags                         | Build, GitHub release, and publishing to PyPI.          |
 
-`on_push.yaml` runs these test jobs:
+`ci.yaml` has three jobs:
 
-- Python 3.14 on the `default` environment, with coverage on `main`;
-- on `main`, the other supported Python versions on `default`;
-- Python 3.14 on `azure`, `aws` and `gcp`, each when the `TEST_ENVIRONMENTS` variable names it.
+- `lint`: ruff check, ruff format check, zizmor and actionlint;
+- `test`: pytest `--api=dummy` on Python 3.11 to 3.14, with no credentials, and coverage to Codecov from 3.14;
+- `live`: after `test`, pytest `--api=live` on Python 3.14, in the environments `aws`, `azure` and `gcp` in parallel.
 
-Each run's work directories are `<root>/<branch>/<Python version>` under the environment's roots.
+`live` runs on pushes, by hand, and on pull requests from branches of this repository. Pull requests from forks and
+Dependabot get no environment secrets, so they run `test` only. An environment without `DATABRICKS_HOST` is skipped
+with a notice. Each run's work directories are `<root>/<branch>` under the environment's roots.
 
 ### Supply chain
 
-The test jobs hold the workspaces' credentials, so what they run is fixed:
+The live jobs hold the workspaces' credentials, so what they run is fixed:
 
 - `uv.lock` is committed, with every package's hash. CI installs with `uv sync --locked`, which fails if the lock is
   out of date.
-- Actions are pinned to commit SHAs. setup-uv installs only uv versions whose checksums it knows (`latest-known`).
+- Actions are pinned to commit SHAs, and setup-uv to a uv version.
 - Dependabot updates `uv.lock` and the Actions' SHAs weekly.
-- Workflows run only on pushes and releases, never on pull requests from forks.
-- Each workflow's token can only read the repository. Publishing adds `id-token: write`, for PyPI's trusted
-  publishing.
-- The release build uses no cache.
+- No workflow gives secrets to pull requests from forks.
+- Each workflow's token can only read the repository. Only the jobs that need them add `id-token: write` or
+  `contents: write`.
+- The live jobs and the release build use no cache.
 
-ruff, run with `uvx`, is the exception: CI runs its latest version, in a job without secrets.
+ruff, zizmor and actionlint, run with `uvx`, are the exception: CI runs their latest versions, in a job without secrets.
 
 ### Environments
 
-Each GitHub environment is a Databricks workspace. Create at least `default`, and `azure`, `aws` or `gcp` as needed.
+Each of the GitHub environments `aws`, `azure` and `gcp` is a Databricks workspace.
 The tests authenticate as a service principal with read-write access to the work directories.
 
 Every environment has these:
@@ -242,26 +242,23 @@ The environments are:
 
 | Environment | Workspace                        | Authentication      |
 |-------------|----------------------------------|---------------------|
-| `default`   | Databricks Free Edition          | Client secret       |
+| `aws`       | Databricks on AWS                |                     |
 | `azure`     | Azure Databricks                 | `github-oidc-azure` |
 | `gcp`       | Databricks on Google Cloud       | `github-oidc`       |
 
-At the repository level:
-
-| Name                          | Value                                                                    |
-|-------------------------------|--------------------------------------------------------------------------|
-| `CODECOV_TOKEN` (secret)      | The repository's upload token for [Codecov](https://about.codecov.io/)   |
-| `TEST_ENVIRONMENTS` (variable) | The environments tested on each push, e.g. `azure gcp`                  |
+At the repository level, the secret `CODECOV_TOKEN` is the repository's upload token for
+[Codecov](https://about.codecov.io/).
 
 ## Releasing
 
 The version comes from the git tag, through hatch-vcs.
 
-1. Create a GitHub release with a new tag `vX.Y.Z` on `main`.
-2. Publishing it runs `on_release.yaml`. It builds the package and publishes it to PyPI, in the GitHub environment
-   `pypi`.
+1. Push a new tag `vX.Y.Z` on `main`, e.g. `git push origin v0.1.0`.
+2. `release.yaml` builds the package and checks that its version is the tag's.
+3. It creates the GitHub release with the built files, and publishes them to PyPI in the GitHub environment `pypi`.
 
-`uv publish` authenticates to PyPI with the workflow's OIDC token, through trusted publishing.
+PyPI's trusted publisher for `fsspec-databricks` names the workflow `release.yaml` and the environment `pypi`. It
+authenticates with the workflow's OIDC token, with no stored token.
 
 Repository rules protect the release path:
 
