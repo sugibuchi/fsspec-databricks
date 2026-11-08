@@ -107,6 +107,14 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         """The filesystem a monitor is told of: this one, or the one a wrapper wraps."""
         return self
 
+    def close(self) -> None:
+        """Release what the filesystem holds: here, nothing.
+
+        fsspec has no ``close()``, but a router closes its inner filesystems
+        with theirs. A subclass, or a mixin such as `SyncClientSupport`,
+        releases its own, e.g. a client or threads, and calls this one.
+        """
+
     def _strip_only_protocol(self, path: str | Sequence[str]) -> Any:
         """A path, or paths, without the protocol, keeping a trailing "/".
 

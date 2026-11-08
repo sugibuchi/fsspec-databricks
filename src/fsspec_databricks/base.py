@@ -149,7 +149,8 @@ class BaseDatabricksFileSystem(
         """Close the file system and release any resources."""
         if not self.closed:
             self._close_client()
-        self._shutdown_threads()
+        # The threads, from SyncClientSupport.
+        super().close()
 
     def __enter__(self):
         if self.closed:

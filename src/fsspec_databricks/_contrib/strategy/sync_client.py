@@ -91,7 +91,11 @@ class SyncClientSupport:
             executor.shutdown(wait=False, cancel_futures=True)
 
     def close(self) -> None:
-        """Shut the threads down, and close as the next class does, if it can."""
+        """Shut the threads down, then close as the next class does, if it has a ``close()``.
+
+        `TreeFileSystem` and `FlatFileSystem` have one. fsspec's own classes
+        have none.
+        """
         self._shutdown_threads()
         close = getattr(super(), "close", None)
         if close is not None:
