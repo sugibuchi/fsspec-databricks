@@ -207,19 +207,25 @@ class _Transfer(_Placing, _TreeJobs):
         destination_info: _Info | None = None,
     ) -> None:
         super().__init__(ls, info, concurrency_limit, op)
+
         self.path1 = path1
         self.path2 = path2
+
         # makedirs and the profile are the destination's: ls and info, unless
         # destination_info is given, describe both storages.
         self.makedirs = makedirs
+
         # Unknown, folders are made first. Implicit folders need none.
         self.parents_required = (
             profile.parents_required is not False and not profile.implicit_folders
         )
         self.implicit_folders = bool(profile.implicit_folders)
+
         self._placing(destination_info, same_storage=destination_info is None)
+
         self.files_found = 0
         self.files_done = 0
+
         # The copies waiting for their destination folder, by that folder.
         self.after_mkdir: dict[str, list[_Job]] = {}
 
@@ -246,6 +252,7 @@ class _Transfer(_Placing, _TreeJobs):
                 name = entry["name"].rstrip("/")
                 self.files_found += 1
                 copies.append(_Job("copy", name, self.target(name)))
+
         if not listing.entries:
             # An empty folder is made, whatever the storage.
             self.queue(self.target(listing.folder), listing.folder, [], always=True)
@@ -260,6 +267,7 @@ class _Transfer(_Placing, _TreeJobs):
         if not folder or not (always or self.parents_required):
             self.waiting.extend(copies)
             return
+
         if folder not in self.after_mkdir:
             self.waiting.append(_Job("mkdir", source, folder))
         self.after_mkdir.setdefault(folder, []).extend(copies)
@@ -313,6 +321,7 @@ class _Copy(_Transfer):
                 # The job holds its permit already.
                 if (await self.info(destination))["type"] == "directory":
                     raise
+
                 await self.rm_file(destination)
                 await self.cp_file(source, destination)
         except Exception as e:

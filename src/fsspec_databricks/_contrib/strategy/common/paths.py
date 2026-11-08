@@ -33,6 +33,7 @@ def _triples(
     for entry in entries:
         name = entry["name"].rstrip("/").rsplit("/", 1)[-1]
         (dirs if entry["type"] == "directory" else files)[name] = entry
+
     if detail:
         return folder, dirs, files
     return folder, list(dirs), list(files)

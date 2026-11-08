@@ -21,12 +21,9 @@ import io
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ._async_file import _AsyncFile, _MiB, _Range
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable
 
 __all__ = ["AdaptiveReadableFile", "AdaptiveWritableFile"]
 
@@ -59,9 +56,11 @@ class _AdaptiveFile(_AsyncFile):
     ) -> None:
         if spread is not None and spread < 1:
             raise ValueError(f"spread must be at least 1: {spread}")
+
         self.spread = spread or self.spread
         if concurrency_limit is None:
             concurrency_limit = asyncio.Semaphore(self.spread)
+
         super().__init__(path, loop, concurrency_limit=concurrency_limit)
 
     def _block_size(self, target: int) -> int:
@@ -77,6 +76,7 @@ class _AdaptiveFile(_AsyncFile):
         needed = math.ceil(target / self.spread)
         if needed <= smallest:
             return smallest
+
         doublings = (math.ceil(needed / smallest) - 1).bit_length()
         return min(smallest << doublings, self.max_block_size)
 
@@ -220,6 +220,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         version: str | None = None,
     ) -> None:
         super().__init__(path, loop, concurrency_limit=concurrency_limit, spread=spread)
+
         self.size = size
         self.version = version
         self.min_block_size = min_block_size or self.min_block_size
@@ -227,6 +228,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             max_block_size or self.max_block_size, self.min_block_size
         )
         self.kept_size = self.kept_size if kept_size is None else kept_size
+
         self._pos = 0
         # Where the blocks fetched were last settled: seeks only move _pos.
         self._settled = 0
@@ -310,10 +312,12 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         pos = self._pos
         if size == 0 or pos >= self.size:
             return b""
+
         end = self.size if size < 0 else min(pos + size, self.size)
         if not self._requests.queue and (data := self._from_kept(pos, end)) is not None:
             self._advance(end)
             return data
+
         await self._fetch(pos, end)
         try:
             data = await self._collect(pos, end)
@@ -321,6 +325,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             # The next read fetches again, rather than meeting the same failure.
             await self._drop_all()
             raise
+
         self._advance(end)
         return data
 
@@ -336,8 +341,10 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             pos = self.size + offset
         else:
             raise ValueError(f"Invalid whence: {whence}")
+
         if pos < 0:
             raise ValueError(f"Negative seek position: {pos}")
+
         self._pos = pos
         return pos
 
@@ -370,6 +377,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         pos = self._pos
         if pos == self._settled:
             return
+
         self._settled = pos
         queue = self._requests.queue
         if queue and queue[0].start <= pos <= queue[-1].end:
@@ -397,8 +405,10 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             await self._send(start, max(end, start + self.min_block_size))
         elif (start := queue[-1].end if queue else pos) < end:
             await self._send(start, end)
+
         if not continuing:
             return
+
         # A run that has read n bytes is assumed to read n more. Topping them up
         # only once half are read keeps the requests few and large.
         # At most a batch of the largest blocks, which keeps the memory of the
@@ -413,6 +423,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         stop = min(stop, self.size)
         if stop <= start:
             return
+
         parts = math.ceil((stop - start) / (largest or self.max_block_size))
         part = math.ceil((stop - start) / parts)
         for s in range(start, stop, part):
@@ -424,6 +435,7 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         queue = self._requests.queue
         data = bytearray()
         used = 0
+
         # The queue changes only once all is collected, so that a cancelled read
         # leaves it as it was.
         for r in list(queue):
@@ -433,8 +445,10 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             data += memoryview(chunk)[pos - r.start : end - r.start]
             pos = min(r.end, end)
             used += r.end <= end
+
         for _ in range(used):
             self._keep(queue.popleft())
+
         return bytes(data)
 
     async def _drop_all(self) -> None:
@@ -453,11 +467,14 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     def _keep(self, r: _Range) -> None:
         if not r.succeeded() or r.end - r.start > self.kept_size:
             return
+
         if (old := self._kept.pop(r.start, None)) is not None:
             self._kept_bytes -= len(old[1])
+
         data = r.task.result()
         self._kept[r.start] = r.end, data
         self._kept_bytes += len(data)
+
         while self._kept_bytes > self.kept_size:
             _, (_, evicted) = self._kept.popitem(last=False)
             self._kept_bytes -= len(evicted)
@@ -592,6 +609,7 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         max_request_size: int | None = None,
     ) -> None:
         super().__init__(path, loop, concurrency_limit=concurrency_limit, spread=spread)
+
         self.min_block_size = min_block_size or self.min_block_size
         self.max_block_size = max(
             max_block_size or self.max_block_size, self.min_block_size
@@ -599,11 +617,13 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         self.min_multipart_size = min_multipart_size or self.min_multipart_size
         self.sequential = self.sequential if sequential is None else sequential
         self.max_request_size = max_request_size or self.max_request_size
+
         if (cap := self.max_request_size) is not None and cap < self.min_block_size:
             raise ValueError(
                 f"max_request_size {cap} is less than min_block_size "
                 f"{self.min_block_size}: no part would fit"
             )
+
         self._pos = 0
         self._buffer = bytearray()
         self._multipart = False
@@ -652,6 +672,7 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         self._check_open()
         self._check_not_forced()
         self._raise_failed_upload()
+
         size = len(memoryview(data).cast("B"))
         self._buffer += data
         self._pos += size
@@ -680,7 +701,7 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                 await self._complete_multipart_upload(list(parts))
         except BaseException as error:
             if self._multipart:
-                await self._abort_noting(error, self._requests.cancel_all())
+                await self._cancel_multipart_upload(error)
             raise
         finally:
             self._buffer = bytearray()
@@ -691,21 +712,18 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         if self._multipart:
             await self._abort_multipart_upload()
 
-    async def _abort_noting(
-        self, error: BaseException, first: Awaitable[None] | None = None
-    ) -> None:
-        """Abort the multipart upload after ``error``, which the caller raises.
+    async def _cancel_multipart_upload(self, cause: BaseException) -> None:
+        """Cancel the parts in flight, then abort the upload, after ``cause``.
 
-        ``first`` is awaited before, e.g. to cancel the parts in flight.
+        The caller raises ``cause``: an abort failing only adds a note to it.
         """
+        await self._requests.cancel_all()
         try:
-            if first is not None:
-                await first
             await self._abort_multipart_upload()
         except Exception as abort_error:
-            # The first error is what the caller acts on: the abort's failure
-            # only adds that parts may stay on the storage.
-            error.add_note(
+            # The cause is what the caller acts on: the abort's failure only
+            # adds that parts may stay on the storage.
+            cause.add_note(
                 f"Aborting the upload of {self.path!r} failed: {abort_error!r}"
             )
 
@@ -734,9 +752,8 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
             if not self._forced:
                 # A forced flush finished the file: nothing is left to undo.
                 self._buffer = bytearray()
-                await self._requests.cancel_all()
                 if self._multipart:
-                    await self._abort_noting(exc)
+                    await self._cancel_multipart_upload(exc)
         finally:
             await self._requests.cancel_all()
             io.RawIOBase.close(self)
@@ -754,6 +771,7 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         small = len(buffer) < self.min_multipart_size
         if not self._multipart and small and not closing:
             return
+
         # Below min_multipart_size, or no bigger than the smallest part, one
         # request uploads it, where a multipart upload would add its start and
         # completion. A bigger file goes in parts, sent at once, which a storage
@@ -769,9 +787,11 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
             await self._upload_all(bytes(buffer))
             buffer.clear()
             return
+
         block = min(self._block_size(len(buffer) if closing else self._pos), cap)
         offset = self._pos - len(buffer)
         taken = 0
+
         try:
             while taken < len(buffer):
                 remaining = len(buffer) - taken
@@ -784,18 +804,20 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                     size = min(remaining, cap)
                 else:
                     break
+
                 if not self._multipart:
                     try:
                         await self._start_multipart_upload()
                     except BaseException as error:
                         # It may have started a session on the storage first.
-                        await self._abort_noting(error)
+                        await self._cancel_multipart_upload(error)
                         raise
                     self._multipart = True
                 elif self.sequential:
                     # Waiting holds no permit: files sharing the limit go on.
                     await asyncio.wait([self._requests.queue[-1].task])
                     self._raise_failed_upload()
+
                 start = offset + taken
                 await self._requests.send(
                     start,

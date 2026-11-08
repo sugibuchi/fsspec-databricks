@@ -275,6 +275,7 @@ class SyncFileAdapter:
                 while not call.done():
                     with contextlib.suppress(asyncio.CancelledError):
                         await asyncio.wait([call])
+
                 if not call.cancelled():
                     call.exception()  # Retrieved, as the cancellation wins.
                 raise

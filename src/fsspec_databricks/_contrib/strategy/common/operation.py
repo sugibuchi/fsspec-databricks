@@ -10,9 +10,9 @@ is stopped, through the methods of the interface's `OperationHandler`.
 From what its callers use to what that builds on:
 
 - `Operation` is what a strategy returns.
-- `_collect` runs an operation to its end, returning all it yielded.
-- `_collected` does so for an fsspec call, as the call's monitors watch it.
-- `_watched` runs an operation for an fsspec call, yielding its items, telling
+- `_collect_with_errors` runs an operation to its end, returning all it yielded.
+- `_collect_with_monitors` does so for an fsspec call, as the call's monitors watch it.
+- `_with_monitors` runs an operation for an fsspec call, yielding its items, telling
   the monitors of the `monitoring` blocks around it, and fsspec's ``callback=``.
 - `_Counting` is the monitor fsspec's ``callback=`` is told through.
 
@@ -121,12 +121,14 @@ class Operation(OperationHandler, Generic[T, S]):
     async def __anext__(self) -> T | Exception:
         if self._done:
             raise StopAsyncIteration
+
         if self._steps is None:
             if self._cancel_requests:
                 # As a task cancelled before it runs: nothing is sent.
                 self._done = True
                 raise StopAsyncIteration
             self._steps = self._run(self)
+
         try:
             return await anext(self._steps)
         except BaseException:
@@ -172,6 +174,7 @@ class Operation(OperationHandler, Generic[T, S]):
         """
         if self._done:
             return
+
         self._cancel_requests += 1
         try:
             if self._steps is not None:
@@ -186,33 +189,7 @@ class Operation(OperationHandler, Generic[T, S]):
         await self.aclose()
 
 
-async def _collect(
-    items: Operation[Any, Any] | AsyncGenerator[Any],
-) -> tuple[list[Any], list[Exception]]:
-    """Run an operation to its end, and return what it yielded but errors, and its errors.
-
-    Both lists are in the order yielded, which is the order the storage
-    answered: callers sort, as fsspec's ``_find`` and ``_glob`` do.
-    """
-    found: list[Any] = []
-    errors: list[Exception] = []
-    async with aclosing(items):
-        async for item in items:
-            if isinstance(item, Exception):
-                errors.append(item)
-            else:
-                found.append(item)
-    return found, errors
-
-
-async def _collected(
-    operation: Operation[Any, Any], call: Call, callback: Any = None
-) -> tuple[list[Any], list[Exception]]:
-    """`_collect` of an operation, as its monitors watch it."""
-    return await _collect(_watched(operation, call, callback))
-
-
-async def _watched(
+async def _with_monitors(
     operation: Operation[Any, Any], call: Call, callback: Any = None
 ) -> AsyncGenerator[Any]:
     """Run an operation for a call, yielding its items, as its monitors watch it.
@@ -224,15 +201,18 @@ async def _watched(
     monitors = current_monitors()
     if callback is not None:
         monitors = (*monitors, _Counting(callback))
+
     error: BaseException | None = None
     try:
         async with operation:
             for monitor in monitors:
                 await monitor.started(call, operation.state, operation)
+
             async for item in operation:
                 for monitor in monitors:
                     await monitor.yielded(call, item, operation.state, operation)
                 yield item
+
         if operation.cancelled():
             raise CallCancelled(call, operation.state)
     except GeneratorExit:
@@ -244,6 +224,34 @@ async def _watched(
     finally:
         for monitor in monitors:
             await monitor.ended(call, error, operation.state, operation)
+
+
+async def _collect_with_errors(
+    items: Operation[Any, Any] | AsyncGenerator[Any],
+) -> tuple[list[Any], list[Exception]]:
+    """Run an operation to its end, and return what it yielded but errors, and its errors.
+
+    Both lists are in the order yielded, which is the order the storage
+    answered: callers sort, as fsspec's ``_find`` and ``_glob`` do.
+    """
+    found: list[Any] = []
+    errors: list[Exception] = []
+
+    async with aclosing(items):
+        async for item in items:
+            if isinstance(item, Exception):
+                errors.append(item)
+            else:
+                found.append(item)
+
+    return found, errors
+
+
+async def _collect_with_monitors(
+    operation: Operation[Any, Any], call: Call, callback: Any = None
+) -> tuple[list[Any], list[Exception]]:
+    """`_collect_with_errors` of an operation, as its monitors watch it."""
+    return await _collect_with_errors(_with_monitors(operation, call, callback))
 
 
 class _Counting(Monitor):

@@ -65,8 +65,10 @@ def _roots_of(
     """
     if not matches and not errors:
         raise FileNotFoundError(pattern)
+
     folders: dict[str, None] = {}
     files: list[str] = []
+
     # Sorted, a folder comes before all in it.
     for entry in sorted(matches, key=lambda e: e["name"]):
         name = entry["name"].rstrip("/")
@@ -77,6 +79,7 @@ def _roots_of(
             folders[name] = None
         else:
             files.append(name)
+
     return _Roots(list(folders), files, errors)
 
 
@@ -111,6 +114,7 @@ class _Queue(Generic[_T]):
                 return False
             self.waiter = None  # Its permit is now this queue's.
             return True
+
         if self.limit.locked():
             return False
         await self.limit.acquire()  # A permit is free: this does not wait.
@@ -133,6 +137,7 @@ class _Queue(Generic[_T]):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.running.clear()
+
         waiter, self.waiter = self.waiter, None
         if waiter is not None:
             waiter.cancel()
@@ -152,12 +157,15 @@ class _Jobs(ABC):
         # The source's requests, the jobs, and a pattern's glob share it.
         self.concurrency_limit = concurrency_limit
         self.jobs: _Queue[_Job] = _Queue(concurrency_limit)
+
         # The queue's own, which the subclasses queue their jobs in.
         self.waiting = self.jobs.waiting
         self.running = self.jobs.running
+
         self.op = op
         self.errors = 0
         self.current: str | None = None
+
         # The source's next item, awaited along with the jobs.
         self.next: asyncio.Task[Any] | None = None
 
@@ -202,12 +210,14 @@ class _Jobs(ABC):
         roots = await self.prepare()
         if roots is None:
             return
+
         try:
             if roots.errors:
                 self.errors += len(roots.errors)
                 self.op.state = self.state()
                 for error in roots.errors:
                     yield error
+
             async with aclosing(self.steps(roots)) as steps:
                 async for outcomes in steps:
                     self.op.state = self.state()
@@ -224,12 +234,15 @@ class _Jobs(ABC):
         the jobs running, as their outcome would otherwise be unknown.
         """
         source = self.source(roots)
+
         try:
             yield await self.begin(roots, source)
+
             while True:
                 await self.start()
                 if not (pending := self.pending()):
                     break
+
                 done, _ = await asyncio.wait(
                     pending, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -242,6 +255,7 @@ class _Jobs(ABC):
                 done, _ = await asyncio.wait(self.running)
                 for task in done:
                     self.finish(task)
+
             raise
         finally:
             # The source only reads, so cancelling it loses nothing. The jobs
@@ -249,6 +263,7 @@ class _Jobs(ABC):
             if self.next is not None:
                 self.next.cancel()
                 await asyncio.gather(self.next, return_exceptions=True)
+
             await self.jobs.close()
             if source is not None:
                 await source.aclose()
@@ -263,14 +278,17 @@ class _Jobs(ABC):
         """Queue the files' jobs, and take the source's first item: the first step."""
         for path in roots.files:
             self.file_root(path)
+
         if source is None:
             self.exhausted()
             return []
+
         try:
             first = await anext(source)
         except StopAsyncIteration:
             self.exhausted()
             return []
+
         self.next = asyncio.ensure_future(anext(source))
         return self.fed(first)
 
@@ -282,12 +300,14 @@ class _Jobs(ABC):
             return self.finish(task)
         if task is not self.next or source is None:
             return None  # The waiter's permit, which start takes.
+
         self.next = None
         try:
             item = task.result()
         except StopAsyncIteration:
             self.exhausted()
             return None
+
         self.next = asyncio.ensure_future(anext(source))
         return self.fed(item)
 
@@ -309,10 +329,12 @@ class _Jobs(ABC):
         """Handle a job's task done, counting its errors, and return what to yield."""
         job = self.running.pop(task)
         self.current = job.source or job.destination
+
         try:
             task.result()
         except Exception as e:
             outcome = self.failed(job, e)
             self.errors += sum(isinstance(o, Exception) for o in outcome)
             return outcome
+
         return self.done(job)

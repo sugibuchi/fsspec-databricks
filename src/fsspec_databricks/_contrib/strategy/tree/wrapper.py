@@ -18,6 +18,8 @@ from ..common.wrapper import _AsyncFileSystemWrapper, _SyncFileSystemWrapper
 from .filesystem import TreeFileSystem
 
 if TYPE_CHECKING:
+    import asyncio
+
     from fsspec.asyn import AsyncFileSystem
     from fsspec.spec import AbstractFileSystem
 
@@ -42,10 +44,12 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
     ----------
     fs : AsyncFileSystem
         The filesystem to wrap.
-    operation_concurrency : int
+    operation_concurrency : int or asyncio.Semaphore
         The requests of the strategies at a time.
-    io_concurrency : int
+        A semaphore is used as it is, shared with what else holds it.
+    io_concurrency : int or asyncio.Semaphore
         The data methods' calls at a time, such as ``_cat_file``.
+        A semaphore is used as it is, shared with what else holds it.
     storage_profile : StorageProfile
         What the storage does. ``StorageProfile()`` if it is unknown.
     **kwargs
@@ -71,8 +75,8 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
         self,
         fs: AsyncFileSystem,
         *,
-        operation_concurrency: int,
-        io_concurrency: int,
+        operation_concurrency: int | asyncio.Semaphore,
+        io_concurrency: int | asyncio.Semaphore,
         storage_profile: StorageProfile,
         **kwargs: Any,
     ) -> None:
@@ -83,6 +87,7 @@ class AsyncTreeWrapper(_AsyncFileSystemWrapper, TreeFileSystem):
             storage_profile=storage_profile,
             **kwargs,
         )
+
         # Optional, as on a TreeFileSystem: left None, rm walks every folder.
         rm_tree = getattr(fs, "_rm_tree", None)
         if rm_tree is not None:
@@ -107,10 +112,12 @@ class SyncTreeWrapper(_SyncFileSystemWrapper, TreeFileSystem):
     ----------
     fs : AbstractFileSystem
         The filesystem to wrap.
-    operation_concurrency : int
+    operation_concurrency : int or asyncio.Semaphore
         The requests of the strategies at a time, each in a thread.
-    io_concurrency : int
+        A semaphore is used as it is, shared with what else holds it.
+    io_concurrency : int or asyncio.Semaphore
         The data methods' calls at a time, such as ``_cat_file``.
+        A semaphore is used as it is, shared with what else holds it.
     storage_profile : StorageProfile
         What the storage does. ``StorageProfile()`` if it is unknown.
     **kwargs
@@ -136,8 +143,8 @@ class SyncTreeWrapper(_SyncFileSystemWrapper, TreeFileSystem):
         self,
         fs: AbstractFileSystem,
         *,
-        operation_concurrency: int,
-        io_concurrency: int,
+        operation_concurrency: int | asyncio.Semaphore,
+        io_concurrency: int | asyncio.Semaphore,
         storage_profile: StorageProfile,
         **kwargs: Any,
     ) -> None:

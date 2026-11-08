@@ -94,6 +94,7 @@ def monitored(
     """
     if isinstance(fs, Monitored):
         return fs
+
     table = known_implementations if implementations is None else implementations
     for cls in type(fs).__mro__:
         entry = table.get(f"{cls.__module__}.{cls.__qualname__}")
@@ -110,6 +111,7 @@ def monitored(
             "io_concurrency": 1,
             "storage_profile": StorageProfile(),
         }
+
     wrapper = _wrapper(entry["type"], entry["async"])
     options: dict[str, Any] = {
         "operation_concurrency": entry["operation_concurrency"],

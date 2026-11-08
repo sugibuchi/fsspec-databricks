@@ -58,6 +58,7 @@ async def _infos(
 
     try:
         await start()
+
         while pending := requests.pending():
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             entries = []
@@ -68,8 +69,10 @@ async def _infos(
                     entries.append((path, task.result()))
                 except FileNotFoundError:
                     continue
+
             # Start the next before yielding, so that they run meanwhile.
             await start()
+
             for path, entry in entries:
                 found.add(entry["name"].rstrip("/"))
                 state = op.state
@@ -123,6 +126,7 @@ class _Search:
         maxdepth: int | None,
     ) -> None:
         self.withdirs = withdirs
+
         # Split as fsspec does: the literal folder before the first wildcard,
         # and the pattern below it.
         first_magic = min(i for i in (path.find(c) for c in "*?[") if i >= 0)
@@ -132,6 +136,7 @@ class _Search:
         self.start = len(self.root) + 1 if self.root else 0
         self.depth = _depth(path, relative, maxdepth)
         self.prefix = _Prefix(relative.split("/"))
+
         # The matches come from fsspec's own regular expression, and the prefix
         # only prunes. So pruning can never change them.
         regex = glob_translate(path + ("/" if ends_with_sep else ""))
@@ -158,6 +163,7 @@ class _Search:
         is_dir = entry["type"] == "directory"
         if is_dir and not self.withdirs:
             return False
+
         name = entry["name"].rstrip("/")
         level = self._level(name)
         if (
@@ -166,6 +172,7 @@ class _Search:
             or (self.depth is not None and level > self.depth)
         ):
             return False
+
         return (
             self.matches(name + "/" if is_dir and self.slash_dirs else name) is not None
         )
@@ -174,6 +181,7 @@ class _Search:
         name = entry["name"].rstrip("/")
         if self.root.startswith(name + "/"):
             return True  # On the way down to the root.
+
         level = self._level(name)
         if level is None or (self.depth is not None and level >= self.depth):
             return False

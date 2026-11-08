@@ -169,9 +169,11 @@ class TransactionFile(io.RawIOBase):
 
     def __init__(self, transaction: FileTransaction) -> None:
         super().__init__()
+
         self.transaction = transaction
         self.path = transaction.path
         self._file: Any = transaction.start_staging()
+
         # None while undecided, then "committed" or "discarded". A commit that
         # raised leaves "commit failed": undecided still, but only discardable.
         self._outcome: Literal["committed", "discarded", "commit failed"] | None = None
@@ -192,6 +194,7 @@ class TransactionFile(io.RawIOBase):
         if self._staging != "open":
             # Force-flushed: the staged file is finished, and may be closed.
             raise ValueError(f"Force-flushed, can only close: {self.path}")
+
         method = getattr(self._file, name, None)
         if method is None:
             raise io.UnsupportedOperation(f"{name} on {self.path}")
@@ -261,6 +264,7 @@ class TransactionFile(io.RawIOBase):
             # Open, the file is undecided: commit and discard close it.
             self._end_staging()
             return
+
         # io.IOBase.close flushes after end_staging or discard closed the file,
         # or after a discard that failed: a decided file sends nothing.
         if (
@@ -270,6 +274,7 @@ class TransactionFile(io.RawIOBase):
             or getattr(self._file, "closed", False)
         ):
             return
+
         if (flush := getattr(self._file, "flush", None)) is not None:
             flush()
 
@@ -309,9 +314,11 @@ class TransactionFile(io.RawIOBase):
             # A transaction may have spent what it commits from, e.g. a buffer
             # or an aborted upload: trying again could show a wrong file.
             raise ValueError(f"Committing a file whose commit failed: {self.path}")
+
         self.close()
         if self._staging != "ended":
             raise ValueError(f"Committing a file whose writing failed: {self.path}")
+
         # Set before, so that a commit failing midway is never retried.
         self._outcome = "commit failed"
         self.transaction.commit()
@@ -323,6 +330,7 @@ class TransactionFile(io.RawIOBase):
             return
         if self._outcome == "committed":
             raise ValueError(f"Discarding a committed file: {self.path}")
+
         self._outcome = "discarded"
         try:
             self.transaction.discard()
@@ -341,16 +349,19 @@ class TransactionFile(io.RawIOBase):
         # A file whose commit failed is undecided too: what it staged stays.
         if getattr(self, "_outcome", "unstaged") not in (None, "commit failed"):
             return
+
         warnings.warn(
             f"Undecided file {self.path!r}, discarded",
             ResourceWarning,
             stacklevel=1,  # A finalizer has no caller to point at.
             source=self,
         )
+
         if sys.is_finalizing():
             # A discard may wait on a loop whose thread is frozen now: what was
             # staged stays, as if the process had died.
             return
+
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -429,6 +440,7 @@ class TempPathTransaction(FileTransaction):
         temp_path: str | None = None,
     ) -> None:
         super().__init__(path)
+
         self.open_file = open_file
         self.rename = rename
         self.delete = delete
@@ -556,8 +568,10 @@ class AdaptiveWritableTransaction(FileTransaction):
         self, file: AdaptiveWritableFile, *, hold_last_part: bool = False
     ) -> None:
         super().__init__(file.path)
+
         self.file = file
         self.hold_last_part = hold_last_part
+
         # The request making the file visible, once closing held it back.
         self._last: Callable[[], Awaitable[None]] | None = None
         self._multipart = False
@@ -567,6 +581,7 @@ class AdaptiveWritableTransaction(FileTransaction):
         file = self.file
         complete, upload_all = file._complete_multipart_upload, file._upload_all
         upload_part = file._upload_part
+
         # The last part's upload, once closing held it back.
         held: list[Callable[[], Awaitable[Any]]] = []
 
@@ -581,6 +596,7 @@ class AdaptiveWritableTransaction(FileTransaction):
         async def hold_completion(parts: list[Any]) -> None:
             if self._discarding:
                 raise _Discarded  # The file aborts the upload.
+
             self._multipart = True
 
             async def last() -> None:
@@ -597,6 +613,7 @@ class AdaptiveWritableTransaction(FileTransaction):
         file._upload_all = hold_upload  # type: ignore[method-assign]
         if self.hold_last_part:
             file._upload_part = hold_last_part  # type: ignore[method-assign]
+
         return file
 
     def end_staging(self) -> None:
@@ -620,6 +637,7 @@ class AdaptiveWritableTransaction(FileTransaction):
     def discard(self) -> None:
         self._discarding = True
         self._last = None
+
         if not self.file.closed:
             with contextlib.suppress(_Discarded):
                 self.file.close()

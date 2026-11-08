@@ -118,6 +118,7 @@ def tree_find(
             folder_root=withdirs and bool(root),
         )
         state = op.state
+
         async with aclosing(steps):
             async for listing in steps:
                 found = [
@@ -130,8 +131,10 @@ def tree_find(
                     folders_listed=state.folders_listed + (listing.depth > 0),
                     found=state.found + len(found),
                 )
+
                 if listing.error is not None:
                     yield listing.error
+
                 for entry in found:
                     yield entry
 
@@ -174,6 +177,7 @@ async def _find_listings(
         concurrency_limit=concurrency_limit,
         stopping=stopping,
     )
+
     async with aclosing(listings):
         try:
             root_listing = await anext(listings)
@@ -186,10 +190,13 @@ async def _find_listings(
                     entry = await info(root)
                 yield _Listing(root, 0, [entry])
             return
+
         yield root_listing
+
         if folder_root and not (stopping and stopping()):
             async with concurrency_limit:
                 entry = await info(root)
             yield _Listing(root, 0, [entry])
+
         async for listing in listings:
             yield listing

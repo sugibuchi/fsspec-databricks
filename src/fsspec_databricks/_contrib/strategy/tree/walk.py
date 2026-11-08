@@ -141,6 +141,7 @@ def tree_walk(
             stopping=op.cancelling,
         )
         state = op.state
+
         async with aclosing(listings):
             async for listing in listings:
                 op.state = state = WalkState(
@@ -149,6 +150,7 @@ def tree_walk(
                     folders_listed=state.folders_listed + 1,
                     found=state.found + len(listing.entries),
                 )
+
                 if listing.error is None:
                     yield _triples(listing.folder, listing.entries, detail=True)
                 elif on_error is None:
@@ -208,6 +210,7 @@ async def _listings(
     Each listing holds a permit of ``concurrency_limit`` while it runs.
     """
     _check_maxdepth(maxdepth)
+
     roots = {_trim(p) for p in ([path] if isinstance(path, str) else path)}
     # The folders to list, each with its depth.
     folders: _Queue[tuple[str, int]] = _Queue(concurrency_limit)
@@ -220,6 +223,7 @@ async def _listings(
 
     folders.waiting.extend((root, 1) for root in sorted(roots))
     await start()
+
     try:
         while pending := folders.pending():
             done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
@@ -230,14 +234,17 @@ async def _listings(
                 listing = _listing(task, folder, depth, roots, raise_on_error)
                 subfolders = _subfolders(listing, maxdepth, descend)
                 folders.waiting.extend((s, depth + 1) for s in subfolders)
+
                 # Start the next listings before yielding, so that they run
                 # while the caller handles this one.
                 await start()
+
                 if bottom_up is None:
                     yield listing
                 else:
                     for ready in bottom_up.add(listing, subfolders):
                         yield ready
+
             await start()
     finally:
         await folders.close()
@@ -259,16 +266,19 @@ def _listing(
         # another listing.
         if folder in roots or raise_on_error:
             raise
+
         # Yielded among folders, the error must tell its folder itself: in its
         # note for people, and as an attribute for code, e.g. fsspec's walk.
         e.add_note(f"Listing {folder!r} failed.")
         e.folder = folder  # type: ignore[attr-defined]
         return _Listing(folder, depth, [], e)
+
     if folder in roots and any(
         e["name"].rstrip("/") == folder and e["type"] != "directory" for e in entries
     ):
         # fsspec's _ls of a file lists the file itself.
         raise NotADirectoryError(folder)
+
     # Some storages list a folder within itself, e.g. as its marker object.
     return _Listing(
         folder, depth, [e for e in entries if e["name"].rstrip("/") != folder]
@@ -285,6 +295,7 @@ def _subfolders(
         maxdepth is not None and listing.depth >= maxdepth
     ):
         return []
+
     # Each once, though a storage may list a folder twice, e.g. with and without
     # its marker object: bottom up counts on it.
     return list(
@@ -310,8 +321,10 @@ class _BottomUp:
             self.held[listing.folder] = listing, len(subfolders)
             self.parents.update(dict.fromkeys(subfolders, listing.folder))
             return []
+
         ready = [listing]
         folder = listing.folder
+
         # A subtree done may complete its parent's, and so on up.
         while (parent := self.parents.pop(folder, None)) is not None:
             held, remaining = self.held[parent]
@@ -321,4 +334,5 @@ class _BottomUp:
             del self.held[parent]
             ready.append(held)
             folder = parent
+
         return ready

@@ -134,6 +134,7 @@ def tree_glob(
     data/sales/2024/part-0.parquet
     """
     _check_maxdepth(maxdepth)
+
     literals: list[str] = []
     searches: list[_Search] = []
     for pattern in [path] if isinstance(path, str) else path:
@@ -149,6 +150,7 @@ def tree_glob(
         found: set[str] = set()
         async for entry in _infos(info, literals, concurrency_limit, op, found):
             yield entry
+
         for root, group in _walks(searches):
             if op.cancelling():
                 return
@@ -184,6 +186,7 @@ async def _walk(
 ) -> AsyncGenerator[dict[str, Any] | Exception]:
     """The matches of patterns in one tree, walked from ``root``."""
     depths = [s.depth_from(root) for s in searches]
+
     # As fsspec's _glob: a pattern under a missing folder, or a file, matches
     # nothing. Its find includes the root folder itself, which few patterns
     # match.
@@ -198,6 +201,7 @@ async def _walk(
         folder_root=bool(root)
         and any(s.matched({"name": root, "type": "directory"}) for s in searches),
     )
+
     async with aclosing(steps):
         async for listing in steps:
             for match in _matches_in(listing, searches, op, found):
@@ -222,6 +226,7 @@ def _matches_in(
             # A match of a pattern without wildcards, found already.
             and e["name"].rstrip("/") not in found
         ]
+
     op.state = GlobState(
         errors=state.errors + (listing.error is not None),
         current=listing.folder,
@@ -229,4 +234,5 @@ def _matches_in(
         folders_listed=state.folders_listed + (listing.depth > 0),
         matched=state.matched + len(matches) - (listing.error is not None),
     )
+
     return matches

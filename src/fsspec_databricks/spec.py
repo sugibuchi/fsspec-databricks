@@ -10,7 +10,7 @@ from databricks.sdk.service.workspace import Language
 from fsspec.asyn import AsyncFileSystem
 from fsspec_alt_strategies_common.profile import StorageProfile
 
-from ._contrib.strategy.routing import AsyncRoutingFileSystem
+from ._contrib.strategy.common.routing import AsyncRoutingFileSystem
 from ._contrib.strategy.tree.filesystem import TreeFileSystem
 from ._contrib.strategy.tree.transfer import tree_transfer
 from ._contrib.strategy.tree.wrapper import SyncTreeWrapper
@@ -367,7 +367,8 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        # _prepare_route has asked, except before a sync call of an async router: then this blocks.
+        # Only legacy DBFS paths need the workspace setting. The first asks it in a blocking call,
+        # on the loop too, and the answer is cached for the instance.
         elif self.legacy_dbfs_enabled:
             return self._legacy_fs, path
         raise file_not_found_error(path)
@@ -376,14 +377,6 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
         if self._uses_local_fs:
             return from_local_path(path, self.legacy_dbfs_local_root)
         return path
-
-    async def _prepare_route(self, path: str) -> None:
-        # Only legacy DBFS paths need the workspace setting, asked once in a thread and then cached.
-        if self._legacy_dbfs_enabled is None and fs_type(path) not in (
-            FileSystemType.Workspace,
-            FileSystemType.Volume,
-        ):
-            await asyncio.to_thread(lambda: self.legacy_dbfs_enabled)
 
     async def _roots(self, path: str) -> list[dict[str, Any]]:
         if not await asyncio.to_thread(lambda: self.legacy_dbfs_enabled):

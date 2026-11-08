@@ -19,7 +19,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from ..common.jobs import _Jobs, _roots_of
-from ..common.operation import _collect
+from ..common.operation import _collect_with_errors
 from .glob import tree_glob
 from .walk import _listings
 
@@ -40,7 +40,7 @@ async def _expand(
     concurrency_limit: asyncio.Semaphore,
 ) -> _Roots:
     """The roots matching glob patterns, found with `tree_glob`."""
-    matches, errors = await _collect(
+    matches, errors = await _collect_with_errors(
         tree_glob(pattern, ls=ls, info=info, concurrency_limit=concurrency_limit)
     )
     return _roots_of(matches, errors, pattern)
@@ -57,8 +57,10 @@ class _TreeJobs(_Jobs):
         op: Operation[Any, Any],
     ) -> None:
         super().__init__(concurrency_limit, op)
+
         self.ls = ls
         self.info = info
+
         # The paths in each folder listed that are not done yet, for strategies
         # finishing a folder after all in it, as a deletion does. A folder with
         # a failure in it never reaches zero, and nor do the folders above it.

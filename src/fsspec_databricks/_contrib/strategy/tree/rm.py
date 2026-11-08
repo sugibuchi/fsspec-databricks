@@ -182,10 +182,12 @@ class _Deletion(_TreeJobs):
         op: Operation[str, RmState],
     ) -> None:
         super().__init__(ls, info, concurrency_limit, op)
+
         self.path = path
         self.rm_file = rm_file
         self.rm_folder = rm_folder
         self.rm_tree = rm_tree
+
         # The roots deleted whole, yielded with the first step.
         self.whole: list[str] = []
         self.implicit_folders = bool(profile.implicit_folders)
@@ -201,13 +203,16 @@ class _Deletion(_TreeJobs):
         else:
             roots = _Roots([self.path])
             known = False  # Of unknown kind, until asked.
+
         if self.rm_tree is None or self.op.cancelling():
             return roots
+
         sources = list(roots.folders)
         kinds = await asyncio.gather(*(self.delete_whole(s, known) for s in sources))
         self.whole = [s for s, k in zip(sources, kinds, strict=True) if k == "whole"]
         self.folders_deleted = len(self.whole)
         files = [s for s, k in zip(sources, kinds, strict=True) if k == "file"]
+
         return _Roots(
             [s for s, k in zip(sources, kinds, strict=True) if k == "walk"],
             [*roots.files, *files],
@@ -226,10 +231,12 @@ class _Deletion(_TreeJobs):
                 async with self.concurrency_limit:
                     if (await self.info(folder))["type"] != "directory":
                         return "file"
+
             async with self.concurrency_limit:
                 await self.rm_tree(folder)  # type: ignore[misc]
         except Exception:
             return "walk"
+
         return "whole"
 
     async def begin(
@@ -253,10 +260,12 @@ class _Deletion(_TreeJobs):
 
     def add(self, listing: _Listing) -> None:
         self.track(listing)
+
         for entry in listing.entries:
             if entry["type"] != "directory":
                 self.files_found += 1
                 self.waiting.append(_Job("file", entry["name"].rstrip("/")))
+
         if not listing.entries:
             self.remove(listing.folder)
 
@@ -270,6 +279,7 @@ class _Deletion(_TreeJobs):
             self.folders_deleted += 1
         else:
             self.files_deleted += 1
+
         self.after(job.source)
         return [job.source]
 
@@ -278,6 +288,7 @@ class _Deletion(_TreeJobs):
             # Already gone: an object store's folder, or deleted by another.
             self.after(job.source)
             return []
+
         # Yielded among paths, the error must tell its path itself.
         error.add_note(f"Deleting {job.source!r} failed.")
         return [error]

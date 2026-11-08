@@ -52,10 +52,13 @@ class _Placing:
         """
         self.destination_info = destination_info or self.info
         self.same_storage = same_storage
+
         self.prefix = ""
         self.base = ""
+
         # For a list: where each root goes, by the root.
         self.places: dict[str, str] = {}
+
         # The destinations found missing, which need no asking again, e.g.
         # by a move renaming a root onto one.
         self.missing: set[str] = set()
@@ -67,6 +70,7 @@ class _Placing:
     async def prepare(self) -> _Roots | None:
         """Set where the paths go, as fsspec's ``copy`` places them."""
         destination = _trim(self.path2)
+
         if not isinstance(self.path1, str):
             roots = await self._place(destination)
             sources = [*roots.folders, *roots.files]
@@ -88,6 +92,7 @@ class _Placing:
             sources = [root]
             self.prefix = root
             self.base = await self._base(root, destination)
+
         for source in sources if self.same_storage else ():
             target = self.target(source)
             if target == source and len(sources) == 1:
@@ -96,6 +101,7 @@ class _Placing:
                 raise ValueError(
                     f"Cannot {self.verb} {source!r} into itself: {target!r}"
                 )
+
         return roots
 
     async def _place(self, destination: str) -> _Roots:
@@ -109,6 +115,7 @@ class _Placing:
         folders = set(roots.folders)
         placed: dict[str, str] = {}
         errors = list(roots.errors)
+
         for source in sorted([*roots.folders, *roots.files]):
             name = source.rpartition("/")[2]
             target = f"{destination}/{name}" if destination else name
@@ -120,8 +127,10 @@ class _Placing:
                 )
                 errors.append(error)
                 continue
+
             placed[target] = source
             self.places[source] = target
+
         return _Roots(
             [s for s in self.places if s in folders],
             [s for s in self.places if s not in folders],
@@ -139,8 +148,10 @@ class _Placing:
             except FileNotFoundError:
                 self.missing.add(destination)
                 into = False
+
         if not into or self.path1.endswith("/"):
             return destination
+
         name = root.rsplit("/", 1)[-1]
         return f"{destination}/{name}" if destination else name
 
@@ -152,6 +163,7 @@ class _Placing:
             while root not in self.places and "/" in root:
                 root = root.rpartition("/")[0]
             return self.places[root] + path[len(root) :]
+
         if self.prefix:
             return self.base + path[len(self.prefix) :]
         return f"{self.base}/{path}" if self.base else path

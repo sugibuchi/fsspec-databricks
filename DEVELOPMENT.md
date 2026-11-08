@@ -327,7 +327,7 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 ### Routing
 ### Routing
 
-`DatabricksFileSystem` subclasses the library's `AsyncRoutingFileSystem`, in `routing.py` of the copy. The library
+`DatabricksFileSystem` subclasses the library's `AsyncRoutingFileSystem`, in `common/routing.py` of the copy. The library
 passes each call on, and `spec.py` only says where each path goes:
 
 - `_route(path)` gives the backend and its path: the local file system and the local path in a workspace with
@@ -348,15 +348,16 @@ The library's router does the rest:
 - A move between backends deletes each source file once it is copied, then the source folders.
 
 No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
-`_same_storage` and `_server_copy`.
+`_server_copy`, and a copy within one backend is its own only when both paths route to it.
 
 Whether legacy DBFS is enabled is checked once:
 
 - with the local file system, by whether `legacy_dbfs_local_root` exists;
 - otherwise, from the workspace setting `disable_legacy_dbfs`.
 
-`_prepare_route` asks the workspace setting in a thread before the first legacy DBFS path is routed. A sync call of an
-async router, such as `open`, cannot await it, so `_route` asks in a blocking call.
+`_route` is sync, so it asks the workspace setting in a blocking call when it first routes a legacy DBFS path. The
+answer is cached on the instance. On the event loop, that first call blocks the loop for one SDK request. `_roots`
+asks it in a thread instead.
 
 The backends are created on first use with the router's `_backend`, with the file system's client, config and
 options. `close()` closes them.
@@ -564,7 +565,7 @@ Their shared interface is not copied. It is the dependency `fsspec-alt-strategie
 
 To refresh the copy:
 
-1. Copy `common/`, `files/`, `tree/`, `__init__.py`, `monitor.py` and `routing.py` over the old ones.
+1. Copy `common/`, `files/`, `tree/`, `__init__.py` and `monitor.py` over the old ones.
    Delete the modules the library no longer has.
 2. Run `uv lock --upgrade-package fsspec-alt-strategies-common`, so that the interface matches.
 3. Run the tests.

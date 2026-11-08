@@ -116,6 +116,7 @@ def tree_du(
             file_root=True,
         )
         state = op.state
+
         async with aclosing(steps):
             async for listing in steps:
                 files = [e for e in listing.entries if e["type"] != "directory"]
@@ -127,8 +128,10 @@ def tree_du(
                     files=state.files + len(files),
                     size=state.size + sum(e.get("size") or 0 for e in files),
                 )
+
                 if listing.error is not None:
                     yield listing.error
+
                 for entry in files:
                     yield entry
 

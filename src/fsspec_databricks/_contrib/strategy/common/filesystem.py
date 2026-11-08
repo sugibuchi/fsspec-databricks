@@ -51,8 +51,9 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     ``operation_limit`` bounds the requests of the strategies, such as
     listings, deletions and copies. ``io_limit`` bounds the reads and writes of
     data: ``open_async`` gives it to the files it opens, as their
-    ``concurrency_limit``. Each is an `asyncio.Semaphore`, its own per
-    instance.
+    ``concurrency_limit``. Each is an `asyncio.Semaphore`: the one given as
+    the concurrency, so that several filesystems share it, or else a new one,
+    of the number given.
 
     ``storage_profile``, a class field, tells the strategies what the storage
     does. A subclass must set it: one whose storage is unknown says so, with
@@ -68,16 +69,26 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     def __init__(
         self,
         *args: Any,
-        operation_concurrency: int,
-        io_concurrency: int,
+        operation_concurrency: int | asyncio.Semaphore,
+        io_concurrency: int | asyncio.Semaphore,
         **kwargs: Any,
     ) -> None:
-        if operation_concurrency < 1:
+        # A semaphore given is shared. A number makes a new one.
+        if isinstance(operation_concurrency, asyncio.Semaphore):
+            operation_limit = operation_concurrency
+        elif operation_concurrency < 1:
             raise ValueError(
                 f"operation_concurrency must be at least 1: {operation_concurrency}"
             )
-        if io_concurrency < 1:
+        else:
+            operation_limit = asyncio.Semaphore(operation_concurrency)
+
+        if isinstance(io_concurrency, asyncio.Semaphore):
+            io_limit = io_concurrency
+        elif io_concurrency < 1:
             raise ValueError(f"io_concurrency must be at least 1: {io_concurrency}")
+        else:
+            io_limit = asyncio.Semaphore(io_concurrency)
 
         super().__init__(*args, **kwargs)
 
@@ -89,20 +100,20 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
 
         self.operation_concurrency = operation_concurrency
         self.io_concurrency = io_concurrency
-        self.operation_limit = asyncio.Semaphore(operation_concurrency)
-        self.io_limit = asyncio.Semaphore(io_concurrency)
+        self.operation_limit = operation_limit
+        self.io_limit = io_limit
 
     def _unwrapped(self) -> AsyncFileSystem:
         """The filesystem a monitor is told of: this one, or the one a wrapper wraps."""
         return self
 
-    def _plain(self, path: str | Sequence[str]) -> Any:
+    def _strip_only_protocol(self, path: str | Sequence[str]) -> Any:
         """A path, or paths, without the protocol, keeping a trailing "/".
 
         The strategies take paths without a protocol. A trailing "/" means
         something to some, e.g. a glob of folders only, or a copy into a folder.
         """
-        return _plain(self, path)
+        return _strip_only_protocol(self, path)
 
     async def _single_file(self, path: str | Sequence[str]) -> bool:
         """Whether ``path`` names one existing file, with no pattern.
@@ -114,10 +125,12 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         """
         if not isinstance(path, str) or has_magic(path) or path.endswith("/"):
             return False
+
         try:
             entry = await self._info(self._strip_protocol(path))
         except FileNotFoundError:
             return False
+
         return entry["type"] != "directory"
 
     async def _cat_file(
@@ -129,6 +142,7 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
             if start is not None:
                 position = start if start >= 0 else max(0, f.size + start)
                 await _skip(f, position, self.transfer_size)
+
             if end is not None:
                 if end < 0:
                     end = f.size + end
@@ -151,10 +165,12 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     ) -> None:
         if os.path.isdir(lpath):  # noqa: ASYNC240, as the local open below.
             return  # A folder, which fsspec's get makes itself.
+
         f = await self.open_async(rpath, "rb", **kwargs)
         async with f:
             # The bytes, as fsspec's own filesystems tell them to the callback.
             callback.set_size(f.size)
+
             # Local writes are short next to a storage's requests, as in fsspec's
             # own filesystems.
             with open(lpath, "wb") as local:  # noqa: ASYNC230
@@ -172,6 +188,7 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     ) -> None:
         if os.path.isdir(lpath):  # noqa: ASYNC240, as the local open below.
             return  # A folder: a storage needs none for the files put in it.
+
         f = await self.open_async(rpath, "xb" if mode == "create" else "wb", **kwargs)
         async with f:
             with open(lpath, "rb") as local:  # noqa: ASYNC230
@@ -181,10 +198,10 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
                     callback.relative_update(len(chunk))
 
 
-def _plain(fs: AbstractFileSystem, path: str | Sequence[str]) -> Any:
+def _strip_only_protocol(fs: AbstractFileSystem, path: str | Sequence[str]) -> Any:
     """A path, or paths, of ``fs`` without its protocol, keeping a trailing "/"."""
     if not isinstance(path, str):
-        return [_plain(fs, p) for p in path]
+        return [_strip_only_protocol(fs, p) for p in path]
     plain = fs._strip_protocol(path)
     return plain + "/" if path.endswith("/") and not plain.endswith("/") else plain
 
@@ -202,6 +219,7 @@ async def _skip(f: Any, start: int, chunk_size: int) -> None:
             return
     except (io.UnsupportedOperation, OSError):
         pass
+
     skipped = 0
     while skipped < start:
         chunk = await f.read(min(chunk_size, start - skipped))

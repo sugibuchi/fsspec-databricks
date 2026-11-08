@@ -82,9 +82,11 @@ class _AsyncFile(io.RawIOBase):
         concurrency_limit: asyncio.Semaphore,
     ) -> None:
         super().__init__()
+
         self.path = path
         self.loop = loop
         self._requests = _Requests(concurrency_limit)
+
         # Whether flush(force=True) finished the file, or tried to: closing does
         # not try again.
         self._forced = False
@@ -161,6 +163,7 @@ class _AsyncFile(io.RawIOBase):
                 future.add_done_callback(self._warn_if_abort_failed)
             except RuntimeError:
                 coro.close()  # The loop closed meanwhile.
+
         io.RawIOBase.close(self)
         return future
 
@@ -199,10 +202,12 @@ class _AsyncFile(io.RawIOBase):
         self._check_open()
         if not force:
             return
+
         if self._forced:
             raise ValueError(
                 f"Force flush cannot be called more than once: {self.path}"
             )
+
         self._forced = True
         await self._finish()
 
@@ -222,36 +227,43 @@ class _AsyncFile(io.RawIOBase):
     def close(self) -> None:
         if self.closed:
             return
+
         if getattr(self, "loop", None) is None:
             # The constructor failed before the loop was set: no request was sent.
             super().close()
             return
+
         self._sync(self.aclose())
 
     def __del__(self) -> None:
         # Unlike io.IOBase, never closes: see the class docstring.
         if self.closed:
             return
+
         if getattr(self, "loop", None) is None:
             # The constructor failed before the loop was set: no request was sent.
             io.RawIOBase.close(self)
             return
+
         if self._forced:
             # A forced flush finished the file: nothing is left to undo.
             io.RawIOBase.close(self)
             return
+
         warnings.warn(
             f"Unclosed file {self.path!r}, aborted: nothing written is kept",
             ResourceWarning,
             stacklevel=1,  # A finalizer has no caller to point at.
             source=self,
         )
+
         try:
             # On the file's loop, nothing can wait for the abort.
             try:
                 on_its_loop = asyncio.get_running_loop() is self.loop
             except RuntimeError:
                 on_its_loop = False  # No loop runs on this thread.
+
             if on_its_loop:
                 self._do_abort_soon()
             elif self.loop.is_running() and not sys.is_finalizing():
@@ -271,6 +283,7 @@ class _AsyncFile(io.RawIOBase):
         # The garbage collector's abort, scheduled: nobody awaits its future.
         if future.cancelled():
             return
+
         error = future.exception()
         if isinstance(error, Exception):
             logger.warning(
@@ -324,6 +337,7 @@ class _Requests:
         except BaseException:
             self.concurrency_limit.release()
             raise
+
         task.add_done_callback(self._done)
         self.queue.append(_Range(start, end, task))
 

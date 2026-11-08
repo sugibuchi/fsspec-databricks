@@ -204,10 +204,12 @@ class _Move(_Transfer):
         **kwargs: Any,
     ) -> None:
         super().__init__(path1, path2, profile=profile, **kwargs)
+
         self.mv_file = mv_file
         self.rm_folder = rm_folder
         self.renames_folders = bool(profile.renames_folders)
         self.folders_moved = 0
+
         # The roots moved whole, yielded with the first step.
         self.renamed: list[tuple[str, str]] = []
         self.roots_renamed = 0 if self.renames_folders else None
@@ -230,13 +232,16 @@ class _Move(_Transfer):
         roots = await super().prepare()
         if roots is None or not self.renames_folders:
             return roots
+
         if isinstance(self.path1, str) and self.path1.endswith("/"):
             return roots  # Its contents go onto path2, among what is there.
+
         sources = list(roots.folders)
         moved = await asyncio.gather(*(self.move_whole(s) for s in sources))
         whole = {s for s, ok in zip(sources, moved, strict=True) if ok}
         self.renamed = [(s, self.target(s)) for s in sources if s in whole]
         self.roots_renamed = len(self.renamed)
+
         return _Roots(
             [f for f in roots.folders if f not in whole], roots.files, roots.errors
         )
@@ -250,6 +255,7 @@ class _Move(_Transfer):
         """
         target = self.target(source)
         parent = target.rpartition("/")[0]
+
         if target not in self.missing:
             try:
                 async with self.concurrency_limit:
@@ -260,14 +266,17 @@ class _Move(_Transfer):
                 return False
             else:
                 return False  # Taken: the root merges into it.
+
         try:
             if parent and self.parents_required:
                 async with self.concurrency_limit:
                     await self.makedirs(parent, exist_ok=True)
+
             async with self.concurrency_limit:
                 await self.mv_file(source, target)
         except Exception:
             return False
+
         return True
 
     async def begin(
@@ -300,13 +309,16 @@ class _Move(_Transfer):
             if job.source and self.remaining[job.source] == 0:
                 outcome += self.remove(job.source)
             return outcome
+
         if job.kind == "rmdir":
             self.folders_moved += 1
         else:
             self.files_done += 1
+
         outcome: list[Any] = [(job.source, job.destination)]
         if (folder := self.child_done(job.source)) is not None:
             outcome += self.remove(folder)
+
         return outcome
 
     def remove(self, folder: str) -> list[Any]:
@@ -324,6 +336,7 @@ class _Move(_Transfer):
     def failed(self, job: _Job, error: Exception) -> list[Any]:
         if job.kind != "rmdir":
             return super().failed(job, error)
+
         if isinstance(error, FileNotFoundError):
             return self.done(job)  # Already gone, as tree_rm counts it.
         error.add_note(f"Deleting the folder {job.source!r} failed.")
