@@ -101,6 +101,11 @@ POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and 
 
 ---
 
-## License
+## Development, security and license
 
-Apache License 2.0. See [LICENSE](https://github.com/sugibuchi/fsspec-databricks/blob/main/LICENSE).
+* [DEVELOPMENT.md](https://github.com/sugibuchi/fsspec-databricks/blob/main/DEVELOPMENT.md) explains how to work on
+  the package: its design, setup, tests and releases.
+* [SECURITY.md](https://github.com/sugibuchi/fsspec-databricks/blob/main/SECURITY.md) explains how to report a
+  vulnerability.
+* The package is licensed under the Apache License 2.0. See
+  [LICENSE](https://github.com/sugibuchi/fsspec-databricks/blob/main/LICENSE).
