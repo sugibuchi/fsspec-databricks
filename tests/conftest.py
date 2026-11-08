@@ -236,8 +236,11 @@ def live_client():
     Live tests are opt in, with `--api` or `FSSPEC_DATABRICKS_TEST_API`. Once asked for, a workspace that cannot be
     reached is an error, not a skip that would pass unseen.
     """
+    # The SDK asks for the scope all-apis unless given others, and has no environment variable for them. A secret
+    # limited to some scopes refuses all-apis: FSSPEC_DATABRICKS_TEST_SCOPES names them, comma or space separated.
+    scopes = os.environ.get("FSSPEC_DATABRICKS_TEST_SCOPES") or None
     try:
-        client = WorkspaceClient()
+        client = WorkspaceClient(scopes=scopes)
         client.current_user.me()
     except (
         Exception

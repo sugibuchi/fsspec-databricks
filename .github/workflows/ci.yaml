@@ -111,6 +111,8 @@ jobs:
       WORKSPACE_ROOT: ${{ vars.FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT }}
       # The backends this workspace has, e.g. "volume,workspace" where legacy DBFS is disabled. Unset: all.
       FSSPEC_DATABRICKS_TEST_FS: ${{ vars.FSSPEC_DATABRICKS_TEST_FS }}
+      # The OAuth scopes the service principal's secret has, e.g. "files,workspace,unity-catalog". Unset: all-apis.
+      FSSPEC_DATABRICKS_TEST_SCOPES: ${{ vars.FSSPEC_DATABRICKS_TEST_SCOPES }}
     steps:
       # A cloud whose environment is not set up yet is skipped, not failed.
       - name: Check the environment

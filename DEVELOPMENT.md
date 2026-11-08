@@ -207,6 +207,7 @@ Every environment has these:
 | `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)    | The POSIX path of the Volume work directory    |
 | `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable) | The POSIX path of the Workspace work directory |
 | `FSSPEC_DATABRICKS_TEST_FS` (variable, optional)   | The backends tested, e.g. `volume,workspace`   |
+| `FSSPEC_DATABRICKS_TEST_SCOPES` (variable, optional) | The OAuth scopes of the secret, e.g. `files,workspace,unity-catalog` |
 
 The variable `DATABRICKS_AUTH_TYPE` chooses how the tests authenticate:
 
@@ -228,7 +229,8 @@ the issuer `https://token.actions.githubusercontent.com`.
   The app is the workspace's service principal. This needs no access to the account console.
 
 Keep only the settings of the environment's own authentication: the SDK refuses a configuration that matches several.
-A service principal authenticating with a client secret needs the OAuth scope `all-apis`.
+The SDK asks for the OAuth scope `all-apis` by default. A secret limited to fewer scopes needs them named in
+`FSSPEC_DATABRICKS_TEST_SCOPES`: the tests need `files`, `workspace` and `unity-catalog`, and `settings` for DBFS.
 
 At the repository level, the secret `CODECOV_TOKEN` is the repository's upload token for
 [Codecov](https://about.codecov.io/).
