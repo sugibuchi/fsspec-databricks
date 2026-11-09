@@ -390,13 +390,29 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
             return
 
         catalog, schema, volume, _, full_path = _parse(path)
-        func, args, kwargs = _listing(
-            self.client, catalog, schema, volume, full_path, include_browse
-        )
+        if catalog is None:
+            entries = self._iter_in_thread(
+                self.client.catalogs.list, include_browse=include_browse
+            )
+        elif schema is None:
+            entries = self._iter_in_thread(
+                self.client.schemas.list, catalog, include_browse=include_browse
+            )
+        elif volume is None:
+            entries = self._iter_in_thread(
+                self.client.volumes.list,
+                catalog,
+                schema,
+                include_browse=include_browse,
+            )
+        else:
+            entries = self._iter_in_thread(
+                self.client.files.list_directory_contents, full_path
+            )
         listed = False
         with error_mapping(path):
             try:
-                async for entry in self._iter_in_thread(func, *args, **kwargs):
+                async for entry in entries:
                     listed = True
                     yield _map_info(entry, detail=True)
             except (NotFound, BadRequest):
@@ -1140,18 +1156,3 @@ __all__ = [
     "VolumeWritableFile",
     "volumes_root_info",
 ]
-
-
-def _listing(client, catalog, schema, volume, full_path, include_browse):
-    """The SDK listing of a path: the SDK's method, and its positional and keyword arguments."""
-    if catalog is None:
-        return client.catalogs.list, (), {"include_browse": include_browse}
-    if schema is None:
-        return client.schemas.list, (catalog,), {"include_browse": include_browse}
-    if volume is None:
-        return (
-            client.volumes.list,
-            (catalog, schema),
-            {"include_browse": include_browse},
-        )
-    return client.files.list_directory_contents, (full_path,), {}
