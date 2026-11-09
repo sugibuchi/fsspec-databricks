@@ -869,11 +869,12 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             }
             headers["Content-Type"] = "application/octet-stream"
             return url, headers, None
-        return (
-            self._files_url,
-            {"Content-Type": "application/octet-stream"},
-            {**self._upload, "part_number": part_number},
-        )
+        else:
+            return (
+                self._files_url,
+                {"Content-Type": "application/octet-stream"},
+                {**self._upload, "part_number": part_number},
+            )
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
         assert self._upload is not None
