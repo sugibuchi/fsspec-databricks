@@ -134,15 +134,14 @@ the SDK alone, without this package.
 
 Switches of `dummy` make the server answer as a given workspace:
 
-- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`.
-  Resumable uploads are served for SDK 0.158, which `test_dummy_api.py` runs;
+- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`. Only
+  multipart uploads are served, as clients speak no other;
 - `presigned_urls_only` refuses data transfers to the Files API itself;
 - `abort_supported = False` refuses abort URLs, as Azure Databricks does;
 - `read_errors` lists statuses that the next downloads fail with;
 - `upload_errors` lists statuses that the next uploads of whole files or parts fail with;
 - `ranges_ignored` answers the whole file to a range;
 - `endpoints` lists the entries of the endpoints list. Unset, the endpoints API answers 404, as before its rollout;
-- `storage_proxy_available` answers the storage proxy's probe, which SDK 0.158 sends;
 - `legacy_dbfs_disabled` answers as a workspace disabling the DBFS root;
 - `dbfs_add_block_errors` counts the next DBFS add-blocks that fail.
 
@@ -161,7 +160,7 @@ Where the references leave behaviour open, the dummy makes an assumption, marked
 - A file in the way of a directory or an upload fails as an existing file, with `ALREADY_EXISTS`.
 - Volume lists are sorted by name, and their directories tell no size or time.
 - A non-empty volume directory fails with `DIRECTORY_NOT_EMPTY`, whose message says it "is not empty".
-- An unknown upload session is not found, and a resumable chunk with a gap is refused.
+- An unknown upload session is not found.
 
 ## CI
 

@@ -203,10 +203,8 @@ def test_files_list_pages(w, dummy):
         )
 
 
-@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_files_upload_in_parts(parts_client, dummy, upload_mode):
-    """The SDK uploads in parts through presigned URLs, by the API that the server chooses."""
-    dummy.upload_mode = upload_mode
+def test_files_upload_in_parts(parts_client, dummy):
+    """The SDK uploads in parts through presigned URLs."""
     data = randbytes(3 * _MiB + 1000)
 
     parts_client.files.upload(
@@ -214,7 +212,6 @@ def test_files_upload_in_parts(parts_client, dummy, upload_mode):
     )
     assert dummy.volume_files[f"{V}/m.bin"].data == data
     assert dummy.multipart_uploads == {}
-    assert dummy.resumable_uploads == {}
 
     # The reference: an existing file without overwrite refuses the upload from its start.
     with pytest.raises(AlreadyExists):
@@ -229,21 +226,31 @@ def test_files_upload_in_parts_parallel(parts_client, dummy):
     assert dummy.volume_files[f"{V}/p.bin"].data == data
 
 
-@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_files_upload_storage_proxy(parts_client, dummy_api, dummy, upload_mode):
+def test_files_upload_storage_proxy(parts_client, dummy_api, dummy):
     """Through the storage proxy, the parts go to the Files API itself, as fsspec-databricks sends them."""
-    dummy.upload_mode = upload_mode
-    dummy.storage_proxy_available = True
-    parts_client.files._config.experimental_files_ext_enable_storage_proxy = True
-    parts_client.files._STORAGE_PROXY_HOSTNAME = dummy_api
+    # Another host name of the dummy, as the storage proxy has one of its own.
+    port = dummy_api.rsplit(":", 1)[1]
+    dummy.endpoints = [
+        {
+            "api": "FILES_API",
+            "api_version": "2.0",
+            "scheme": "http",
+            "hostname": f"localhost:{port}",
+            "multipart_upload_supported": True,
+        }
+    ]
     data = randbytes(3 * _MiB + 1000)
 
     parts_client.files.upload(
         f"{V}/s.bin", BytesIO(data), part_size=_MiB, use_parallel=False
     )
-    assert parts_client.files._dp_hostname_available is True
     with parts_client.files.download(f"{V}/s.bin").contents as f:
         assert f.read() == data
+
+    parts = dummy.requests_to(f"/api/2.0/fs/files{V}/s.bin", "PUT")
+    assert len(parts) == 4
+    assert all(r.headers["host"] == f"localhost:{port}" for r in parts)
+    assert dummy.requests_to("/api/2.0/fs/create-upload-part-urls") == []
 
 
 def test_files_upload_sessions(w, dummy):
@@ -295,8 +302,14 @@ def test_files_upload_sessions(w, dummy):
     with pytest.raises(NotFound):
         do(
             "POST",
-            "/api/2.0/fs/create-resumable-upload-url",
-            body={"path": f"{V}/u.bin", "session_token": token},
+            "/api/2.0/fs/create-upload-part-urls",
+            body={
+                "path": f"{V}/u.bin",
+                "session_token": token,
+                "start_part_number": 1,
+                "count": 1,
+                "expire_time": "2099-01-01T00:00:00Z",
+            },
         )
 
     # Azure Databricks refuses to abort by a presigned URL.
