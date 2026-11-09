@@ -37,8 +37,9 @@ classifiers = [
 
 dependencies = [
     "fsspec>=2024.6.0",
-    "databricks-sdk>=0.156.0",
-    "aiohttp>3.12",
+    # The oldest versions the dummy-server tests pass on: HostType and ClientMiddlewareType arrived in them.
+    "databricks-sdk>=0.80.0",
+    "aiohttp>=3.12.0",
     # The interface of the strategies copied into _contrib/strategy, to its minor version: see DEVELOPMENT.md.
     "fsspec-alt-strategies>=0.1,<0.2",
 ]
