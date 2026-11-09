@@ -237,20 +237,16 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
             raise file_exists_error(path)
         return None
 
-    async def _file_options(self) -> dict[str, Any]:
-        """The session, URL and authentication of a file object, its fetches or uploads sharing `io_limit`."""
-        return {
+    async def _open_file(self, path: str, mode: str):
+        """Open a file object on the running loop, its fetches or uploads sharing `io_limit`."""
+        size = await self._check_open(path, mode)
+        loop = asyncio.get_running_loop()
+        options = {
             "session": await self._get_session(),
             "base_url": self.config.host,
             "auth": workspace_authenticator(self.config),
             "concurrency_limit": self.io_limit,
         }
-
-    async def _open_file(self, path: str, mode: str):
-        """Open a file object on the running loop."""
-        size = await self._check_open(path, mode)
-        loop = asyncio.get_running_loop()
-        options = await self._file_options()
         if "r" in mode:
             return DbfsReadableFile(path, loop, size or 0, **options)
         return DbfsWritableFile(path, loop, overwrite="x" not in mode, **options)
@@ -274,11 +270,17 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
             return f
         # The API's stream makes a file visible as it grows, and replaces the file there when it starts. Holding the
         # last part, as Volumes do, would still show the rest. So a transaction writes to a temporary path, moved into
-        # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own.
+        # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own. It
+        # takes the requests' settings of the file opened, which checked the mode.
         transaction = TempPathTransaction(
             path,
             lambda p: DbfsWritableFile(
-                p, self.loop, **sync(self.loop, self._file_options)
+                p,
+                self.loop,
+                session=f._session,
+                base_url=f._base_url,
+                auth=f._auth,
+                concurrency_limit=self.io_limit,
             ),
             functools.partial(self._commit_move, exclusive="x" in mode),
             lambda p: sync(self.loop, self._delete, p, False),
