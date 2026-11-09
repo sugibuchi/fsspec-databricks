@@ -31,11 +31,14 @@ from fsspec_databricks._contrib.strategy.files.fsspec_transaction import (
 )
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import (
+    _FILES_API_V2,
+    _FILES_API_V3,
+    _IO_OFFLOAD,
     VolumeFileSystem,
     VolumeReadableFile,
     VolumeWritableFile,
-    _MultipartSession,
-    _ResumableSession,
+    _Endpoint,
+    _parse_endpoint,
 )
 from tests.utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
 
@@ -116,34 +119,267 @@ def test_volume_fs_session():
         assert sync(fs.loop, fs._get_session) is session
 
 
-def test_volume_fs_storage_proxy_probe_timeout(dummy_client):
-    # Connections are accepted by the backlog, but no response ever comes.
-    with socket.create_server(("127.0.0.1", 0)) as server:
-        port = server.getsockname()[1]
-
-        with VolumeFileSystem(client=dummy_client) as fs:
-            fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
-            fs._storage_proxy_probe_timeout = 0.1
-
-            assert fs.storage_proxy_available is False
+def _defaults(host: str) -> list[_Endpoint]:
+    return [
+        _Endpoint(_IO_OFFLOAD, host, multipart_upload_supported=True),
+        _Endpoint(_FILES_API_V2, host, multipart_upload_supported=False),
+    ]
 
 
-def test_volume_fs_storage_proxy_probe_connection_refused(dummy_client):
+def test_volume_fs_endpoints_not_served(dummy_client, dummy, dummy_api):
+    """Without the endpoints API, the SDK's defaults: asked once per file system."""
+    with VolumeFileSystem(client=dummy_client) as fs:
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+    assert len(dummy.requests_to("/api/2.0/fs/endpoints")) == 1
+
+
+def test_volume_fs_endpoints_unreachable(dummy_client, dummy_api):
     # Refused without a socket: Windows retries a refused connection for seconds, and a freed port can be reused.
     refused = ClientConnectionError("Connection refused")
     with (
-        patch("aiohttp.ClientSession.head", side_effect=refused) as head,
+        patch("aiohttp.ClientSession.get", side_effect=refused) as get,
         VolumeFileSystem(client=dummy_client) as fs,
     ):
-        assert fs.storage_proxy_available is False
-        head.assert_called_once()
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+        get.assert_called_once()
 
 
-def test_volume_fs_storage_proxy_probe_answered(dummy_client, dummy):
-    dummy.storage_proxy_available = True
+def test_volume_fs_endpoints_timeout(dummy_client, dummy_api):
+    # Connections are accepted by the backlog, but no response ever comes.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+        with VolumeFileSystem(client=dummy_client) as fs:
+            fs._endpoints_timeout = 0.1
+            endpoints = sync(fs.loop, fs._fetch_endpoints, f"http://127.0.0.1:{port}")
+            assert endpoints == []
+
+
+def test_volume_fs_endpoints_listed(dummy_client, dummy, dummy_api):
+    """The usable entries, in order; none usable gives the defaults."""
+    host = dummy_api.removeprefix("http://")
+    dummy.endpoints = [
+        {"api": "UNKNOWN", "scheme": "http", "hostname": host},
+        {"api": "FILES_API", "api_version": "3.0", "scheme": "http", "hostname": host},
+        {"api": "IO_OFFLOAD", "scheme": "http", "hostname": host},
+    ]
     with VolumeFileSystem(client=dummy_client) as fs:
-        assert fs.storage_proxy_available is True
-        assert fs.workspace_id == dummy.workspace_id
+        assert sync(fs.loop, fs._get_endpoints) == [
+            _Endpoint(_FILES_API_V3, dummy_api, False),
+            _Endpoint(_IO_OFFLOAD, dummy_api, False),
+        ]
+
+    dummy.endpoints = [{"api": "UNKNOWN", "scheme": "http", "hostname": host}]
+    with VolumeFileSystem(client=dummy_client) as fs:
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+
+
+_https = "https://example.cloud.databricks.com"
+_http = "http://127.0.0.1:8000"
+
+
+@pytest.mark.parametrize(
+    ("entry", "workspace", "expected"),
+    [
+        (
+            {
+                "api": "IO_OFFLOAD",
+                "scheme": "https",
+                "hostname": "example.cloud.databricks.com",
+            },
+            _https,
+            _Endpoint(_IO_OFFLOAD, _https, False),
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "3.0",
+                "scheme": "https",
+                "hostname": "files.example.com:8443",
+                "multipart_upload_supported": True,
+            },
+            _https,
+            _Endpoint(_FILES_API_V3, "https://files.example.com:8443", True),
+        ),
+        # The storage proxy: Files API 2.0 over plain HTTP on another host.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "http",
+                "hostname": "proxy",
+            },
+            _https,
+            _Endpoint(_FILES_API_V2, "http://proxy", False),
+        ),
+        # Plain HTTP elsewhere carries the credentials in the clear.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "3.0",
+                "scheme": "http",
+                "hostname": "files",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "IO_OFFLOAD",
+                "scheme": "http",
+                "hostname": "example.cloud.databricks.com",
+            },
+            _https,
+            None,
+        ),
+        # On a workspace reached by plain HTTP, its own host may use it.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "3.0",
+                "scheme": "http",
+                "hostname": "127.0.0.1:8000",
+            },
+            _http,
+            _Endpoint(_FILES_API_V3, _http, False),
+        ),
+        # Unknown protocols and malformed addresses.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "4.0",
+                "scheme": "https",
+                "hostname": "h",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "ftp",
+                "hostname": "h",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "https",
+                "hostname": "h/p",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "https",
+                "hostname": "u@h",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "https",
+                "hostname": "h:x",
+            },
+            _https,
+            None,
+        ),
+        ({"api": "FILES_API", "api_version": "2.0", "scheme": "https"}, _https, None),
+        ({"api": ["IO_OFFLOAD"], "scheme": "https", "hostname": "h"}, _https, None),
+        ("IO_OFFLOAD", _https, None),
+    ],
+)
+def test_volume_parse_endpoint(entry, workspace, expected):
+    assert _parse_endpoint(entry, workspace) == expected
+
+
+@pytest.mark.parametrize(
+    "kind", ["io_offload", "files_api_2", "storage_proxy", "files_api_3"]
+)
+def test_volume_open_on_endpoint(dummy_client, dummy, dummy_api, kind):
+    """Files read and written in parts through the first endpoint listed."""
+    port = dummy_api.rsplit(":", 1)[1]
+    entry = {
+        "io_offload": {"api": "IO_OFFLOAD", "hostname": f"127.0.0.1:{port}"},
+        "files_api_2": {
+            "api": "FILES_API",
+            "api_version": "2.0",
+            "hostname": f"127.0.0.1:{port}",
+        },
+        # Another host name of the dummy, as the storage proxy has one of its own.
+        "storage_proxy": {
+            "api": "FILES_API",
+            "api_version": "2.0",
+            "hostname": f"localhost:{port}",
+        },
+        "files_api_3": {
+            "api": "FILES_API",
+            "api_version": "3.0",
+            "hostname": f"127.0.0.1:{port}",
+        },
+    }[kind]
+    dummy.endpoints = [{**entry, "scheme": "http", "multipart_upload_supported": True}]
+    file = "/Volumes/c/s/v/endpoint.bin"
+    data = randbytes(20 * 1000 * 1000)
+
+    with VolumeFileSystem(client=dummy_client) as fs:
+        with fs.open(file, "wb") as f:
+            f.write(data)
+        assert dummy.volume_files[file].data == data
+        with fs.open(file, "rb") as f:
+            assert f.read() == data
+
+    presigned = dummy.requests_to("/api/2.0/fs/create-")
+    v3 = dummy.requests_to("/api/3.0/fs/files")
+    if kind == "io_offload":
+        assert {r.path for r in presigned} == {
+            "/api/2.0/fs/create-upload-part-urls",
+            "/api/2.0/fs/create-download-url",
+        }
+    else:
+        assert presigned == []
+    if kind == "files_api_3":
+        actions = [r.params.get("action") for r in v3 if r.method == "POST"]
+        assert actions == ["initiate-upload", "complete-upload"]
+        assert all("upload_id" in r.params for r in v3 if r.method == "PUT")
+    else:
+        assert v3 == []
+
+
+def test_volume_write_endpoint_takes_parts(dummy_client, dummy, dummy_api):
+    """Reads take the first endpoint; writes the first taking multipart uploads."""
+    host = dummy_api.removeprefix("http://")
+    dummy.endpoints = [
+        {"api": "FILES_API", "api_version": "2.0", "scheme": "http", "hostname": host},
+        {
+            "api": "IO_OFFLOAD",
+            "scheme": "http",
+            "hostname": host,
+            "multipart_upload_supported": True,
+        },
+    ]
+    file = "/Volumes/c/s/v/endpoint.bin"
+    data = randbytes(20 * 1000 * 1000)
+
+    with VolumeFileSystem(client=dummy_client) as fs:
+        with fs.open(file, "wb") as f:
+            f.write(data)
+        with fs.open(file, "rb") as f:
+            assert f.read() == data
+
+    # Parts through presigned URLs, ranges from the Files API itself.
+    assert dummy.requests_to("/api/2.0/fs/create-upload-part-urls")
+    assert dummy.requests_to("/api/2.0/fs/create-download-url") == []
 
 
 ### Requests, on the dummy server
@@ -337,10 +573,12 @@ def test_volume_workspace_id(client: WorkspaceClient):
         assert isinstance(workspace_id, int)
 
 
-def test_volume_storage_proxy_available(client: WorkspaceClient):
+def test_volume_endpoints(client: WorkspaceClient):
+    """The workspace lists endpoints, or the SDK's defaults are taken: either way, one to read and write by."""
     with VolumeFileSystem(client=client) as fs:
-        available = fs.storage_proxy_available
-        assert isinstance(available, bool)
+        endpoints = sync(fs.loop, fs._get_endpoints)
+        assert endpoints
+        assert all(e.base_url.startswith(("https://", "http://")) for e in endpoints)
 
 
 @pytest.mark.parametrize(
@@ -1018,7 +1256,7 @@ def test_volume_open_w(
                 f.write(chunk)
 
         written = volume_download(client, f"{test_dir}/1_data.bin")
-        assert in_parts == (f._upload_session is not None)
+        assert in_parts == (f._upload is not None)
         assert bytes_sig(data) == bytes_sig(written)
 
     # Overwrite existing file
@@ -1164,7 +1402,7 @@ def test_volume_file_read_retries(
     dummy.vol_write(path, data)
     dummy.read_errors.extend([status, status])
 
-    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+    with patch.object(VolumeReadableFile, "retry_delay", 0):
         with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
             assert f.read() == data
 
@@ -1178,7 +1416,7 @@ def test_volume_file_read_retries_exhausted(
     dummy.vol_write(path, data)
     dummy.read_errors.extend([500] * 10)
 
-    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+    with patch.object(VolumeReadableFile, "retry_delay", 0):
         with _reader(
             aiohttp_session,
             dummy_api,
@@ -1191,7 +1429,7 @@ def test_volume_file_read_retries_exhausted(
 
     # The first request and its retries.
     attempts = 10 - len(dummy.read_errors)
-    assert attempts == VolumeReadableFile.fetch_max_retries + 1
+    assert attempts == VolumeReadableFile.max_retries + 1
 
 
 @pytest.mark.parametrize("status", [400, 403, 404])
@@ -1202,7 +1440,7 @@ def test_volume_file_read_no_retry(
     dummy.vol_write(path, data)
     dummy.read_errors.extend([status] * 2)
 
-    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+    with patch.object(VolumeReadableFile, "retry_delay", 0):
         with _reader(
             aiohttp_session,
             dummy_api,
@@ -1214,6 +1452,80 @@ def test_volume_file_read_no_retry(
                 f.read()
 
     assert len(dummy.read_errors) == 1
+
+
+@pytest.mark.parametrize("use_presigned_url", [True, False])
+@pytest.mark.parametrize("size", [1000, 20 * 1000 * 1000])
+def test_volume_file_write_retries(
+    dummy, dummy_api, client_event_loop, aiohttp_session, size, use_presigned_url
+):
+    """A whole file, or a part, is sent again after transient errors."""
+    data = randbytes(size)
+    dummy.upload_errors.extend([503, 500])
+
+    with patch.object(VolumeWritableFile, "retry_delay", 0):
+        with _writer(
+            aiohttp_session,
+            dummy_api,
+            client_event_loop,
+            use_presigned_url=use_presigned_url,
+        ) as f:
+            f.write(data)
+
+    assert dummy.volume_files[path].data == data
+    assert not dummy.upload_errors
+
+
+def test_volume_file_write_no_retry(
+    dummy, dummy_api, client_event_loop, aiohttp_session
+):
+    dummy.upload_errors.extend([403, 403])
+
+    with patch.object(VolumeWritableFile, "retry_delay", 0):
+        with pytest.raises(PermissionError):
+            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+                f.write(b"data")
+
+    assert len(dummy.upload_errors) == 1
+
+
+@pytest.mark.parametrize("prefer_presigned_url", [True, False])
+def test_volume_file_read_changed_file(
+    dummy, dummy_api, client_event_loop, aiohttp_session, prefer_presigned_url
+):
+    """A file replaced while read fails, rather than mix two versions."""
+    data = randbytes(20 * 1000 * 1000)
+    dummy.vol_write(path, data)
+
+    with _reader(
+        aiohttp_session,
+        dummy_api,
+        client_event_loop,
+        len(data),
+        prefer_presigned_url=prefer_presigned_url,
+    ) as f:
+        assert f.read(100) == data[:100]
+        # A newer version, by more than the second of HTTP dates.
+        dummy.volume_files[path].last_modified += 2000
+        f.seek(15 * 1000 * 1000)
+        with pytest.raises(OSError, match="changed while it was read"):
+            f.read(100)
+
+    ranges = dummy.requests_to("/api/2.0/fs/files", "GET")
+    assert "if-unmodified-since" in ranges[-1].headers
+
+
+def test_volume_file_read_range_ignored(
+    dummy, dummy_api, client_event_loop, aiohttp_session
+):
+    """A whole file answered to a range is refused, not taken for the range."""
+    data = randbytes(20 * 1000 * 1000)
+    dummy.vol_write(path, data)
+    dummy.ranges_ignored = True
+
+    with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
+        with pytest.raises(OSError, match="answered with status 200"):
+            f.read(100)
 
 
 def test_volume_file_read_parquet(
@@ -1249,19 +1561,14 @@ def test_volume_file_oneshot_write(
     assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
 
 
-@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_volume_file_parts_write(
-    dummy_api, dummy, client_event_loop, aiohttp_session, upload_mode
-):
+def test_volume_file_parts_write(dummy_api, dummy, client_event_loop, aiohttp_session):
     data = randbytes(20 * 1000 * 1000)
-    # The one file class follows the API the server chooses.
-    dummy.upload_mode = upload_mode
 
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         # Several writes, so that the parts grow
         for i in range(0, len(data), 1000 * 1000):
             f.write(data[i : i + 1000 * 1000])
-        assert f.sequential is (upload_mode == "resumable")
+        assert not f.sequential
 
     assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
 
@@ -1278,44 +1585,18 @@ def test_volume_file_parts_write(
             f.write(data)
 
 
-def test_volume_file_resumable_one_part_in_flight(
-    dummy_api, dummy, client_event_loop, aiohttp_session
-):
-    dummy.upload_mode = "resumable"
-    data = randbytes(40 * 1000 * 1000)
-    original = _ResumableSession.upload_part
-    in_flight = 0
-    most_in_flight = 0
-
-    async def counting(self, *args, **kwargs):
-        nonlocal in_flight, most_in_flight
-        in_flight += 1
-        most_in_flight = max(most_in_flight, in_flight)
-        try:
-            # A pause, so that a concurrent part would overlap this one.
-            await asyncio.sleep(0.01)
-            return await original(self, *args, **kwargs)
-        finally:
-            in_flight -= 1
-
-    with patch.object(_ResumableSession, "upload_part", counting):
-        with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
-            for i in range(0, len(data), 1000 * 1000):
-                f.write(data[i : i + 1000 * 1000])
-
-    assert bytes_sig(data) == bytes_sig(dummy.volume_files[path].data)
-    assert most_in_flight == 1
-
-
 @pytest.mark.parametrize("use_presigned_url", [True, False])
+@pytest.mark.parametrize("upload_mode", ["resumable", "unknown"])
 def test_volume_file_unexpected_initiate_reply(
     dummy_api,
     dummy,
     client_event_loop,
     aiohttp_session,
     use_presigned_url,
+    upload_mode,
 ):
-    dummy.upload_mode = "unknown"
+    # Resumable uploads too, which the SDK no longer speaks since 0.163.
+    dummy.upload_mode = upload_mode
 
     with pytest.raises(OSError, match="Unexpected initiate-upload response"):
         with _writer(
@@ -1327,16 +1608,6 @@ def test_volume_file_unexpected_initiate_reply(
             f.write(randbytes(20 * 1000 * 1000))
 
     assert path not in dummy.volume_files
-
-
-@pytest.mark.parametrize("name", ["min_block_size", "max_block_size"])
-def test_volume_file_part_granularity(
-    dummy_api, client_event_loop, aiohttp_session, name
-):
-    with pytest.raises(ValueError, match="multiple of"):
-        _writer(
-            aiohttp_session, dummy_api, client_event_loop, **{name: 10 * 1024 * 1023}
-        )
 
 
 @pytest.mark.parametrize("file_class", [VolumeReadableFile, VolumeWritableFile])
@@ -1357,15 +1628,12 @@ def test_volume_file_invalid_spread(
         )
 
 
-@pytest.mark.parametrize("abort_supported", [True, False])
+@pytest.mark.parametrize("use_presigned_url", [True, False])
 def test_volume_file_multipart_write_abort(
-    dummy_api,
-    dummy,
-    client_event_loop,
-    aiohttp_session,
-    abort_supported,
+    dummy_api, dummy, client_event_loop, aiohttp_session, use_presigned_url
 ):
-    dummy.abort_supported = abort_supported
+    # Refused abort URLs change nothing: the abort is a POST to the Files API.
+    dummy.abort_supported = False
 
     with patch.object(
         VolumeWritableFile,
@@ -1373,28 +1641,51 @@ def test_volume_file_multipart_write_abort(
         AsyncMock(side_effect=RuntimeError("Dummy")),
     ):
         with pytest.raises(OSError) as exc_info:
-            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+            with _writer(
+                aiohttp_session,
+                dummy_api,
+                client_event_loop,
+                use_presigned_url=use_presigned_url,
+            ) as f:
                 f.write(randbytes(20 * 1000 * 1000))
 
     # The upload's failure is raised, not the abort's
     assert "Failed to upload a part" in str(exc_info.value)
     assert path not in dummy.volume_files
+    assert dummy.multipart_uploads == {}
+    aborts = dummy.requests_to("/api/2.0/fs/files", "POST")
+    assert [r.params["action"] for r in aborts][-1] == "abort-upload"
+    assert dummy.requests_to("/api/2.0/fs/create-abort-upload-url") == []
 
-    if abort_supported:
-        assert dummy.multipart_uploads == {}
+
+def test_volume_file_abort_failure_warns(
+    dummy_api, dummy, client_event_loop, aiohttp_session, caplog
+):
+    """A failed abort is logged, and the upload's own failure raised."""
+
+    def fail(*args, **kwargs):
+        # The server forgets the upload, so that its abort fails.
+        dummy.multipart_uploads.clear()
+        raise RuntimeError("Dummy")
+
+    with patch.object(VolumeWritableFile, "_upload_part", AsyncMock(side_effect=fail)):
+        with pytest.raises(OSError, match="Failed to upload a part"):
+            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+                f.write(randbytes(20 * 1000 * 1000))
+
+    assert any(
+        r.levelname == "WARNING" and "Failed to abort upload" in r.getMessage()
+        for r in caplog.records
+    )
 
 
-@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 def test_volume_file_write_parquet(
     client_event_loop,
     dummy_api,
     dummy,
     dummy_table,
-    upload_mode,
     aiohttp_session,
 ):
-    dummy.upload_mode = upload_mode
-
     with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
         pq.write_table(pa.Table.from_pylist(dummy_table), f)
 
@@ -1405,41 +1696,6 @@ def test_volume_file_write_parquet(
     assert df.head(1).to_dict("records") == [dummy_table[0]]
     assert df.iloc[123:456, :].to_dict("records") == dummy_table[123:456]
     assert df.tail(1).to_dict("records") == [dummy_table[-1]]
-
-
-@pytest.mark.parametrize("use_presigned_url", [True, False])
-@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
-def test_volume_file_parts_write_abort_per_mode(
-    dummy_api,
-    dummy,
-    client_event_loop,
-    aiohttp_session,
-    upload_mode,
-    use_presigned_url,
-):
-    dummy.upload_mode = upload_mode
-    session_class = (
-        _MultipartSession if upload_mode == "multipart" else _ResumableSession
-    )
-
-    with patch.object(
-        session_class,
-        "upload_part",
-        AsyncMock(side_effect=RuntimeError("Dummy")),
-    ):
-        with pytest.raises(OSError, match="Failed to upload a part"):
-            with _writer(
-                aiohttp_session,
-                dummy_api,
-                client_event_loop,
-                use_presigned_url=use_presigned_url,
-            ) as f:
-                f.write(randbytes(20 * 1000 * 1000))
-
-    assert path not in dummy.volume_files
-    # The session the server started is aborted by its own API.
-    assert dummy.multipart_uploads == {}
-    assert dummy.resumable_uploads == {}
 
 
 def test_volume_file_abort_without_session(
@@ -1458,23 +1714,20 @@ def test_volume_file_abort_without_session(
 
 
 @pytest.mark.parametrize("size", [1000, 20 * 1000 * 1000])
-@pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])
 @pytest.mark.parametrize("commit", [True, False])
 def test_volume_file_transaction(
     dummy_api,
     dummy,
     client_event_loop,
     aiohttp_session,
-    upload_mode,
     size,
     commit,
 ):
     """In a transaction, nothing is visible before commit, and discard leaves nothing."""
-    dummy.upload_mode = upload_mode
     data = randbytes(size)
     f = TransactionFile(
         AdaptiveWritableTransaction(
-            _writer(aiohttp_session, dummy_api, client_event_loop), hold_last_part=True
+            _writer(aiohttp_session, dummy_api, client_event_loop)
         )
     )
     with f:
@@ -1489,5 +1742,3 @@ def test_volume_file_transaction(
         f.discard()
         assert path not in dummy.volume_files
         assert dummy.multipart_uploads == {}
-        if upload_mode == "multipart":
-            assert dummy.resumable_uploads == {}

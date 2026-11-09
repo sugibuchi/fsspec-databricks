@@ -187,11 +187,13 @@ class DbfsEntry:
 
 @dataclass(frozen=True)
 class Recorded:
-    """A request served: its method, its path, and its parameters from the query and the body, without data."""
+    """A request served: its method, its path, its parameters from the query and the body, without data, and its
+    headers, by lowercase names."""
 
     method: str
     path: str
     params: dict
+    headers: dict = field(default_factory=dict)
 
     def __iter__(self):
         return iter((self.method, self.path))
@@ -222,7 +224,9 @@ class _Recorder:
             if name not in _data_fields:
                 params[name] = _text(value)
         _storage.requests.append(
-            Recorded(scope["method"], urllib.parse.unquote(scope["path"]), params)
+            Recorded(
+                scope["method"], urllib.parse.unquote(scope["path"]), params, headers
+            )
         )
 
         replayed = False
@@ -278,6 +282,15 @@ class DummyStorage:
     read_errors: list[int] = field(default_factory=list)
     """Statuses that the next downloads get, one each."""
 
+    upload_errors: list[int] = field(default_factory=list)
+    """Statuses that the next uploads of whole files or parts get, one each."""
+
+    ranges_ignored: bool = False
+    """Whether downloads answer the whole file to a Range, as an HTTP server may."""
+
+    endpoints: list[dict] | None = None
+    """The entries the endpoints API lists. None: the API is not served, as on workspaces before its rollout."""
+
     workspace: dict[str, WorkspaceObject] = field(default_factory=dict)
     dbfs: dict[str, DbfsEntry] = field(default_factory=dict)
     dbfs_handles: dict[int, str] = field(default_factory=dict)
@@ -313,6 +326,9 @@ class DummyStorage:
         self.abort_supported = True
         self.storage_proxy_available = False
         self.read_errors = []
+        self.upload_errors = []
+        self.ranges_ignored = False
+        self.endpoints = None
         self.workspace = {"/": WorkspaceObject("DIRECTORY", 0)}
         self.dbfs = {"/": DbfsEntry(True, 0)}
         self.dbfs_handles = {}
@@ -366,9 +382,13 @@ class DummyStorage:
         self.vol_mkdirs(posixpath.dirname(path))
         self.volume_files[path] = VolumeFile(bytes(data), _now_ms())
 
-    def vol_initiate_upload(self, path: str, overwrite: bool) -> dict:
+    def vol_initiate_upload(self, path: str, overwrite: bool, version: str) -> dict:
         self.vol_check_writable(path, overwrite)
         token = str(uuid.uuid4())
+        if version == "3.0":
+            # Assumed, as SDK 0.163 speaks Files API 3.0: multipart only, named by an `upload_id`.
+            self.multipart_uploads[token] = MultipartUpload(path, overwrite)
+            return {"upload_id": token}
         if self.upload_mode == "multipart":
             self.multipart_uploads[token] = MultipartUpload(path, overwrite)
             return {"multipart_upload": {"session_token": token}}
@@ -559,7 +579,16 @@ def _byte_range(header: str, size: int) -> tuple[int, int] | None:
     return first, last
 
 
+@app.get("/api/2.0/fs/endpoints")
+async def files_endpoints(storage: Storage):
+    # Assumed, as SDK 0.163 reads it: the endpoints of file transfers, best first.
+    if storage.endpoints is None:
+        raise ApiError("ENDPOINT_NOT_FOUND", "No API found for this request.", 404)
+    return {"endpoints": storage.endpoints}
+
+
 @app.get("/api/2.0/fs/files{file_path:path}")
+@app.get("/api/3.0/fs/files{file_path:path}")
 async def files_download(
     storage: Storage,
     file_path: str,
@@ -582,7 +611,7 @@ async def files_download(
         raise ApiError("FAILED_PRECONDITION", f"The file {path} was modified.", 412)
 
     headers = file.headers()
-    if not range:
+    if not range or storage.ranges_ignored:
         return Response(content=file.data, headers=headers)
     positions = _byte_range(range, len(file.data))
     if positions is None:
@@ -610,6 +639,7 @@ async def files_get_metadata(storage: Storage, file_path: str):
 
 
 @app.put("/api/2.0/fs/files{file_path:path}")
+@app.put("/api/3.0/fs/files{file_path:path}")
 async def files_upload(
     storage: Storage,
     file_path: str,
@@ -617,6 +647,7 @@ async def files_upload(
     overwrite: str | None = None,
     upload_type: str | None = None,
     session_token: str | None = None,
+    upload_id: str | None = None,
     part_number: int | None = None,
     content_range: Annotated[str | None, Header()] = None,
     signed: str | None = None,
@@ -624,6 +655,11 @@ async def files_upload(
     path = _volume_path(file_path)
     _check_presigned(storage, signed)
     data = await request.body()
+    if storage.upload_errors and upload_type != "resumable":
+        raise ApiError("INTERNAL_ERROR", "Injected error", storage.upload_errors.pop(0))
+    if _files_api_version(request) == "3.0" and upload_id is not None:
+        # Assumed, as SDK 0.163 sends them: the parts of Files API 3.0 name their upload by `upload_id`.
+        upload_type, session_token = "multipart", upload_id
 
     if upload_type == "multipart":
         upload = storage.vol_upload("multipart", session_token, path)
@@ -696,7 +732,12 @@ def _resumable_put(
     return Response(status_code=308, headers=headers)
 
 
+def _files_api_version(request: Request) -> str:
+    return "3.0" if request.url.path.startswith("/api/3.0/") else "2.0"
+
+
 @app.post("/api/2.0/fs/files{file_path:path}")
+@app.post("/api/3.0/fs/files{file_path:path}")
 async def files_upload_action(
     storage: Storage,
     file_path: str,
@@ -704,11 +745,15 @@ async def files_upload_action(
     action: str | None = None,
     upload_type: str | None = None,
     session_token: str | None = None,
+    upload_id: str | None = None,
     overwrite: str | None = None,
 ):
     path = _volume_path(file_path)
+    version = _files_api_version(request)
     if action == "initiate-upload":
-        return storage.vol_initiate_upload(path, _overwrite(overwrite))
+        return storage.vol_initiate_upload(path, _overwrite(overwrite), version)
+    if version == "3.0" and upload_id is not None:
+        upload_type, session_token = "multipart", upload_id
     if action == "complete-upload" and upload_type == "multipart":
         upload = storage.vol_upload("multipart", session_token, path)
         parts = (await _body(request)).get("parts") or []
@@ -727,7 +772,7 @@ async def files_upload_action(
         storage.vol_write(path, data, upload.overwrite)
         return {}
     if action == "abort-upload" and upload_type == "multipart":
-        # The SDK aborts with a POST, fsspec-databricks with a DELETE: both are served.
+        # The SDK and fsspec-databricks abort with a POST. An abort URL's DELETE is served below.
         storage.vol_upload("multipart", session_token, path)
         del storage.multipart_uploads[session_token]
         return {}

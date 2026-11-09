@@ -81,9 +81,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   and `config_params`.
 - File systems must stay picklable. fsspec pickles them as their constructor arguments, so every argument must be
   picklable. Runtime attributes are never pickled.
-- Multipart upload uses endpoints missing from the REST reference. The Databricks SDK for Python's
-  `mixins/files.py` uses the same: follow it. Keep resumable upload working too.
-- Volume write block sizes are multiples of 256 KB.
+- Multipart upload, the endpoints list and Files API 3.0 are missing from the REST reference. The Databricks SDK for
+  Python's `mixins/files.py` uses them: follow it. Volume files speak no resumable upload, as the SDK since 0.163.
 - Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
 - Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on the dummy server.
 - Logging follows s3fs and gcsfs. Each module has `logging.getLogger(__name__)`, and the library installs no handlers.

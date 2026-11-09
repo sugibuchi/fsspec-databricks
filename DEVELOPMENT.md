@@ -120,6 +120,7 @@ to it over HTTP, so the SDK's requests, errors and mixins run as against a works
 REST references describe:
 
 - the Files API: directories, downloads with ranges, uploads whole or in parts, presigned URLs and aborts;
+- the endpoints list and Files API 3.0, as SDK 0.163 speaks them, as the reference has neither;
 - the Workspace API;
 - the legacy DBFS API;
 - the Unity Catalog API's reads of catalogs, schemas and volumes.
@@ -128,16 +129,20 @@ Parts go to presigned URLs, or to the Files API itself, as through the storage p
 files, the Workspace files and the DBFS root, separate as in Databricks. `test_dummy_api.py` checks the server through
 the SDK alone, without this package.
 
-`dummy.requests` records each request served: its method, path, and query and body parameters without data.
+`dummy.requests` records each request served: its method, path, headers, and query and body parameters without data.
 `dummy.requests_to(prefix, method)` filters them. Tests counting requests assert on these.
 
 Switches of `dummy` make the server answer as a given workspace:
 
-- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`;
+- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`.
+  Resumable uploads are served for SDK 0.158, which `test_dummy_api.py` runs;
 - `presigned_urls_only` refuses data transfers to the Files API itself;
 - `abort_supported = False` refuses abort URLs, as Azure Databricks does;
 - `read_errors` lists statuses that the next downloads fail with;
-- `storage_proxy_available` answers the storage proxy's probe;
+- `upload_errors` lists statuses that the next uploads of whole files or parts fail with;
+- `ranges_ignored` answers the whole file to a range;
+- `endpoints` lists the entries of the endpoints list. Unset, the endpoints API answers 404, as before its rollout;
+- `storage_proxy_available` answers the storage proxy's probe, which SDK 0.158 sends;
 - `legacy_dbfs_disabled` answers as a workspace disabling the DBFS root;
 - `dbfs_add_block_errors` counts the next DBFS add-blocks that fail.
 
@@ -482,11 +487,28 @@ systems one aiohttp `ClientSession`, with `connection_pool_size` connections:
 
 A failed request raises an `OSError`, chosen by its HTTP status or by the API's `error_code`.
 
-#### Storage proxy or presigned URLs
+#### Endpoints
 
-On first open, the file system probes the Databricks storage proxy, `storage-proxy.databricks.com`, with the workspace
-ID. If it answers, all requests go to it. Otherwise, requests go to the workspace's host, and data moves through
-presigned URLs from the Files API.
+On first open, the file system asks the workspace where file data goes, as SDK 0.163 asks: `GET /api/2.0/fs/endpoints`.
+The list names endpoints best first, and the file system keeps those it can speak:
+
+| Entry                         | Data goes                                                            |
+|-------------------------------|----------------------------------------------------------------------|
+| `IO_OFFLOAD`                  | Through presigned URLs, which the host's Files API 2.0 gives         |
+| `FILES_API` 2.0               | To the Files API 2.0 of the host. On another host, the storage proxy |
+| `FILES_API` 3.0               | To `/api/3.0/fs/files` of the host, a multipart upload by its ID     |
+
+- An entry of another protocol, or with a malformed address, is skipped.
+- Plain HTTP is taken only for Files API 2.0 on another host, or on a workspace reached by plain HTTP. The SDK refuses
+  plain HTTP for Files API 3.0 even there. The dummy server needs it.
+- The request is sent once per file system, with a 10-second timeout and no retry. A failure, a 404 or no usable
+  entry gives the SDK's defaults: `IO_OFFLOAD`, then Files API 2.0, both on the workspace's host.
+- A file read takes the first endpoint. A file written takes the first taking multipart uploads, else `IO_OFFLOAD` on
+  the workspace's host.
+- A failed transfer is not tried again on the next endpoint, as the SDK tries it.
+
+Whole files are uploaded by one `PUT` to the Files API of the endpoint's host. With `IO_OFFLOAD`, that is the
+workspace's Files API 2.0, as in the SDK.
 
 Files smaller than `min_presigned_url_size`, 1 MB, are read from the Files API directly. Presigned URLs for reads are
 renewed after 30 minutes.
@@ -496,8 +518,22 @@ renewed after 30 minutes.
 `VolumeReadableFile` subclasses the library's `AdaptiveReadableFile`, and implements `_fetch_range` with a range `GET`.
 The base class sizes the blocks, from 1 MB to 4 MB, and fetches ahead on sequential reads.
 
-A range request that gets a `429`, `500`, `502`, `503` or `504` is retried up to 3 times, with exponential backoff and
-jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" when the first one went through.
+Each answer is checked, as the SDK checks it:
+
+- A range must come back as a `206`, or as a `200` of exactly its length. A server ignoring `Range` would otherwise
+  have the whole file taken for the range.
+- The first answer's `Last-Modified` is the version read. Later ranges send it as `If-Unmodified-Since`, and an answer
+  of another `Last-Modified` or a `412` raises an `OSError`. So a file replaced while read is never mixed.
+
+#### Retries
+
+A request that is safe to send again is retried up to 3 times after a transient error, as the SDK retries:
+
+- A transient error is a `429` or `5xx` answer, or a lost connection or a timeout.
+- The delay doubles from 1 second, with jitter. An answer's `Retry-After`, in seconds, sets it instead.
+- Range reads are retried.
+- So are a whole file's `PUT`, initiate-upload, multipart parts and complete-upload. A `PUT` sends no `overwrite`, so
+  a repeated one replaces the first. A part sent again replaces the first under its number.
 
 #### Writing
 
@@ -508,27 +544,18 @@ jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" 
 3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
 
-The server's answer to the initiation names the upload API, and the file builds a session object of it:
+Uploads in parts are multipart uploads only, as in the SDK since 0.163:
 
-- `_MultipartSession` sends parts concurrently, then completes the upload with their ETags.
-- `_ResumableSession` sends one part at a time, with `Content-Range`, so the file sets `sequential`. The last part
-  completes the upload. A `308` answer gives the bytes received, and the rest is sent again.
-- An answer naming neither API raises an `OSError`.
+- The file sends parts concurrently, then completes the upload with their ETags.
+- Files API 2.0 names the upload by a `session_token`, and Files API 3.0 by an `upload_id`.
+- An initiation answer naming another upload API raises an `OSError`. That covers resumable uploads, which the SDK
+  dropped.
 
-Multipart support follows the endpoint, not the cloud. The endpoints listing, `GET /api/2.0/fs/endpoints`, gives each
-endpoint a `multipart_upload_supported` flag:
+If a part fails, `close()` aborts the upload and raises an `OSError`:
 
-- the offload path on the workspace host, which presigned URLs use, supports multipart uploads;
-- Files API 3.0 on the storage host supports them;
-- Files API 2.0 called directly on the workspace host does not.
-
-AWS and GCP workspaces answered the same, and both started multipart uploads in the live tests. The server's choice may
-change with API versions, so the file follows the server's answer per upload.
-
-If a part fails, `close()` aborts the upload and raises an `OSError`. Azure Databricks refuses aborts of multipart
-uploads with a 400 answer, and the abort is then skipped.
-
-Part sizes must be multiples of 256 KB. The constructor refuses other minimum and maximum sizes.
+- The upload is aborted by a `POST` to the Files API, as the SDK aborts. No abort URL is asked for, as Azure
+  Databricks refuses them with a 400 answer.
+- The abort is best effort. A failed abort is a WARNING, and the upload's own failure is raised.
 
 ### Workspace files
 
@@ -588,8 +615,8 @@ from the event loop. Code on the loop uses `open_async()` and awaits the file's 
 fsspec opens a file with `autocommit=False` inside `with fs.transaction:`. Each backend's `_open` then returns the
 library's `TransactionFile`, with a `FileTransaction` of `files/fsspec_transaction.py`:
 
-- Volumes use `AdaptiveWritableTransaction`, with `hold_last_part=True`. A resumable upload completes with its last
-  part, and the server chooses that API only once the upload starts.
+- Volumes use `AdaptiveWritableTransaction`. It holds back the completion of a multipart upload, and the `PUT` of a
+  small file, until commit.
 - Workspace files use `_WorkspaceTransaction`, in `workspace.py`. Commit closes the `WorkspaceFile`, which uploads it,
   and discard drops it.
 - DBFS uses `TempPathTransaction`. Its stream shows the file as it grows, so holding a last part would not hide it.
@@ -618,10 +645,10 @@ installed.
 
 - Each request to Databricks is one DEBUG line: its API or HTTP method, the path and the outcome.
   `BaseDatabricksFileSystem._run_in_thread` logs the SDK's calls. `check_response` in `http_client.py` logs the
-  files' HTTP requests, and `volume.py` its storage proxy probe.
+  files' HTTP requests, and `volume.py` its request for the endpoints list.
 - Range reads are not logged, as a read makes many. Their retries are still logged.
-- Retries and aborted uploads are WARNINGs.
-- The fallback from the storage proxy is DEBUG: outside Databricks, the proxy is normally absent.
+- Retries, aborted uploads and failed aborts are WARNINGs.
+- A failed request for the endpoints list is DEBUG: workspaces before the API's rollout answer 404.
 - Operations, such as `find` or `rm`, are not logged here. The library's monitors report them.
 
 ### The copy of fsspec-alt-strategies

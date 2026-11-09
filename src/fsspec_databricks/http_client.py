@@ -2,9 +2,12 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 from random import random
+from typing import TypeVar
 
 from aiohttp import (
+    ClientConnectionError,
     ClientError,
     ClientHandlerType,
     ClientMiddlewareType,
@@ -20,6 +23,8 @@ from databricks.sdk.config import Config
 from fsspec.asyn import sync
 
 from .error import access_error, file_exists_error, file_not_found_error, io_error
+
+T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +176,13 @@ class HttpFileMixin:
     `None` or `0` means no timeout.
     See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
 
+    max_retries: int = 3
+    """The maximum number of retries of a request that is safe to send again, after a transient error."""
+
+    retry_delay: float = 1.0
+    """The base delay in seconds before the first retry. It doubles with each retry, unless the answer's
+    `Retry-After` sets it."""
+
     def _init_http(
         self, session: ClientSession, base_url: str, auth: ClientMiddlewareType
     ) -> None:
@@ -184,44 +196,63 @@ class HttpFileMixin:
             sock_read=self.timeout_sock_read,
         )
 
+    async def _retried(self, send: Callable[[], Awaitable[T]], doing: str) -> T:
+        """Send a request, and again after a transient error, as the SDK does: a 429 or 5xx answer, or a lost
+        connection. Only for requests that are safe to send again."""
+        delay = self.retry_delay
+        for _ in range(self.max_retries):
+            try:
+                return await send()
+            except (OSError, ClientError) as e:
+                cause = _transient_cause(e)
+                if cause is None:
+                    raise
+                logger.warning(
+                    "Retrying after %s: %s, path=%s",
+                    getattr(cause, "status", None) or type(cause).__name__,
+                    doing,
+                    self.path,
+                )
+                retry_after = _retry_after(cause)
+            # The jitter keeps concurrent requests from retrying together.
+            await asyncio.sleep(
+                retry_after if retry_after is not None else delay * (1 + random())
+            )
+            delay *= 2
+        return await send()
+
+
+def _transient_cause(error: BaseException) -> BaseException | None:
+    """The transient failure behind an error, if a retry may succeed: also behind the `OSError` of a response."""
+    if isinstance(error, OSError) and isinstance(error.__cause__, ClientError):
+        error = error.__cause__
+    if isinstance(error, ClientResponseError):
+        return error if error.status in retryable_statuses else None
+    return error if isinstance(error, ClientConnectionError | TimeoutError) else None
+
+
+def _retry_after(error: BaseException) -> float | None:
+    """The seconds of an answer's `Retry-After`, if it has one in seconds."""
+    headers = getattr(error, "headers", None)
+    try:
+        return float(headers["Retry-After"]) if headers else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
 
 class HttpReadableMixin(HttpFileMixin):
-    """Range reads retried after transient server errors. The file implements `_request_range`."""
-
-    fetch_max_retries: int = 3
-    """The maximum number of retries of a range request after a transient error."""
-
-    fetch_retry_delay: float = 1.0
-    """The base delay in seconds before the first retry of a range request. It doubles with each retry."""
+    """Range reads retried after transient errors. The file implements `_request_range`."""
 
     async def _request_range(self, start: int, end: int) -> bytes:
         """Fetch the range, raising aiohttp's errors."""
         raise NotImplementedError
 
     async def _fetch_range(self, start: int, end: int) -> bytes:
+        doing = f"Reading the range {start}-{end}"
         try:
-            delay = self.fetch_retry_delay
-            for _ in range(self.fetch_max_retries):
-                try:
-                    return await self._request_range(start, end)
-                except ClientResponseError as e:
-                    if e.status not in retryable_statuses:
-                        raise
-                    logger.warning(
-                        "Retrying range request after status %d: path=%s, range=%d-%d",
-                        e.status,
-                        self.path,
-                        start,
-                        end,
-                    )
-                # The jitter keeps concurrent range requests from retrying together.
-                await asyncio.sleep(delay * (1 + random()))
-                delay *= 2
-            return await self._request_range(start, end)
+            return await self._retried(lambda: self._request_range(start, end), doing)
         except (ClientError, TimeoutError) as e:
-            raise response_error(
-                self.path, e, f"Reading the range {start}-{end}"
-            ) from e
+            raise response_error(self.path, e, doing) from e
 
 
 __all__ = [

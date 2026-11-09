@@ -1,17 +1,15 @@
 import asyncio
 import logging
-import re
 import threading
 import urllib.parse
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
 from typing import Any, TypeVar
 
 from aiohttp import (
-    ClientConnectionError,
     ClientError,
     ClientMiddlewareType,
-    ClientResponseError,
     ClientSession,
     ClientTimeout,
 )
@@ -126,6 +124,69 @@ def _parse(path: str) -> tuple[str | None, str | None, str | None, str | None, s
         raise file_not_found_error(path) from None
 
 
+_IO_OFFLOAD = ("IO_OFFLOAD", None)
+_FILES_API_V2 = ("FILES_API", "2.0")
+_FILES_API_V3 = ("FILES_API", "3.0")
+
+
+@dataclass(frozen=True)
+class _Endpoint:
+    """An endpoint of file transfers: its protocol, as the endpoints list names it, and its base URL.
+
+    - `IO_OFFLOAD` moves data through presigned URLs, which the Files API 2.0 of its host gives.
+    - `FILES_API` 2.0 and 3.0 take data themselves, with the workspace's credentials. 2.0 on another host than the
+      workspace is the storage proxy.
+    """
+
+    kind: tuple[str, str | None]
+    base_url: str
+    multipart_upload_supported: bool
+
+    @property
+    def api_version(self) -> str:
+        """The version of the Files API URLs: IO_OFFLOAD's are 2.0."""
+        return "3.0" if self.kind == _FILES_API_V3 else "2.0"
+
+    @property
+    def presigned(self) -> bool:
+        return self.kind == _IO_OFFLOAD
+
+
+def _parse_endpoint(entry: Any, workspace_host: str) -> _Endpoint | None:
+    """An entry of the endpoints list, or None if unusable: an unknown protocol, or an unsafe or malformed address.
+
+    Follows the SDK's rules, but one: plain HTTP is allowed on the workspace host whenever the workspace uses it,
+    for Files API 3.0 too.
+    """
+    if not isinstance(entry, dict):
+        return None
+    kind = (entry.get("api"), entry.get("api_version"))
+    if kind not in (_IO_OFFLOAD, _FILES_API_V2, _FILES_API_V3):
+        return None
+    scheme, hostname = entry.get("scheme"), entry.get("hostname")
+    if scheme not in ("http", "https") or not isinstance(hostname, str) or not hostname:
+        return None
+    base_url = f"{scheme}://{hostname}"
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        port = parsed.port
+    except ValueError:
+        return None
+    # A bare host and port: no path, query or user, so requests go to the host named.
+    if parsed.netloc != hostname or parsed.username is not None or port == 0:
+        return None
+    if scheme == "http":
+        # Plain HTTP carries the credentials in the clear: only to a workspace reached that way, or the storage proxy.
+        workspace = urllib.parse.urlsplit(workspace_host)
+        if parsed.hostname == workspace.hostname:
+            if workspace.scheme != "http":
+                return None
+        elif kind != _FILES_API_V2:
+            return None
+    # As the SDK reads it: an unset flag is false.
+    return _Endpoint(kind, base_url, entry.get("multipart_upload_supported") is True)
+
+
 class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     """Unity Catalog Volume file system.
 
@@ -152,11 +213,8 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     io_concurrency: int = 24
     """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""
 
-    _storage_proxy_hostname: str = "http://storage-proxy.databricks.com"
-    """The hostname of the Databricks storage proxy."""
-
-    _storage_proxy_probe_timeout: float = 3.0
-    """The timeout in seconds for the storage proxy probe request."""
+    _endpoints_timeout: float = 10.0
+    """The timeout in seconds of the request for the endpoints list, which is never retried."""
 
     def __init__(
         self,
@@ -192,7 +250,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         self._init_session(connection_pool_size)
         self._lock = threading.Lock()
         self._workspace_id: int | None = None
-        self._storage_proxy_available: bool | None = None
+        self._endpoints: list[_Endpoint] | None = None
 
         super().__init__(
             client=client,
@@ -211,49 +269,38 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
                 self._workspace_id = self.client.get_workspace_id()
             return self._workspace_id
 
-    @property
-    def storage_proxy_available(self) -> bool:
-        """Whether the Databricks storage proxy is available for this workspace."""
-        if self._storage_proxy_available is None:
-            sync(self.loop, self._probe_storage_proxy)
-        return self._storage_proxy_available
+    async def _get_endpoints(self) -> list["_Endpoint"]:
+        """The endpoints of file transfers, best first: asked once, as the SDK asks, else the SDK's defaults."""
+        if self._endpoints is None:
+            host = self.config.host.rstrip("/")
+            endpoints = [
+                endpoint
+                for entry in await self._fetch_endpoints(host)
+                if (endpoint := _parse_endpoint(entry, host)) is not None
+            ]
+            self._endpoints = endpoints or [
+                _Endpoint(_IO_OFFLOAD, host, multipart_upload_supported=True),
+                _Endpoint(_FILES_API_V2, host, multipart_upload_supported=False),
+            ]
+        return self._endpoints
 
-    async def _probe_storage_proxy(self) -> bool:
-        if self._storage_proxy_available is not None:
-            return self._storage_proxy_available
-
-        workspace_id = await asyncio.to_thread(lambda: self.workspace_id)
-        probe_url = (
-            f"{self._storage_proxy_hostname}/api/2.0/fs/files"
-            f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
-        )
+    async def _fetch_endpoints(self, host: str) -> list[Any]:
+        """The entries of the endpoints list, or none if the workspace cannot answer: one request, not retried."""
         session = await self._get_session()
         try:
-            async with session.head(
-                probe_url,
+            async with session.get(
+                f"{host}/api/2.0/fs/endpoints",
                 middlewares=(workspace_authenticator(self.config),),
-                timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
+                timeout=ClientTimeout(total=self._endpoints_timeout),
             ) as response:
-                available = response.status == 200
-                outcome = response.status
-        except (TimeoutError, ClientConnectionError) as e:
-            # The proxy can be unresolvable or unreachable from this network.
-            available = False
-            outcome = type(e).__name__
-        logger.debug(
-            "HEAD storage proxy probe: workspace_id=%d, status=%s",
-            workspace_id,
-            outcome,
-        )
-
-        if not available:
-            # Outside Databricks the proxy is normally absent: the fallback is expected.
-            logger.debug(
-                "Storage proxy unavailable, using the workspace host: workspace_id=%d",
-                workspace_id,
-            )
-        self._storage_proxy_available = available
-        return available
+                logger.debug("Listing endpoints: status=%d", response.status)
+                # A 404 before the API's rollout on the workspace.
+                body = await response.json() if response.status == 200 else {}
+        except (ClientError, TimeoutError, ValueError) as e:
+            logger.debug("Listing endpoints: failed=%s", type(e).__name__)
+            return []
+        entries = body.get("endpoints") if isinstance(body, dict) else None
+        return entries if isinstance(entries, list) else []
 
     ### File/directory information
     async def _info(self, path, include_browse: bool | None = None, **kwargs):
@@ -467,35 +514,37 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         if path_in_volume is None or path_in_volume == "/":
             raise is_a_directory_error(path)
 
-        if await self._probe_storage_proxy():
-            base_url = self._storage_proxy_hostname
-            use_presigned_url = False
-        else:
-            base_url = self.config.host
-            use_presigned_url = True
-
+        endpoints = await self._get_endpoints()
         loop = asyncio.get_running_loop()
         session = await self._get_session()
         auth = workspace_authenticator(self.config)
         if "r" in mode:
+            endpoint = endpoints[0]
             return VolumeReadableFile(
                 full_path,
                 loop,
                 int(info["size"]),
                 session=session,
-                base_url=base_url,
+                base_url=endpoint.base_url,
                 auth=auth,
-                prefer_presigned_url=use_presigned_url,
+                api_version=endpoint.api_version,
+                prefer_presigned_url=endpoint.presigned,
                 concurrency_limit=self.io_limit,
             )
         else:
+            # Parts need an endpoint taking multipart uploads. Else, as the SDK defaults: presigned URLs.
+            endpoint = next(
+                (e for e in endpoints if e.multipart_upload_supported),
+                _Endpoint(_IO_OFFLOAD, self.config.host.rstrip("/"), True),
+            )
             return VolumeWritableFile(
                 full_path,
                 loop,
                 session=session,
-                base_url=base_url,
+                base_url=endpoint.base_url,
                 auth=auth,
-                use_presigned_url=use_presigned_url,
+                api_version=endpoint.api_version,
+                use_presigned_url=endpoint.presigned,
                 concurrency_limit=self.io_limit,
             )
 
@@ -516,9 +565,8 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         f = sync(self.loop, self._open_file, path, mode)
         if autocommit or "r" in mode:
             return f
-        # In a transaction, the upload is completed on commit, and aborted on discard. The last part is held too:
-        # a resumable upload completes with it, and the server chooses that API only once the upload starts.
-        return TransactionFile(AdaptiveWritableTransaction(f, hold_last_part=True))
+        # In a transaction, the upload is completed on commit, and aborted on discard.
+        return TransactionFile(AdaptiveWritableTransaction(f))
 
     def open(self, path, mode="rb", **kwargs):
         """Open a file in a Unity Catalog Volume.
@@ -545,9 +593,13 @@ class _VolumeFileMixin(HttpFileMixin):
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
+        api_version: str,
     ) -> None:
         self._init_http(session, base_url, auth)
-        self._files_url = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(path)}"
+        self.api_version = api_version
+        self._files_url = (
+            f"{self._base_url}/api/{api_version}/fs/files{urllib.parse.quote(path)}"
+        )
 
 
 class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFile):
@@ -577,11 +629,12 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
+        api_version: str = "2.0",
         prefer_presigned_url: bool = True,
         **kwargs,
     ):
         super().__init__(path, loop, size, **kwargs)
-        self._init_requests(path, session, base_url, auth)
+        self._init_requests(path, session, base_url, auth, api_version)
 
         self.use_presigned_url = (
             prefer_presigned_url and size >= self.min_presigned_url_size
@@ -591,6 +644,9 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
         self._presigned_url_headers: dict[str, str] | None = None
         self._presigned_url_refresh_time: datetime | None = None
         self._presigned_url_lock = asyncio.Lock()
+
+        # The version read: the first answer's Last-Modified, from the storage answering the ranges.
+        self._last_modified: str | None = None
 
     async def _get_presigned_url(self) -> tuple[str, dict[str, str]]:
         """The presigned URL to read the file, with its headers: created anew when missing or due for renewal."""
@@ -633,6 +689,9 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
             middlewares = (self._auth,)
 
         headers["Range"] = f"bytes={start}-{end - 1}"
+        if self._last_modified is not None:
+            # As the SDK reads: the server refuses the range of a file replaced since.
+            headers["If-Unmodified-Since"] = self._last_modified
 
         async with self._session.get(
             url,
@@ -641,29 +700,41 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
             timeout=self._timeout,
         ) as response:
             # Reads of ranges are not logged: a read makes many, and the lines would drown the rest.
+            if response.status == 412:
+                raise io_error(self.path, "The file changed while it was read")
             response.raise_for_status()
+            # A server ignoring Range answers 200 with the whole file, which must not be taken for the range.
+            if response.status != 206 and response.content_length != end - start:
+                raise io_error(
+                    self.path,
+                    f"Range {start}-{end} answered with status {response.status}, "
+                    f"length {response.content_length}",
+                )
+            self._check_version(response.headers.get("Last-Modified"))
             return await response.read()
 
-
-_range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
+    def _check_version(self, last_modified: str | None) -> None:
+        """Keep the first answer's Last-Modified, and refuse another: concurrent first ranges go unconditionally."""
+        if last_modified is None:
+            return
+        if self._last_modified is None:
+            self._last_modified = last_modified
+        elif last_modified != self._last_modified:
+            raise io_error(self.path, "The file changed while it was read")
 
 
 class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
-    """A Unity Catalog Volume file uploaded whole, or in parts by the upload API the server chooses.
+    """A Unity Catalog Volume file uploaded whole, or in parts by a multipart upload, as the SDK uploads.
 
-    The initiate-upload reply names the API of each upload: multipart or resumable. The server's
-    choice is not fixed per cloud and may change with API versions, so the file follows it. The
-    file keeps what both APIs share, and each API's requests live in its session class.
+    The SDK speaks no other upload API since 0.163: an initiate-upload reply naming another, such as a resumable
+    upload, raises an `OSError`.
     """
 
-    part_granularity: int = 256 * 1024
-    """Every part but the last is a multiple of this size."""
-
     min_block_size: int = 5 * _MiB
-    """The smallest part but the last. A multiple of `part_granularity`."""
+    """The smallest part but the last."""
 
     max_block_size: int = 16 * _MiB
-    """The largest part. A multiple of `part_granularity`."""
+    """The largest part."""
 
     min_multipart_size: int = 5 * _MiB
     """The size from which a file is uploaded in parts."""
@@ -679,23 +750,17 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
+        api_version: str = "2.0",
         use_presigned_url: bool = True,
         **kwargs,
     ):
-        # Checked before the file is set up, so that nothing is left to abort.
-        for name in ("min_block_size", "max_block_size"):
-            size = kwargs.get(name) or getattr(self, name)
-            if size % self.part_granularity != 0:
-                raise ValueError(
-                    f"{name} is {size} but it must be a multiple of "
-                    f"{self.part_granularity}: path={path}"
-                )
-
         super().__init__(path, loop, **kwargs)
-        self._init_requests(path, session, base_url, auth)
+        self._init_requests(path, session, base_url, auth, api_version)
 
         self.use_presigned_url = use_presigned_url
-        self._upload_session: _MultipartSession | _ResumableSession | None = None
+        # The multipart upload started: its token, and the query naming it in the Files API's requests.
+        self._session_token: str | None = None
+        self._upload: dict[str, str] | None = None
 
     def _url_expire_time(self) -> str:
         return to_rfc3339(
@@ -713,114 +778,87 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             await check_response(response, self.path, doing)
             return await response.json()
 
-    async def _delete(
-        self, url: str, headers: dict[str, str], params: dict[str, Any] | None
-    ) -> None:
-        async with self._session.delete(
-            url,
-            headers=headers,
-            params=params,
-            middlewares=self._middlewares(),
-            data=b"",
-            timeout=self._timeout,
-        ) as response:
-            await check_response(response, self.path, "Aborting upload")
-
     async def _upload_all(self, data: bytes) -> None:
-        async with self._session.put(
-            self._files_url,
-            data=data,
-            middlewares=(self._auth,),
-            timeout=self._timeout,
-        ) as response:
-            await check_response(response, self.path, "Uploading")
+        async def put() -> None:
+            async with self._session.put(
+                self._files_url,
+                data=data,
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Uploading")
+
+        # Sent again whole: it overwrites, as no `overwrite` is sent.
+        await self._retried(put, "Uploading")
 
     async def _start_multipart_upload(self) -> None:
-        async with self._session.post(
-            self._files_url,
-            params={"action": "initiate-upload"},
-            middlewares=(self._auth,),
-            timeout=self._timeout,
-        ) as response:
-            await check_response(response, self.path, "Initiating upload")
-            result = await response.json()
+        async def initiate() -> Any:
+            async with self._session.post(
+                self._files_url,
+                params={"action": "initiate-upload"},
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Initiating upload")
+                return await response.json()
 
-        # The server chooses the API of each upload: the file follows it.
+        # A session initiated twice leaves the first one unused.
+        result = await self._retried(initiate, "Initiating upload")
+
         if "multipart_upload" in result:
-            self._upload_session = _MultipartSession(
-                self, result["multipart_upload"]["session_token"]
-            )
-        elif "resumable_upload" in result:
-            self._upload_session = await _ResumableSession.start(
-                self, result["resumable_upload"]["session_token"]
-            )
-            # A resumable upload takes its parts one at a time, in order.
-            self.sequential = True
+            self._session_token = result["multipart_upload"]["session_token"]
+            self._upload = {
+                "upload_type": "multipart",
+                "session_token": self._session_token,
+            }
+        elif "upload_id" in result:
+            # Files API 3.0 names a multipart upload by its ID.
+            self._session_token = result["upload_id"]
+            self._upload = {"upload_id": self._session_token}
         else:
             raise io_error(self.path, f"Unexpected initiate-upload response: {result}")
 
     async def _upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
-    ) -> tuple[int, str] | None:
-        assert self._upload_session is not None
-        # The server's errors as OSErrors of their kind, e.g. a PermissionError for a 403.
-        try:
-            return await self._upload_session.upload_part(data, start, end, index, last)
-        except (ClientError, TimeoutError) as e:
-            raise response_error(self.path, e, f"Uploading part {index}") from e
-
-    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        assert self._upload_session is not None
-        await self._upload_session.complete(parts)
-
-    async def _abort_multipart_upload(self) -> None:
-        if self._upload_session is None:
-            # No session started, e.g. the initiation failed: nothing to abort.
-            return
-        logger.warning("Aborting upload: path=%s", self.path)
-        await self._upload_session.abort()
-
-
-class _MultipartSession:
-    """A multipart upload session: parts in parallel, completed with their ETags."""
-
-    def __init__(self, file: VolumeWritableFile, session_token: str):
-        self.file = file
-        self.session_token = session_token
-
-    async def upload_part(
-        self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> tuple[int, str]:
-        file = self.file
+        assert self._upload is not None
         # The multipart upload API's part numbers are 1-based.
         part_number = index + 1
+        doing = f"Uploading part {part_number}"
 
-        url, headers, params = await self._part_url(part_number)
+        async def put() -> tuple[int, str]:
+            url, headers, params = await self._part_url(part_number)
+            async with self._session.put(
+                url,
+                headers=headers,
+                params=params,
+                data=data,
+                middlewares=self._middlewares(),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, doing)
+                return part_number, response.headers.get("etag", "")
 
-        async with file._session.put(
-            url,
-            headers=headers,
-            params=params,
-            data=data,
-            middlewares=file._middlewares(),
-            timeout=file._timeout,
-        ) as response:
-            await check_response(response, file.path, f"Uploading part {part_number}")
-            return part_number, response.headers.get("etag", "")
+        # The server's errors as OSErrors of their kind, e.g. a PermissionError for a 403.
+        try:
+            # A part sent again replaces the first, under the same number.
+            return await self._retried(put, doing)
+        except (ClientError, TimeoutError) as e:
+            raise response_error(self.path, e, doing) from e
 
     async def _part_url(
         self, part_number: int
     ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        file = self.file
-        if file.use_presigned_url:
-            result = await file._post_json(
-                f"{file._base_url}/api/2.0/fs/create-upload-part-urls",
+        """Where a part goes: a presigned URL, or the Files API with the upload in the query."""
+        if self.use_presigned_url:
+            result = await self._post_json(
+                f"{self._base_url}/api/2.0/fs/create-upload-part-urls",
                 {
-                    "path": file.path,
-                    "session_token": self.session_token,
+                    "path": self.path,
+                    "session_token": self._session_token,
                     "start_part_number": part_number,
                     "count": 1,
-                    "expire_time": file._url_expire_time(),
+                    "expire_time": self._url_expire_time(),
                 },
                 "Getting URL for part upload",
             )
@@ -831,170 +869,50 @@ class _MultipartSession:
             }
             headers["Content-Type"] = "application/octet-stream"
             return url, headers, None
-        return (
-            file._files_url,
-            {"Content-Type": "application/octet-stream"},
-            {
-                "session_token": self.session_token,
-                "upload_type": "multipart",
-                "part_number": part_number,
-            },
-        )
-
-    async def complete(self, parts: list[Any]) -> None:
-        file = self.file
-        async with file._session.post(
-            file._files_url,
-            params={
-                "action": "complete-upload",
-                "upload_type": "multipart",
-                "session_token": self.session_token,
-            },
-            json={
-                "parts": [
-                    {"part_number": i, "etag": etag} for i, etag in sorted(parts)
-                ],
-            },
-            middlewares=(file._auth,),
-            timeout=file._timeout,
-        ) as response:
-            await check_response(response, file.path, "Completing upload")
-
-    async def _abort_url(self) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        file = self.file
-        if file.use_presigned_url:
-            result = await file._post_json(
-                f"{file._base_url}/api/2.0/fs/create-abort-upload-url",
-                {
-                    "path": file.path,
-                    "session_token": self.session_token,
-                    "expire_time": file._url_expire_time(),
-                },
-                "Getting URL for upload abort",
+        else:
+            return (
+                self._files_url,
+                {"Content-Type": "application/octet-stream"},
+                {**self._upload, "part_number": part_number},
             )
-            url = result["abort_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["abort_upload_url"].get("headers", [])
-            }
-            headers["Content-Type"] = "application/octet-stream"
-            return url, headers, None
-        return (
-            file._files_url,
-            {"Content-Type": "application/json"},
-            {"action": "abort-upload", "session_token": self.session_token},
-        )
 
-    async def abort(self) -> None:
-        try:
-            url, headers, params = await self._abort_url()
-        except OSError as e:
-            if (
-                isinstance(e.__cause__, ClientResponseError)
-                and e.__cause__.status == 400
-            ):
-                return  # Azure Databricks does not support abort of multipart upload
-            raise
-        await self.file._delete(url, headers, params)
+    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
+        assert self._upload is not None
 
-
-class _ResumableSession:
-    """A resumable upload session: parts one at a time, in order, the last completing it.
-
-    Parts but the last are multiples of 256 KiB, as resumable uploads require.
-    """
-
-    def __init__(
-        self,
-        file: VolumeWritableFile,
-        url: str,
-        headers: dict[str, str],
-        params: dict[str, Any] | None,
-    ):
-        self.file = file
-        self.url = url
-        self.headers = headers
-        self.params = params
-
-    @classmethod
-    async def start(
-        cls, file: VolumeWritableFile, session_token: str
-    ) -> "_ResumableSession":
-        """Get where to send the parts, which is also where to abort the session."""
-        if file.use_presigned_url:
-            result = await file._post_json(
-                f"{file._base_url}/api/2.0/fs/create-resumable-upload-url",
-                {
-                    "path": file.path,
-                    "session_token": session_token,
-                    "expire_time": file._url_expire_time(),
+        async def complete() -> None:
+            async with self._session.post(
+                self._files_url,
+                params={"action": "complete-upload", **self._upload},
+                json={
+                    "parts": [
+                        {"part_number": i, "etag": etag} for i, etag in sorted(parts)
+                    ],
                 },
-                "Getting URL for resumable upload",
-            )
-            url = result["resumable_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["resumable_upload_url"].get("headers", [])
-            }
-            return cls(file, url, headers, None)
-        return cls(
-            file,
-            file._files_url,
-            {"Content-Type": "application/octet-stream"},
-            {"session_token": session_token, "upload_type": "resumable"},
-        )
-
-    async def upload_part(
-        self, data: bytes, start: int, end: int, index: int, last: bool
-    ) -> None:
-        file = self.file
-        original_start = start
-        while True:
-            headers = dict(self.headers)
-            headers["Content-Range"] = f"bytes {start}-{end - 1}/{end if last else '*'}"
-            headers["Content-Type"] = "application/octet-stream"
-
-            async with file._session.put(
-                self.url,
-                headers=headers,
-                params=self.params,
-                data=data[start - original_start :],
-                timeout=file._timeout,
-                middlewares=file._middlewares(),
+                middlewares=(self._auth,),
+                timeout=self._timeout,
             ) as response:
-                logger.debug(
-                    "PUT resumable part %d-%d: path=%s, status=%d",
-                    start,
-                    end,
-                    file.path,
-                    response.status,
-                )
-                if response.status in (200, 201) and last:
-                    return  # Upload is done
-                if response.status != 308:
-                    raise io_error(
-                        file.path,
-                        f"Unexpected response for resumable upload: status={response.status}",
-                    )
-                m = _range_pat.match(response.headers.get("Range") or "")
-                if m is None:
-                    raise io_error(
-                        file.path,
-                        f"Invalid or missing Range header in resumable upload response: "
-                        f"header={response.headers.get('Range')!r}",
-                    )
-                confirmed = int(m.group("end"))
-                if confirmed == end - 1:
-                    return
-                # Send again what the server has not confirmed
-                start = confirmed + 1
+                await check_response(response, self.path, "Completing upload")
 
-    async def complete(self, parts: list[Any]) -> None:
-        pass  # The last part completes a resumable upload.
+        await self._retried(complete, "Completing upload")
 
-    async def abort(self) -> None:
-        # The upload URL is known already: no request for another.
-        await self.file._delete(self.url, self.headers, self.params)
+    async def _abort_multipart_upload(self) -> None:
+        if self._upload is None:
+            # No upload started, e.g. the initiation failed: nothing to abort.
+            return
+        logger.warning("Aborting upload: path=%s", self.path)
+        # A POST to the Files API, with or without presigned URLs, as the SDK aborts. No abort URL is asked for:
+        # Azure Databricks refuses them.
+        try:
+            async with self._session.post(
+                self._files_url,
+                params={"action": "abort-upload", **self._upload},
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Aborting upload")
+        except (OSError, ClientError) as e:
+            # Best effort, as the SDK's: the caller gets the upload's own failure, or its discard succeeds.
+            logger.warning("Failed to abort upload: path=%s, error=%s", self.path, e)
 
 
 __all__ = [

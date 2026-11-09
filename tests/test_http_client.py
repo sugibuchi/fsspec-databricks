@@ -7,7 +7,12 @@ from aiohttp import ClientConnectionError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
-from fsspec_databricks.http_client import _error_code, response_error
+from fsspec_databricks.http_client import (
+    _error_code,
+    _retry_after,
+    _transient_cause,
+    response_error,
+)
 
 
 def _status_error(status: int) -> ClientResponseError:
@@ -40,6 +45,45 @@ def test_response_error(status, error_code, expected, error_no):
 def test_response_error_without_status():
     e = response_error("/a/b", ClientConnectionError(), "Doing")
     assert (type(e), e.errno) == (OSError, errno.EIO)
+
+
+def _response_oserror(status: int) -> OSError:
+    cause = _status_error(status)
+    e = response_error("/a/b", cause, "Doing")
+    e.__cause__ = cause
+    return e
+
+
+@pytest.mark.parametrize(
+    ("error", "transient"),
+    [
+        (_status_error(503), True),
+        (_status_error(429), True),
+        (_status_error(404), False),
+        (_response_oserror(500), True),
+        (_response_oserror(403), False),
+        (ClientConnectionError(), True),
+        (TimeoutError(), True),
+        (OSError(errno.EIO, "Changed"), False),
+        (ValueError(), False),
+    ],
+)
+def test_transient_cause(error, transient):
+    assert (_transient_cause(error) is not None) is transient
+
+
+def test_retry_after():
+    info = RequestInfo(URL("http://localhost"), "GET", CIMultiDictProxy(CIMultiDict()))
+    headers = CIMultiDictProxy(CIMultiDict({"Retry-After": "7"}))
+    assert _retry_after(ClientResponseError(info, (), status=429, headers=headers)) == 7
+    # An HTTP date is ignored: the delay then doubles.
+    headers = CIMultiDictProxy(
+        CIMultiDict({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+    )
+    assert (
+        _retry_after(ClientResponseError(info, (), status=429, headers=headers)) is None
+    )
+    assert _retry_after(_status_error(503)) is None
 
 
 @pytest.mark.parametrize(
