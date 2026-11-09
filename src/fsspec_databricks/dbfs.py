@@ -270,18 +270,10 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
             return f
         # The API's stream makes a file visible as it grows, and replaces the file there when it starts. Holding the
         # last part, as Volumes do, would still show the rest. So a transaction writes to a temporary path, moved into
-        # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own. It
-        # takes the requests' settings of the file opened, which checked the mode.
+        # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own.
         transaction = TempPathTransaction(
             path,
-            lambda p: DbfsWritableFile(
-                p,
-                self.loop,
-                session=f._session,
-                base_url=f._base_url,
-                auth=f._auth,
-                concurrency_limit=self.io_limit,
-            ),
+            lambda p: sync(self.loop, self._open_file, p, "wb"),
             functools.partial(self._commit_move, exclusive="x" in mode),
             lambda p: sync(self.loop, self._delete, p, False),
         )
