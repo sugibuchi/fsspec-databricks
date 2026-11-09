@@ -266,7 +266,8 @@ Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 
 Files size their requests by how they are read or written:
 
-- reads fetch blocks of 1 MB to 4 MB;
+- reads fetch blocks of 256 KB to 4 MB;
+- sequential reads fetch up to 128 MB ahead, for each file opened;
 - files from 5 MB are uploaded in parts of 5 MB to 16 MB.
 
 For a slow or distant network, lower the concurrency:

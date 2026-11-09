@@ -605,13 +605,18 @@ class _VolumeFileMixin(HttpFileMixin):
 class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFile):
     """A Unity Catalog Volume file read by range requests, through presigned URLs or the Files API."""
 
-    min_block_size: int = 1 * _MiB
+    min_block_size: int = 256 * 1024
     """The smallest range request, which smaller reads fetch whole."""
 
     max_block_size: int = 4 * _MiB
     """The largest range request. Larger reads are split, to fetch the parts together."""
 
-    min_presigned_url_size: int = 1024 * 1024
+    # Many small requests in flight beat fewer large ones: 32 x 4 MB read faster than 8 x 16 MB on Azure.
+    spread: int = 32
+    """How many requests a large read is split into. Sequential reads fetch up to `spread * max_block_size` ahead."""
+
+    # Presigned URLs were faster even for 64 KB files.
+    min_presigned_url_size: int = 0
     """The smallest file read through presigned URLs. Smaller files are read from the Files API directly."""
 
     presigned_url_expiration_duration: int = 60  # min

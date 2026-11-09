@@ -510,13 +510,20 @@ The list names endpoints best first, and the file system keeps those it can spea
 Whole files are uploaded by one `PUT` to the Files API of the endpoint's host. With `IO_OFFLOAD`, that is the
 workspace's Files API 2.0, as in the SDK.
 
-Files smaller than `min_presigned_url_size`, 1 MB, are read from the Files API directly. Presigned URLs for reads are
-renewed after 30 minutes.
+Reads take presigned URLs whatever the file size, as they were faster even for 64 KB files. Files smaller than
+`min_presigned_url_size` would be read from the Files API directly. Presigned URLs for reads are renewed after 30
+minutes.
 
 #### Reading
 
 `VolumeReadableFile` subclasses the library's `AdaptiveReadableFile`, and implements `_fetch_range` with a range `GET`.
-The base class sizes the blocks, from 1 MB to 4 MB, and fetches ahead on sequential reads.
+The base class sizes the blocks, from 256 KB to 4 MB, and fetches ahead on sequential reads.
+
+The defaults come from benchmarks on an Azure workspace:
+
+- Sequential reads fetch up to 32 blocks ahead, 128 MB. That read about 250 MB/s, against 160 MB/s for 8 blocks.
+- Splitting the read-ahead into 4 MB blocks beat 16 MB blocks.
+- Blocks from 256 KB cut random reads of 64 KB from about 50 ms to 40 ms, against 1 MB blocks.
 
 Each answer is checked, as the SDK checks it:
 
