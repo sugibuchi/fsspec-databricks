@@ -496,6 +496,13 @@ renewed after 30 minutes.
 `VolumeReadableFile` subclasses the library's `AdaptiveReadableFile`, and implements `_fetch_range` with a range `GET`.
 The base class sizes the blocks, from 1 MB to 4 MB, and fetches ahead on sequential reads.
 
+Each answer is checked, as the SDK checks it:
+
+- A range must come back as a `206`, or as a `200` of exactly its length. A server ignoring `Range` would otherwise
+  have the whole file taken for the range.
+- The first answer's `Last-Modified` is the version read. Later ranges send it as `If-Unmodified-Since`, and an answer
+  of another `Last-Modified` or a `412` raises an `OSError`. So a file replaced while read is never mixed.
+
 #### Retries
 
 A request that is safe to send again is retried up to 3 times after a transient error, as the SDK retries:

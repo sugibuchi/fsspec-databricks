@@ -187,11 +187,13 @@ class DbfsEntry:
 
 @dataclass(frozen=True)
 class Recorded:
-    """A request served: its method, its path, and its parameters from the query and the body, without data."""
+    """A request served: its method, its path, its parameters from the query and the body, without data, and its
+    headers, by lowercase names."""
 
     method: str
     path: str
     params: dict
+    headers: dict = field(default_factory=dict)
 
     def __iter__(self):
         return iter((self.method, self.path))
@@ -222,7 +224,9 @@ class _Recorder:
             if name not in _data_fields:
                 params[name] = _text(value)
         _storage.requests.append(
-            Recorded(scope["method"], urllib.parse.unquote(scope["path"]), params)
+            Recorded(
+                scope["method"], urllib.parse.unquote(scope["path"]), params, headers
+            )
         )
 
         replayed = False
@@ -281,6 +285,9 @@ class DummyStorage:
     upload_errors: list[int] = field(default_factory=list)
     """Statuses that the next uploads of whole files or parts get, one each."""
 
+    ranges_ignored: bool = False
+    """Whether downloads answer the whole file to a Range, as an HTTP server may."""
+
     workspace: dict[str, WorkspaceObject] = field(default_factory=dict)
     dbfs: dict[str, DbfsEntry] = field(default_factory=dict)
     dbfs_handles: dict[int, str] = field(default_factory=dict)
@@ -317,6 +324,7 @@ class DummyStorage:
         self.storage_proxy_available = False
         self.read_errors = []
         self.upload_errors = []
+        self.ranges_ignored = False
         self.workspace = {"/": WorkspaceObject("DIRECTORY", 0)}
         self.dbfs = {"/": DbfsEntry(True, 0)}
         self.dbfs_handles = {}
@@ -586,7 +594,7 @@ async def files_download(
         raise ApiError("FAILED_PRECONDITION", f"The file {path} was modified.", 412)
 
     headers = file.headers()
-    if not range:
+    if not range or storage.ranges_ignored:
         return Response(content=file.data, headers=headers)
     positions = _byte_range(range, len(file.data))
     if positions is None:

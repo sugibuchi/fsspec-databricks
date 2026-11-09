@@ -1251,6 +1251,45 @@ def test_volume_file_write_no_retry(
     assert len(dummy.upload_errors) == 1
 
 
+@pytest.mark.parametrize("prefer_presigned_url", [True, False])
+def test_volume_file_read_changed_file(
+    dummy, dummy_api, client_event_loop, aiohttp_session, prefer_presigned_url
+):
+    """A file replaced while read fails, rather than mix two versions."""
+    data = randbytes(20 * 1000 * 1000)
+    dummy.vol_write(path, data)
+
+    with _reader(
+        aiohttp_session,
+        dummy_api,
+        client_event_loop,
+        len(data),
+        prefer_presigned_url=prefer_presigned_url,
+    ) as f:
+        assert f.read(100) == data[:100]
+        # A newer version, by more than the second of HTTP dates.
+        dummy.volume_files[path].last_modified += 2000
+        f.seek(15 * 1000 * 1000)
+        with pytest.raises(OSError, match="changed while it was read"):
+            f.read(100)
+
+    ranges = dummy.requests_to("/api/2.0/fs/files", "GET")
+    assert "if-unmodified-since" in ranges[-1].headers
+
+
+def test_volume_file_read_range_ignored(
+    dummy, dummy_api, client_event_loop, aiohttp_session
+):
+    """A whole file answered to a range is refused, not taken for the range."""
+    data = randbytes(20 * 1000 * 1000)
+    dummy.vol_write(path, data)
+    dummy.ranges_ignored = True
+
+    with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
+        with pytest.raises(OSError, match="answered with status 200"):
+            f.read(100)
+
+
 def test_volume_file_read_parquet(
     client_event_loop,
     dummy_api,

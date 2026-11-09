@@ -591,6 +591,9 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
         self._presigned_url_refresh_time: datetime | None = None
         self._presigned_url_lock = asyncio.Lock()
 
+        # The version read: the first answer's Last-Modified, from the storage answering the ranges.
+        self._last_modified: str | None = None
+
     async def _get_presigned_url(self) -> tuple[str, dict[str, str]]:
         """The presigned URL to read the file, with its headers: created anew when missing or due for renewal."""
 
@@ -632,6 +635,9 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
             middlewares = (self._auth,)
 
         headers["Range"] = f"bytes={start}-{end - 1}"
+        if self._last_modified is not None:
+            # As the SDK reads: the server refuses the range of a file replaced since.
+            headers["If-Unmodified-Since"] = self._last_modified
 
         async with self._session.get(
             url,
@@ -640,8 +646,27 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
             timeout=self._timeout,
         ) as response:
             # Reads of ranges are not logged: a read makes many, and the lines would drown the rest.
+            if response.status == 412:
+                raise io_error(self.path, "The file changed while it was read")
             response.raise_for_status()
+            # A server ignoring Range answers 200 with the whole file, which must not be taken for the range.
+            if response.status != 206 and response.content_length != end - start:
+                raise io_error(
+                    self.path,
+                    f"Range {start}-{end} answered with status {response.status}, "
+                    f"length {response.content_length}",
+                )
+            self._check_version(response.headers.get("Last-Modified"))
             return await response.read()
+
+    def _check_version(self, last_modified: str | None) -> None:
+        """Keep the first answer's Last-Modified, and refuse another: concurrent first ranges go unconditionally."""
+        if last_modified is None:
+            return
+        if self._last_modified is None:
+            self._last_modified = last_modified
+        elif last_modified != self._last_modified:
+            raise io_error(self.path, "The file changed while it was read")
 
 
 _range_pat = re.compile(r"bytes=(?P<start>\d+)-(?P<end>\d+)")
