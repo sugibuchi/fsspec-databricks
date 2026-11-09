@@ -253,15 +253,16 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
                 auth=auth,
                 concurrency_limit=self.io_limit,
             )
-        return DbfsWritableFile(
-            path,
-            loop,
-            session=session,
-            base_url=self.config.host,
-            auth=auth,
-            overwrite="x" not in mode,
-            concurrency_limit=self.io_limit,
-        )
+        else:
+            return DbfsWritableFile(
+                path,
+                loop,
+                session=session,
+                base_url=self.config.host,
+                auth=auth,
+                overwrite="x" not in mode,
+                concurrency_limit=self.io_limit,
+            )
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):

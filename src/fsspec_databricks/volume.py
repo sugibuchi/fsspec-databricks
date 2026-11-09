@@ -474,24 +474,29 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
             base_url = self.config.host
             use_presigned_url = True
 
-        kwargs = {
-            "session": await self._get_session(),
-            "base_url": base_url,
-            "auth": workspace_authenticator(self.config),
-            "concurrency_limit": self.io_limit,
-        }
         loop = asyncio.get_running_loop()
+        session = await self._get_session()
+        auth = workspace_authenticator(self.config)
         if "r" in mode:
             return VolumeReadableFile(
                 full_path,
                 loop,
                 int(info["size"]),
+                session=session,
+                base_url=base_url,
+                auth=auth,
                 prefer_presigned_url=use_presigned_url,
-                **kwargs,
+                concurrency_limit=self.io_limit,
             )
         else:
             return VolumeWritableFile(
-                full_path, loop, use_presigned_url=use_presigned_url, **kwargs
+                full_path,
+                loop,
+                session=session,
+                base_url=base_url,
+                auth=auth,
+                use_presigned_url=use_presigned_url,
+                concurrency_limit=self.io_limit,
             )
 
     async def open_async(self, path, mode="rb", **kwargs):
