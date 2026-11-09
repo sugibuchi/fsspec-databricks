@@ -241,15 +241,27 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
         """Open a file object on the running loop, its fetches or uploads sharing `io_limit`."""
         size = await self._check_open(path, mode)
         loop = asyncio.get_running_loop()
-        options = {
-            "session": await self._get_session(),
-            "base_url": self.config.host,
-            "auth": workspace_authenticator(self.config),
-            "concurrency_limit": self.io_limit,
-        }
+        session = await self._get_session()
+        auth = workspace_authenticator(self.config)
         if "r" in mode:
-            return DbfsReadableFile(path, loop, size or 0, **options)
-        return DbfsWritableFile(path, loop, overwrite="x" not in mode, **options)
+            return DbfsReadableFile(
+                path,
+                loop,
+                size or 0,
+                session=session,
+                base_url=self.config.host,
+                auth=auth,
+                concurrency_limit=self.io_limit,
+            )
+        return DbfsWritableFile(
+            path,
+            loop,
+            session=session,
+            base_url=self.config.host,
+            auth=auth,
+            overwrite="x" not in mode,
+            concurrency_limit=self.io_limit,
+        )
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
