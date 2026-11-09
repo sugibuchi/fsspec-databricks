@@ -84,7 +84,8 @@ POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and 
 ## Compatibility
 
 * Python 3.11 to 3.14
-* `databricks-sdk`: 0.156.0 or later
+* `databricks-sdk`: 0.80.0 or later. Older versions ignore some parameters: `custom_headers` needs 0.86.0, and
+  `group_id` needs 0.134.0.
 * `fsspec`: 2024.6.0 or later
 * `aiohttp`: 3.12.0 or later
 * Tested live on Databricks Free Edition on AWS, Azure Databricks and Databricks on Google Cloud
