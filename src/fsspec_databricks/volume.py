@@ -758,7 +758,9 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         self._init_requests(path, session, base_url, auth, api_version)
 
         self.use_presigned_url = use_presigned_url
-        self._upload_session: _MultipartSession | None = None
+        # The multipart upload started: its token, and the query naming it in the Files API's requests.
+        self._session_token: str | None = None
+        self._upload: dict[str, str] | None = None
 
     def _url_expire_time(self) -> str:
         return to_rfc3339(
@@ -804,96 +806,59 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         result = await self._retried(initiate, "Initiating upload")
 
         if "multipart_upload" in result:
-            token = result["multipart_upload"]["session_token"]
-            self._upload_session = _MultipartSession(
-                self, token, {"upload_type": "multipart", "session_token": token}
-            )
+            self._session_token = result["multipart_upload"]["session_token"]
+            self._upload = {
+                "upload_type": "multipart",
+                "session_token": self._session_token,
+            }
         elif "upload_id" in result:
             # Files API 3.0 names a multipart upload by its ID.
-            upload_id = result["upload_id"]
-            self._upload_session = _MultipartSession(
-                self, upload_id, {"upload_id": upload_id}
-            )
+            self._session_token = result["upload_id"]
+            self._upload = {"upload_id": self._session_token}
         else:
             raise io_error(self.path, f"Unexpected initiate-upload response: {result}")
 
     async def _upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
-    ) -> tuple[int, str] | None:
-        session = self._upload_session
-        assert session is not None
-        doing = f"Uploading part {index}"
+    ) -> tuple[int, str]:
+        assert self._upload is not None
+        # The multipart upload API's part numbers are 1-based.
+        part_number = index + 1
+        doing = f"Uploading part {part_number}"
+
+        async def put() -> tuple[int, str]:
+            url, headers, params = await self._part_url(part_number)
+            async with self._session.put(
+                url,
+                headers=headers,
+                params=params,
+                data=data,
+                middlewares=self._middlewares(),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, doing)
+                return part_number, response.headers.get("etag", "")
+
         # The server's errors as OSErrors of their kind, e.g. a PermissionError for a 403.
         try:
             # A part sent again replaces the first, under the same number.
-            return await self._retried(
-                lambda: session.upload_part(data, start, end, index, last), doing
-            )
+            return await self._retried(put, doing)
         except (ClientError, TimeoutError) as e:
             raise response_error(self.path, e, doing) from e
-
-    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        assert self._upload_session is not None
-        await self._retried(
-            lambda: self._upload_session.complete(parts), "Completing upload"
-        )
-
-    async def _abort_multipart_upload(self) -> None:
-        if self._upload_session is None:
-            # No session started, e.g. the initiation failed: nothing to abort.
-            return
-        logger.warning("Aborting upload: path=%s", self.path)
-        try:
-            await self._upload_session.abort()
-        except (OSError, ClientError) as e:
-            # Best effort, as the SDK's: the caller gets the upload's own failure, or its discard succeeds.
-            logger.warning("Failed to abort upload: path=%s, error=%s", self.path, e)
-
-
-class _MultipartSession:
-    """A multipart upload session: parts in parallel, completed with their ETags."""
-
-    def __init__(
-        self, file: VolumeWritableFile, session_token: str, upload: dict[str, str]
-    ):
-        self.file = file
-        self.session_token = session_token
-        # The query naming the upload in the Files API's requests: its version's own.
-        self.upload = upload
-
-    async def upload_part(
-        self, data: bytes, start: int, end: int, index: int, last: bool
-    ) -> tuple[int, str]:
-        file = self.file
-        # The multipart upload API's part numbers are 1-based.
-        part_number = index + 1
-
-        url, headers, params = await self._part_url(part_number)
-
-        async with file._session.put(
-            url,
-            headers=headers,
-            params=params,
-            data=data,
-            middlewares=file._middlewares(),
-            timeout=file._timeout,
-        ) as response:
-            await check_response(response, file.path, f"Uploading part {part_number}")
-            return part_number, response.headers.get("etag", "")
 
     async def _part_url(
         self, part_number: int
     ) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        file = self.file
-        if file.use_presigned_url:
-            result = await file._post_json(
-                f"{file._base_url}/api/2.0/fs/create-upload-part-urls",
+        """Where a part goes: a presigned URL, or the Files API with the upload in the query."""
+        if self.use_presigned_url:
+            result = await self._post_json(
+                f"{self._base_url}/api/2.0/fs/create-upload-part-urls",
                 {
-                    "path": file.path,
-                    "session_token": self.session_token,
+                    "path": self.path,
+                    "session_token": self._session_token,
                     "start_part_number": part_number,
                     "count": 1,
-                    "expire_time": file._url_expire_time(),
+                    "expire_time": self._url_expire_time(),
                 },
                 "Getting URL for part upload",
             )
@@ -905,37 +870,48 @@ class _MultipartSession:
             headers["Content-Type"] = "application/octet-stream"
             return url, headers, None
         return (
-            file._files_url,
+            self._files_url,
             {"Content-Type": "application/octet-stream"},
-            {**self.upload, "part_number": part_number},
+            {**self._upload, "part_number": part_number},
         )
 
-    async def complete(self, parts: list[Any]) -> None:
-        file = self.file
-        async with file._session.post(
-            file._files_url,
-            params={"action": "complete-upload", **self.upload},
-            json={
-                "parts": [
-                    {"part_number": i, "etag": etag} for i, etag in sorted(parts)
-                ],
-            },
-            middlewares=(file._auth,),
-            timeout=file._timeout,
-        ) as response:
-            await check_response(response, file.path, "Completing upload")
+    async def _complete_multipart_upload(self, parts: list[Any]) -> None:
+        assert self._upload is not None
 
-    async def abort(self) -> None:
+        async def complete() -> None:
+            async with self._session.post(
+                self._files_url,
+                params={"action": "complete-upload", **self._upload},
+                json={
+                    "parts": [
+                        {"part_number": i, "etag": etag} for i, etag in sorted(parts)
+                    ],
+                },
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Completing upload")
+
+        await self._retried(complete, "Completing upload")
+
+    async def _abort_multipart_upload(self) -> None:
+        if self._upload is None:
+            # No upload started, e.g. the initiation failed: nothing to abort.
+            return
+        logger.warning("Aborting upload: path=%s", self.path)
         # A POST to the Files API, with or without presigned URLs, as the SDK aborts. No abort URL is asked for:
         # Azure Databricks refuses them.
-        file = self.file
-        async with file._session.post(
-            file._files_url,
-            params={"action": "abort-upload", **self.upload},
-            middlewares=(file._auth,),
-            timeout=file._timeout,
-        ) as response:
-            await check_response(response, file.path, "Aborting upload")
+        try:
+            async with self._session.post(
+                self._files_url,
+                params={"action": "abort-upload", **self._upload},
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Aborting upload")
+        except (OSError, ClientError) as e:
+            # Best effort, as the SDK's: the caller gets the upload's own failure, or its discard succeeds.
+            logger.warning("Failed to abort upload: path=%s, error=%s", self.path, e)
 
 
 __all__ = [

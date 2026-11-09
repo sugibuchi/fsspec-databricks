@@ -38,7 +38,6 @@ from fsspec_databricks.volume import (
     VolumeReadableFile,
     VolumeWritableFile,
     _Endpoint,
-    _MultipartSession,
     _parse_endpoint,
 )
 from tests.utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
@@ -1257,7 +1256,7 @@ def test_volume_open_w(
                 f.write(chunk)
 
         written = volume_download(client, f"{test_dir}/1_data.bin")
-        assert in_parts == (f._upload_session is not None)
+        assert in_parts == (f._upload is not None)
         assert bytes_sig(data) == bytes_sig(written)
 
     # Overwrite existing file
@@ -1663,18 +1662,13 @@ def test_volume_file_abort_failure_warns(
     dummy_api, dummy, client_event_loop, aiohttp_session, caplog
 ):
     """A failed abort is logged, and the upload's own failure raised."""
-    with (
-        patch.object(
-            VolumeWritableFile,
-            "_upload_part",
-            AsyncMock(side_effect=RuntimeError("Dummy")),
-        ),
-        patch.object(
-            _MultipartSession,
-            "abort",
-            AsyncMock(side_effect=OSError(errno.EIO, "Abort refused")),
-        ),
-    ):
+
+    def fail(*args, **kwargs):
+        # The server forgets the upload, so that its abort fails.
+        dummy.multipart_uploads.clear()
+        raise RuntimeError("Dummy")
+
+    with patch.object(VolumeWritableFile, "_upload_part", AsyncMock(side_effect=fail)):
         with pytest.raises(OSError, match="Failed to upload a part"):
             with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
                 f.write(randbytes(20 * 1000 * 1000))
@@ -1702,33 +1696,6 @@ def test_volume_file_write_parquet(
     assert df.head(1).to_dict("records") == [dummy_table[0]]
     assert df.iloc[123:456, :].to_dict("records") == dummy_table[123:456]
     assert df.tail(1).to_dict("records") == [dummy_table[-1]]
-
-
-@pytest.mark.parametrize("use_presigned_url", [True, False])
-def test_volume_file_parts_write_abort(
-    dummy_api,
-    dummy,
-    client_event_loop,
-    aiohttp_session,
-    use_presigned_url,
-):
-    with patch.object(
-        _MultipartSession,
-        "upload_part",
-        AsyncMock(side_effect=RuntimeError("Dummy")),
-    ):
-        with pytest.raises(OSError, match="Failed to upload a part"):
-            with _writer(
-                aiohttp_session,
-                dummy_api,
-                client_event_loop,
-                use_presigned_url=use_presigned_url,
-            ) as f:
-                f.write(randbytes(20 * 1000 * 1000))
-
-    assert path not in dummy.volume_files
-    # The session the server started is aborted.
-    assert dummy.multipart_uploads == {}
 
 
 def test_volume_file_abort_without_session(

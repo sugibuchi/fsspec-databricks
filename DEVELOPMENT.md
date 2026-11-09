@@ -546,7 +546,7 @@ A request that is safe to send again is retried up to 3 times after a transient 
 
 Uploads in parts are multipart uploads only, as in the SDK since 0.163:
 
-- `_MultipartSession` sends parts concurrently, then completes the upload with their ETags.
+- The file sends parts concurrently, then completes the upload with their ETags.
 - Files API 2.0 names the upload by a `session_token`, and Files API 3.0 by an `upload_id`.
 - An initiation answer naming another upload API raises an `OSError`. That covers resumable uploads, which the SDK
   dropped.
