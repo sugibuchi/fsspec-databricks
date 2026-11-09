@@ -727,7 +727,7 @@ async def files_upload_action(
         storage.vol_write(path, data, upload.overwrite)
         return {}
     if action == "abort-upload" and upload_type == "multipart":
-        # The SDK aborts with a POST, fsspec-databricks with a DELETE: both are served.
+        # The SDK and fsspec-databricks abort with a POST. An abort URL's DELETE is served below.
         storage.vol_upload("multipart", session_token, path)
         del storage.multipart_uploads[session_token]
         return {}

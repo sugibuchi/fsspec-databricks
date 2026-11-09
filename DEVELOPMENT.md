@@ -525,8 +525,12 @@ endpoint a `multipart_upload_supported` flag:
 AWS and GCP workspaces answered the same, and both started multipart uploads in the live tests. The server's choice may
 change with API versions, so the file follows the server's answer per upload.
 
-If a part fails, `close()` aborts the upload and raises an `OSError`. Azure Databricks refuses aborts of multipart
-uploads with a 400 answer, and the abort is then skipped.
+If a part fails, `close()` aborts the upload and raises an `OSError`:
+
+- A multipart upload is aborted by a `POST` to the Files API, as the SDK aborts. No abort URL is asked for, as Azure
+  Databricks refuses them with a 400 answer.
+- A resumable upload is aborted by a `DELETE` of its upload URL.
+- The abort is best effort. A failed abort is a WARNING, and the upload's own failure is raised.
 
 Part sizes must be multiples of 256 KB. The constructor refuses other minimum and maximum sizes.
 

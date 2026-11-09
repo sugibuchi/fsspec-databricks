@@ -1357,15 +1357,12 @@ def test_volume_file_invalid_spread(
         )
 
 
-@pytest.mark.parametrize("abort_supported", [True, False])
+@pytest.mark.parametrize("use_presigned_url", [True, False])
 def test_volume_file_multipart_write_abort(
-    dummy_api,
-    dummy,
-    client_event_loop,
-    aiohttp_session,
-    abort_supported,
+    dummy_api, dummy, client_event_loop, aiohttp_session, use_presigned_url
 ):
-    dummy.abort_supported = abort_supported
+    # Refused abort URLs change nothing: the abort is a POST to the Files API.
+    dummy.abort_supported = False
 
     with patch.object(
         VolumeWritableFile,
@@ -1373,15 +1370,47 @@ def test_volume_file_multipart_write_abort(
         AsyncMock(side_effect=RuntimeError("Dummy")),
     ):
         with pytest.raises(OSError) as exc_info:
-            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+            with _writer(
+                aiohttp_session,
+                dummy_api,
+                client_event_loop,
+                use_presigned_url=use_presigned_url,
+            ) as f:
                 f.write(randbytes(20 * 1000 * 1000))
 
     # The upload's failure is raised, not the abort's
     assert "Failed to upload a part" in str(exc_info.value)
     assert path not in dummy.volume_files
+    assert dummy.multipart_uploads == {}
+    aborts = dummy.requests_to("/api/2.0/fs/files", "POST")
+    assert [r.params["action"] for r in aborts][-1] == "abort-upload"
+    assert dummy.requests_to("/api/2.0/fs/create-abort-upload-url") == []
 
-    if abort_supported:
-        assert dummy.multipart_uploads == {}
+
+def test_volume_file_abort_failure_warns(
+    dummy_api, dummy, client_event_loop, aiohttp_session, caplog
+):
+    """A failed abort is logged, and the upload's own failure raised."""
+    with (
+        patch.object(
+            VolumeWritableFile,
+            "_upload_part",
+            AsyncMock(side_effect=RuntimeError("Dummy")),
+        ),
+        patch.object(
+            _MultipartSession,
+            "abort",
+            AsyncMock(side_effect=OSError(errno.EIO, "Abort refused")),
+        ),
+    ):
+        with pytest.raises(OSError, match="Failed to upload a part"):
+            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+                f.write(randbytes(20 * 1000 * 1000))
+
+    assert any(
+        r.levelname == "WARNING" and "Failed to abort upload" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 @pytest.mark.parametrize("upload_mode", ["multipart", "resumable"])

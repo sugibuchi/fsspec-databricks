@@ -11,7 +11,6 @@ from aiohttp import (
     ClientConnectionError,
     ClientError,
     ClientMiddlewareType,
-    ClientResponseError,
     ClientSession,
     ClientTimeout,
 )
@@ -778,7 +777,11 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             # No session started, e.g. the initiation failed: nothing to abort.
             return
         logger.warning("Aborting upload: path=%s", self.path)
-        await self._upload_session.abort()
+        try:
+            await self._upload_session.abort()
+        except (OSError, ClientError) as e:
+            # Best effort, as the SDK's: the caller gets the upload's own failure, or its discard succeeds.
+            logger.warning("Failed to abort upload: path=%s, error=%s", self.path, e)
 
 
 class _MultipartSession:
@@ -860,42 +863,21 @@ class _MultipartSession:
         ) as response:
             await check_response(response, file.path, "Completing upload")
 
-    async def _abort_url(self) -> tuple[str, dict[str, str], dict[str, Any] | None]:
-        file = self.file
-        if file.use_presigned_url:
-            result = await file._post_json(
-                f"{file._base_url}/api/2.0/fs/create-abort-upload-url",
-                {
-                    "path": file.path,
-                    "session_token": self.session_token,
-                    "expire_time": file._url_expire_time(),
-                },
-                "Getting URL for upload abort",
-            )
-            url = result["abort_upload_url"]["url"]
-            headers = {
-                h["name"]: h["value"]
-                for h in result["abort_upload_url"].get("headers", [])
-            }
-            headers["Content-Type"] = "application/octet-stream"
-            return url, headers, None
-        return (
-            file._files_url,
-            {"Content-Type": "application/json"},
-            {"action": "abort-upload", "session_token": self.session_token},
-        )
-
     async def abort(self) -> None:
-        try:
-            url, headers, params = await self._abort_url()
-        except OSError as e:
-            if (
-                isinstance(e.__cause__, ClientResponseError)
-                and e.__cause__.status == 400
-            ):
-                return  # Azure Databricks does not support abort of multipart upload
-            raise
-        await self.file._delete(url, headers, params)
+        # A POST to the Files API, with or without presigned URLs, as the SDK aborts. No abort URL is asked for:
+        # Azure Databricks refuses them.
+        file = self.file
+        async with file._session.post(
+            file._files_url,
+            params={
+                "action": "abort-upload",
+                "upload_type": "multipart",
+                "session_token": self.session_token,
+            },
+            middlewares=(file._auth,),
+            timeout=file._timeout,
+        ) as response:
+            await check_response(response, file.path, "Aborting upload")
 
 
 class _ResumableSession:
