@@ -973,7 +973,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">3.12" },
     { name = "databricks-sdk", specifier = ">=0.156.0" },
     { name = "fsspec", specifier = ">=2024.6.0" },
-    { name = "fsspec-alt-strategies", specifier = ">=0.1,<1" },
+    { name = "fsspec-alt-strategies", specifier = ">=0.1,<0.2" },
 ]
 
 [package.metadata.requires-dev]

@@ -630,7 +630,10 @@ installed.
 [fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies). It is copied whole, as its `wrapper.py`
 needs `flat/` too. Its modules keep their license headers and relative imports, and ruff skips them.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.1,<1`, from PyPI.
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.1,<0.2`, from PyPI.
+
+The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
+copy never changes in an installed release.
 
 To refresh the copy:
 
@@ -640,5 +643,6 @@ To refresh the copy:
    uv run --with "fsspec-alt-strategies-impl[cli]==<version>" fsspec-alt-strategies-impl copy src/fsspec_databricks/_contrib/strategy
    ```
 
-2. Update the version above, and the interface's bounds in `pyproject.toml` if it needs a newer one, then run `uv lock`.
+2. Update the version above, and the interface's bounds in `pyproject.toml` to the copy's minor version, then run
+   `uv lock`.
 3. Run the tests.
