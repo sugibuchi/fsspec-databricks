@@ -2,7 +2,9 @@
 DBFS."""
 
 import errno
+import pickle
 from random import randbytes
+from unittest.mock import patch
 
 import pytest
 from databricks.sdk import WorkspaceClient
@@ -10,7 +12,7 @@ from databricks.sdk.errors import ResourceDoesNotExist
 from fsspec.asyn import sync
 
 from fsspec_databricks import DatabricksFileSystem
-from fsspec_databricks.dbfs import DBFS
+from fsspec_databricks.dbfs import DBFS, DbfsReadableFile
 from tests.utils import bytes_sig, dbfs_download, init_dbfs_test_dir
 
 pytestmark = pytest.mark.backend("dbfs")
@@ -478,3 +480,61 @@ def test_dbfs_open_aborts(dbfs_client, dbfs_test_root, dummy):
             f.write(randbytes(3 * _MiB))
     assert not fs.exists(f"{test_dir}/failed.bin")
     assert dummy.dbfs_handles == {}
+
+
+@pytest.mark.parametrize("size", [100, 3 * _MiB])
+def test_dbfs_open_exclusive_created_meanwhile(dbfs_client, dbfs_test_root, size):
+    """The put or create refuses a file created after opening, as `FileExistsError`."""
+    test_dir = init_dbfs_test_dir(dbfs_client, dbfs_test_root)
+    fs = DBFS(client=dbfs_client)
+
+    f = fs.open(f"{test_dir}/x.bin", "xb")
+    dbfs_client.dbfs.put(f"{test_dir}/x.bin", contents="")
+    with pytest.raises(FileExistsError):
+        with f:
+            f.write(randbytes(size))
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_dbfs_file_read_retries(dbfs_client, dbfs_test_root, dummy, status):
+    data = randbytes(1000)
+    test_dir = init_dbfs_test_dir(dbfs_client, dbfs_test_root, items={"data.bin": data})
+    fs = DBFS(client=dbfs_client)
+    dummy.read_errors.extend([status, status])
+
+    with patch.object(DbfsReadableFile, "fetch_retry_delay", 0):
+        with fs.open(f"{test_dir}/data.bin", "rb") as f:
+            assert f.read() == data
+    assert not dummy.read_errors
+
+
+def test_dbfs_file_read_no_retry(dbfs_client, dbfs_test_root, dummy):
+    test_dir = init_dbfs_test_dir(
+        dbfs_client, dbfs_test_root, items={"data.bin": b"data"}
+    )
+    fs = DBFS(client=dbfs_client)
+    dummy.read_errors.extend([404, 404])
+
+    with patch.object(DbfsReadableFile, "fetch_retry_delay", 0):
+        with fs.open(f"{test_dir}/data.bin", "rb") as f:
+            with pytest.raises(FileNotFoundError):
+                f.read()
+    assert len(dummy.read_errors) == 1
+
+
+def test_dbfs_fs_session(dbfs_client, dbfs_test_root):
+    """The files' HTTP session is made on first open, never pickled, and closed with the file system."""
+    test_dir = init_dbfs_test_dir(
+        dbfs_client, dbfs_test_root, items={"data.bin": b"data"}
+    )
+    fs = DBFS(client=dbfs_client)
+    assert fs.cat_file(f"{test_dir}/data.bin") == b"data"
+    session = fs._session
+    assert session is not None
+
+    fs2 = pickle.loads(pickle.dumps(DBFS()))
+    assert fs2._session is None
+    fs2.close()
+
+    fs.close()
+    assert session.closed

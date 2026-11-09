@@ -7,6 +7,7 @@
 | `src/fsspec_databricks/__init__.py`        | The public API: `DatabricksFileSystem` and `use()`.                       |
 | `src/fsspec_databricks/spec.py`            | `DatabricksFileSystem`, the router sending each call to a backend.        |
 | `src/fsspec_databricks/base.py`            | The client handling, and the base classes of the backends.                |
+| `src/fsspec_databricks/http_client.py`     | The aiohttp session, requests and errors of the Volume and DBFS files.    |
 | `src/fsspec_databricks/volume.py`          | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.          |
 | `src/fsspec_databricks/workspace.py`       | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object. |
 | `src/fsspec_databricks/dbfs.py`            | `DBFS`, the legacy DBFS, and its file objects.                            |
@@ -69,16 +70,17 @@ Without the options, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS
 `.env`. An option overrides its variable. A test id names its backends and its API, e.g.
 `test_dbfs_rm[dbfs-dummy-DBFS]`.
 
-| File                | Tests of                                        |
-|---------------------|-------------------------------------------------|
-| `test_spec.py`      | `DatabricksFileSystem` and its routing          |
-| `test_base.py`      | `BaseDatabricksFileSystem` and the client mixin |
-| `test_volume.py`    | `VolumeFileSystem` and its file objects         |
-| `test_workspace.py` | `WorkspaceFileSystem`                           |
-| `test_dbfs.py`      | `DBFS`                                          |
-| `test_dummy_api.py` | The dummy server, through the SDK               |
-| `test_path.py`      | `path.py`                                       |
-| `test_utils.py`     | `utils.py`                                      |
+| File                  | Tests of                                        |
+|-----------------------|-------------------------------------------------|
+| `test_spec.py`        | `DatabricksFileSystem` and its routing          |
+| `test_base.py`        | `BaseDatabricksFileSystem` and the client mixin |
+| `test_http_client.py` | The mapping of failed requests to `OSError`s    |
+| `test_volume.py`      | `VolumeFileSystem` and its file objects         |
+| `test_workspace.py`   | `WorkspaceFileSystem`                           |
+| `test_dbfs.py`        | `DBFS` and its file objects                     |
+| `test_dummy_api.py`   | The dummy server, through the SDK               |
+| `test_path.py`        | `path.py`                                       |
+| `test_utils.py`       | `utils.py`                                      |
 
 A backend test takes the `client` fixture, or one built on it. It runs once per API chosen: on the dummy server, and
 on the live workspace. Live tests are opt in, and once asked for, a workspace that cannot be reached is an error, not
@@ -307,10 +309,10 @@ The strategies are copied into the package rather than installed, so that a rele
 package's behaviour. Their shared interface, `fsspec-alt-strategies`, is installed. "The copy of fsspec-alt-strategies"
 below says how the copy is kept.
 
-### The SDK for metadata, HTTP for Volume data
+### The SDK for metadata, HTTP for file data
 
-Listings, metadata and changes go through the Databricks SDK. Volume file contents go through the Files API directly,
-with aiohttp, so that ranges and parts run concurrently.
+Listings, metadata and changes go through the Databricks SDK. The contents of Volume and DBFS files go through their
+REST APIs directly, with aiohttp, so that ranges and parts run concurrently on the event loop.
 
 ### Standard exceptions
 
@@ -471,11 +473,14 @@ Two `asyncio.Semaphore`s bound the requests. `operation_concurrency` bounds thos
 
 #### The HTTP session
 
-One aiohttp `ClientSession` serves the file system, with `connection_pool_size` connections:
+`http_client.py` holds what the Volume and DBFS files share. Its `AioHttpSessionSupport` mixin gives each of the two file
+systems one aiohttp `ClientSession`, with `connection_pool_size` connections:
 
 - it is created on the loop that first uses it, as `TCPConnector` needs a running loop, and is never pickled;
 - `close()` closes it on its loop;
 - an aiohttp middleware authenticates requests with the SDK `Config`'s headers.
+
+A failed request raises an `OSError`, chosen by its HTTP status or by the API's `error_code`.
 
 #### Storage proxy or presigned URLs
 
@@ -555,8 +560,11 @@ default. An existing notebook keeps its language, and a new one needs `language`
 - `_rm_tree` is the API's recursive delete, one request per directory a recursive `rm` is given.
 - `rmdir` refuses a directory that is not empty. It calls the API's non-recursive delete, which the SDK's
   `dbfs.delete` refuses for directories.
-- Files are the library's adaptive files, `DbfsReadableFile` and `DbfsWritableFile`. They call the API in the file
-  system's threads, and share its `io_limit`. The SDK's own `dbfs.open` cannot seek, and reads one block at a time.
+- Files are the library's adaptive files, `DbfsReadableFile` and `DbfsWritableFile`. They call the API with the file
+  system's aiohttp session, as Volume files do, and share its `io_limit`.
+- The SDK's own `dbfs.open` cannot seek, and reads one block at a time.
+- Reads are retried after transient errors, as Volume reads are. Writes are not retried, as a repeated add-block would
+  append its data twice.
 - The API's read, add-block and put each take 1 MB at most. The SDK sends 1 MiB of raw bytes per add-block, so the
   limit is taken to be on the decoded data.
 - A read fetches ranges of 1 MB at most, several at once. The API names no version of a file, so a file replaced while
@@ -609,7 +617,8 @@ Logging follows s3fs and gcsfs. Each module has a logger of its name, under `fss
 installed.
 
 - Each request to Databricks is one DEBUG line: its API or HTTP method, the path and the outcome.
-  `BaseDatabricksFileSystem._run_in_thread` logs the SDK's calls, and `volume.py` its own HTTP requests.
+  `BaseDatabricksFileSystem._run_in_thread` logs the SDK's calls. `check_response` in `http_client.py` logs the
+  files' HTTP requests, and `volume.py` its storage proxy probe.
 - Range reads are not logged, as a read makes many. Their retries are still logged.
 - Retries and aborted uploads are WARNINGs.
 - The fallback from the storage proxy is DEBUG: outside Databricks, the proxy is normally absent.

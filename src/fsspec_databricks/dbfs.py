@@ -3,16 +3,15 @@ import base64
 import contextlib
 import functools
 import logging
-from collections.abc import Callable
 from io import UnsupportedOperation
 from typing import Any
 
+from aiohttp import ClientError, ClientMiddlewareType, ClientSession
 from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.files import DbfsAPI, FileInfo
 from fsspec.asyn import sync
 from fsspec_alt_strategies.profile import StorageProfile
 
-from ._contrib.strategy.common.sync_client import SyncClientSupport
 from ._contrib.strategy.files.adaptive import (
     AdaptiveReadableFile,
     AdaptiveWritableFile,
@@ -29,6 +28,14 @@ from .error import (
     is_a_directory_error,
     not_a_directory_error,
     not_empty_error,
+)
+from .http_client import (
+    AioHttpSessionSupport,
+    HttpFileMixin,
+    HttpReadableMixin,
+    check_response,
+    response_error,
+    workspace_authenticator,
 )
 from .path import parse_dbfs_path
 from .utils import to_datetime
@@ -60,12 +67,12 @@ decoded data.
 """
 
 
-class DBFS(BaseDatabricksFileSystem):
+class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
     """Legacy DBFS file system, on the DBFS API.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
     threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. A recursive `rm`
-    deletes each directory by the API's own recursive delete, `_rm_tree`.
+    deletes each directory by the API's own recursive delete, `_rm_tree`. Its files call the API with aiohttp.
     """
 
     storage_profile = StorageProfile(
@@ -106,11 +113,12 @@ class DBFS(BaseDatabricksFileSystem):
             The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
             Defaults to 16.
         io_concurrency : int, optional
-            The maximum number of concurrent reads and writes of files, which also adds to the threads running SDK
-            calls. Defaults to 8.
+            The maximum number of concurrent reads and writes of the files opened, shared by all of them.
+            Defaults to 8.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
+        self._init_session()
         super().__init__(
             client=client,
             config=config,
@@ -229,17 +237,23 @@ class DBFS(BaseDatabricksFileSystem):
             raise file_exists_error(path)
         return None
 
+    async def _file_options(self) -> dict[str, Any]:
+        """The session, URL and authentication of a file object, its fetches or uploads sharing `io_limit`."""
+        return {
+            "session": await self._get_session(),
+            "base_url": self.config.host,
+            "auth": workspace_authenticator(self.config),
+            "concurrency_limit": self.io_limit,
+        }
+
     async def _open_file(self, path: str, mode: str):
-        """Open a file object on the running loop, its fetches or uploads sharing `io_limit`."""
+        """Open a file object on the running loop."""
         size = await self._check_open(path, mode)
         loop = asyncio.get_running_loop()
+        options = await self._file_options()
         if "r" in mode:
-            return DbfsReadableFile(
-                self, path, loop, size or 0, concurrency_limit=self.io_limit
-            )
-        return DbfsWritableFile(
-            self, path, loop, overwrite="x" not in mode, concurrency_limit=self.io_limit
-        )
+            return DbfsReadableFile(path, loop, size or 0, **options)
+        return DbfsWritableFile(path, loop, overwrite="x" not in mode, **options)
 
     async def open_async(self, path, mode="rb", **kwargs):
         if "b" not in mode or kwargs.get("compression"):
@@ -264,7 +278,7 @@ class DBFS(BaseDatabricksFileSystem):
         transaction = TempPathTransaction(
             path,
             lambda p: DbfsWritableFile(
-                self, p, self.loop, concurrency_limit=self.io_limit
+                p, self.loop, **sync(self.loop, self._file_options)
             ),
             functools.partial(self._commit_move, exclusive="x" in mode),
             lambda p: sync(self.loop, self._delete, p, False),
@@ -298,7 +312,7 @@ class DBFS(BaseDatabricksFileSystem):
         return super().open(path, mode, **kwargs)
 
 
-class DbfsReadableFile(AdaptiveReadableFile):
+class DbfsReadableFile(HttpReadableMixin, AdaptiveReadableFile):
     """A legacy DBFS file read by the API's read, at an offset: requests of 1 MB at most, fetched together.
 
     The API names no version of a file, so a file replaced while read is not detected.
@@ -311,39 +325,48 @@ class DbfsReadableFile(AdaptiveReadableFile):
     """The largest read, the API's limit. Larger reads are split, to fetch the parts together."""
 
     def __init__(
-        self, fs: DBFS, path: str, loop: asyncio.AbstractEventLoop, size: int, **kwargs
+        self,
+        path: str,
+        loop: asyncio.AbstractEventLoop,
+        size: int,
+        *,
+        session: ClientSession,
+        base_url: str,
+        auth: ClientMiddlewareType,
+        **kwargs,
     ):
         # Kept within the API's limit, whatever the caller asks.
         kwargs["max_block_size"] = min(
             kwargs.get("max_block_size") or self.max_block_size, _max_request_size
         )
         super().__init__(path, loop, size, **kwargs)
-        self.fs = fs
+        self._init_http(session, base_url, auth)
         self._dbfs_path = parse_dbfs_path(path)
 
-    async def _fetch_range(self, start: int, end: int) -> bytes:
+    async def _request_range(self, start: int, end: int) -> bytes:
         chunks = []
         offset = start
         while offset < end:
             length = min(end - offset, _max_request_size)
-            with error_mapping(self.path):
-                # The mixin's own, not logging: range reads are not logged, as a read makes many.
-                response = await SyncClientSupport._run_in_thread(
-                    self.fs,
-                    self.fs.client.dbfs.read,
-                    self._dbfs_path,
-                    offset=offset,
-                    length=length,
-                )
-            if not response.bytes_read:
+            async with self._session.get(
+                f"{self._base_url}/api/2.0/dbfs/read",
+                params={"path": self._dbfs_path, "offset": offset, "length": length},
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                # Reads of ranges are not logged: a read makes many, and the lines would drown the rest.
+                response.raise_for_status()
+                result = await response.json()
+            bytes_read = result.get("bytes_read") or 0
+            if not bytes_read:
                 # The file was truncated meanwhile: the rest is missing.
                 break
-            chunks.append(base64.b64decode(response.data or ""))
-            offset += response.bytes_read
+            chunks.append(base64.b64decode(result.get("data") or ""))
+            offset += bytes_read
         return b"".join(chunks)
 
 
-class DbfsWritableFile(AdaptiveWritableFile):
+class DbfsWritableFile(HttpFileMixin, AdaptiveWritableFile):
     """A legacy DBFS file written by one put, or by the API's stream: create, add-blocks, close.
 
     The stream takes blocks one at a time, in order, so the file is `sequential`. Each part is sent as add-blocks of
@@ -369,47 +392,65 @@ class DbfsWritableFile(AdaptiveWritableFile):
 
     def __init__(
         self,
-        fs: DBFS,
         path: str,
         loop: asyncio.AbstractEventLoop,
         *,
+        session: ClientSession,
+        base_url: str,
+        auth: ClientMiddlewareType,
         overwrite: bool = True,
         **kwargs,
     ):
         super().__init__(path, loop, **kwargs)
-        self.fs = fs
+        self._init_http(session, base_url, auth)
         self.overwrite = overwrite
         self._dbfs_path = parse_dbfs_path(path)
         self._handle: int | None = None
 
-    async def _call(self, func: Callable[..., Any], *args, **kwargs) -> Any:
-        """Call the SDK in the file system's threads, its errors mapped to `OSError`s."""
-        with error_mapping(self.path):
-            return await self.fs._run_in_thread(func, *args, **kwargs)
+    async def _post(self, endpoint: str, body: dict[str, Any], doing: str) -> Any:
+        """Call the API, its errors raised as `OSError`s."""
+        try:
+            async with self._session.post(
+                f"{self._base_url}/api/2.0/dbfs/{endpoint}",
+                json=body,
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, doing)
+                return await response.json()
+        except (ClientError, TimeoutError) as e:
+            raise response_error(self.path, e, doing) from e
 
     async def _upload_all(self, data: bytes) -> None:
-        contents = base64.b64encode(data).decode()
-        await self._call(
-            self.fs.client.dbfs.put,
-            self._dbfs_path,
-            contents=contents,
-            overwrite=self.overwrite,
+        await self._post(
+            "put",
+            {
+                "path": self._dbfs_path,
+                "contents": base64.b64encode(data).decode(),
+                "overwrite": self.overwrite,
+            },
+            "Putting",
         )
 
     async def _start_multipart_upload(self) -> None:
-        created = await self._call(
-            self.fs.client.dbfs.create, self._dbfs_path, overwrite=self.overwrite
+        created = await self._post(
+            "create",
+            {"path": self._dbfs_path, "overwrite": self.overwrite},
+            "Creating stream",
         )
-        self._handle = created.handle
+        self._handle = created["handle"]
 
     async def _upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> None:
-        block = base64.b64encode(data).decode()
-        await self._call(self.fs.client.dbfs.add_block, self._handle, block)
+        await self._post(
+            "add-block",
+            {"handle": self._handle, "data": base64.b64encode(data).decode()},
+            f"Adding block {index}",
+        )
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        await self._call(self.fs.client.dbfs.close, self._handle)
+        await self._post("close", {"handle": self._handle}, "Closing stream")
 
     async def _abort_multipart_upload(self) -> None:
         if self._handle is None:
@@ -418,10 +459,10 @@ class DbfsWritableFile(AdaptiveWritableFile):
         handle, self._handle = self._handle, None
         logger.warning("Aborting upload: path=%s", self.path)
         try:
-            await self._call(self.fs.client.dbfs.close, handle)
+            await self._post("close", {"handle": handle}, "Closing stream")
         finally:
-            await self._call(
-                DbfsAPI.delete, self.fs.client.dbfs, self._dbfs_path, recursive=False
+            await self._post(
+                "delete", {"path": self._dbfs_path, "recursive": False}, "Deleting"
             )
 
 
