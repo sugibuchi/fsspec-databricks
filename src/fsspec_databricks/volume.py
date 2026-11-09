@@ -726,23 +726,31 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             await check_response(response, self.path, "Aborting upload")
 
     async def _upload_all(self, data: bytes) -> None:
-        async with self._session.put(
-            self._files_url,
-            data=data,
-            middlewares=(self._auth,),
-            timeout=self._timeout,
-        ) as response:
-            await check_response(response, self.path, "Uploading")
+        async def put() -> None:
+            async with self._session.put(
+                self._files_url,
+                data=data,
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Uploading")
+
+        # Sent again whole: it overwrites, as no `overwrite` is sent.
+        await self._retried(put, "Uploading")
 
     async def _start_multipart_upload(self) -> None:
-        async with self._session.post(
-            self._files_url,
-            params={"action": "initiate-upload"},
-            middlewares=(self._auth,),
-            timeout=self._timeout,
-        ) as response:
-            await check_response(response, self.path, "Initiating upload")
-            result = await response.json()
+        async def initiate() -> Any:
+            async with self._session.post(
+                self._files_url,
+                params={"action": "initiate-upload"},
+                middlewares=(self._auth,),
+                timeout=self._timeout,
+            ) as response:
+                await check_response(response, self.path, "Initiating upload")
+                return await response.json()
+
+        # A session initiated twice leaves the first one unused.
+        result = await self._retried(initiate, "Initiating upload")
 
         # The server chooses the API of each upload: the file follows it.
         if "multipart_upload" in result:
@@ -761,16 +769,25 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
     async def _upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
     ) -> tuple[int, str] | None:
-        assert self._upload_session is not None
+        session = self._upload_session
+        assert session is not None
+        doing = f"Uploading part {index}"
         # The server's errors as OSErrors of their kind, e.g. a PermissionError for a 403.
         try:
-            return await self._upload_session.upload_part(data, start, end, index, last)
+            if isinstance(session, _MultipartSession):
+                # A part sent again replaces the first, under the same number.
+                return await self._retried(
+                    lambda: session.upload_part(data, start, end, index, last), doing
+                )
+            return await session.upload_part(data, start, end, index, last)
         except (ClientError, TimeoutError) as e:
-            raise response_error(self.path, e, f"Uploading part {index}") from e
+            raise response_error(self.path, e, doing) from e
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
         assert self._upload_session is not None
-        await self._upload_session.complete(parts)
+        await self._retried(
+            lambda: self._upload_session.complete(parts), "Completing upload"
+        )
 
     async def _abort_multipart_upload(self) -> None:
         if self._upload_session is None:

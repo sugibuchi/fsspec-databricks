@@ -496,8 +496,17 @@ renewed after 30 minutes.
 `VolumeReadableFile` subclasses the library's `AdaptiveReadableFile`, and implements `_fetch_range` with a range `GET`.
 The base class sizes the blocks, from 1 MB to 4 MB, and fetches ahead on sequential reads.
 
-A range request that gets a `429`, `500`, `502`, `503` or `504` is retried up to 3 times, with exponential backoff and
-jitter. Writes are not retried: a repeated `PUT` can fail with "already exists" when the first one went through.
+#### Retries
+
+A request that is safe to send again is retried up to 3 times after a transient error, as the SDK retries:
+
+- A transient error is a `429` or `5xx` answer, or a lost connection or a timeout.
+- The delay doubles from 1 second, with jitter. An answer's `Retry-After`, in seconds, sets it instead.
+- Range reads are retried.
+- So are a whole file's `PUT`, initiate-upload, multipart parts and complete-upload. A `PUT` sends no `overwrite`, so
+  a repeated one replaces the first. A part sent again replaces the first under its number.
+- Resumable parts are not retried. The server may have taken part of a chunk, and only a query of the upload's status
+  would tell.
 
 #### Writing
 

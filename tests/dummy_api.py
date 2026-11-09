@@ -278,6 +278,9 @@ class DummyStorage:
     read_errors: list[int] = field(default_factory=list)
     """Statuses that the next downloads get, one each."""
 
+    upload_errors: list[int] = field(default_factory=list)
+    """Statuses that the next uploads of whole files or parts get, one each."""
+
     workspace: dict[str, WorkspaceObject] = field(default_factory=dict)
     dbfs: dict[str, DbfsEntry] = field(default_factory=dict)
     dbfs_handles: dict[int, str] = field(default_factory=dict)
@@ -313,6 +316,7 @@ class DummyStorage:
         self.abort_supported = True
         self.storage_proxy_available = False
         self.read_errors = []
+        self.upload_errors = []
         self.workspace = {"/": WorkspaceObject("DIRECTORY", 0)}
         self.dbfs = {"/": DbfsEntry(True, 0)}
         self.dbfs_handles = {}
@@ -624,6 +628,8 @@ async def files_upload(
     path = _volume_path(file_path)
     _check_presigned(storage, signed)
     data = await request.body()
+    if storage.upload_errors and upload_type != "resumable":
+        raise ApiError("INTERNAL_ERROR", "Injected error", storage.upload_errors.pop(0))
 
     if upload_type == "multipart":
         upload = storage.vol_upload("multipart", session_token, path)

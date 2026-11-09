@@ -1164,7 +1164,7 @@ def test_volume_file_read_retries(
     dummy.vol_write(path, data)
     dummy.read_errors.extend([status, status])
 
-    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+    with patch.object(VolumeReadableFile, "retry_delay", 0):
         with _reader(aiohttp_session, dummy_api, client_event_loop, len(data)) as f:
             assert f.read() == data
 
@@ -1178,7 +1178,7 @@ def test_volume_file_read_retries_exhausted(
     dummy.vol_write(path, data)
     dummy.read_errors.extend([500] * 10)
 
-    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+    with patch.object(VolumeReadableFile, "retry_delay", 0):
         with _reader(
             aiohttp_session,
             dummy_api,
@@ -1191,7 +1191,7 @@ def test_volume_file_read_retries_exhausted(
 
     # The first request and its retries.
     attempts = 10 - len(dummy.read_errors)
-    assert attempts == VolumeReadableFile.fetch_max_retries + 1
+    assert attempts == VolumeReadableFile.max_retries + 1
 
 
 @pytest.mark.parametrize("status", [400, 403, 404])
@@ -1202,7 +1202,7 @@ def test_volume_file_read_no_retry(
     dummy.vol_write(path, data)
     dummy.read_errors.extend([status] * 2)
 
-    with patch.object(VolumeReadableFile, "fetch_retry_delay", 0):
+    with patch.object(VolumeReadableFile, "retry_delay", 0):
         with _reader(
             aiohttp_session,
             dummy_api,
@@ -1214,6 +1214,41 @@ def test_volume_file_read_no_retry(
                 f.read()
 
     assert len(dummy.read_errors) == 1
+
+
+@pytest.mark.parametrize("use_presigned_url", [True, False])
+@pytest.mark.parametrize("size", [1000, 20 * 1000 * 1000])
+def test_volume_file_write_retries(
+    dummy, dummy_api, client_event_loop, aiohttp_session, size, use_presigned_url
+):
+    """A whole file, or a part, is sent again after transient errors."""
+    data = randbytes(size)
+    dummy.upload_errors.extend([503, 500])
+
+    with patch.object(VolumeWritableFile, "retry_delay", 0):
+        with _writer(
+            aiohttp_session,
+            dummy_api,
+            client_event_loop,
+            use_presigned_url=use_presigned_url,
+        ) as f:
+            f.write(data)
+
+    assert dummy.volume_files[path].data == data
+    assert not dummy.upload_errors
+
+
+def test_volume_file_write_no_retry(
+    dummy, dummy_api, client_event_loop, aiohttp_session
+):
+    dummy.upload_errors.extend([403, 403])
+
+    with patch.object(VolumeWritableFile, "retry_delay", 0):
+        with pytest.raises(PermissionError):
+            with _writer(aiohttp_session, dummy_api, client_event_loop) as f:
+                f.write(b"data")
+
+    assert len(dummy.upload_errors) == 1
 
 
 def test_volume_file_read_parquet(

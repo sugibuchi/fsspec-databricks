@@ -502,7 +502,7 @@ def test_dbfs_file_read_retries(dbfs_client, dbfs_test_root, dummy, status):
     fs = DBFS(client=dbfs_client)
     dummy.read_errors.extend([status, status])
 
-    with patch.object(DbfsReadableFile, "fetch_retry_delay", 0):
+    with patch.object(DbfsReadableFile, "retry_delay", 0):
         with fs.open(f"{test_dir}/data.bin", "rb") as f:
             assert f.read() == data
     assert not dummy.read_errors
@@ -515,7 +515,7 @@ def test_dbfs_file_read_no_retry(dbfs_client, dbfs_test_root, dummy):
     fs = DBFS(client=dbfs_client)
     dummy.read_errors.extend([404, 404])
 
-    with patch.object(DbfsReadableFile, "fetch_retry_delay", 0):
+    with patch.object(DbfsReadableFile, "retry_delay", 0):
         with fs.open(f"{test_dir}/data.bin", "rb") as f:
             with pytest.raises(FileNotFoundError):
                 f.read()
