@@ -137,13 +137,6 @@ class MultipartUpload:
 
 
 @dataclass
-class ResumableUpload:
-    path: str
-    overwrite: bool
-    data: bytearray = field(default_factory=bytearray)
-
-
-@dataclass
 class WorkspaceObject:
     object_type: Literal["DIRECTORY", "FILE", "NOTEBOOK"]
     object_id: int
@@ -265,19 +258,16 @@ class DummyStorage:
     volume_files: dict[str, VolumeFile] = field(default_factory=dict)
     volume_dirs: set[str] = field(default_factory=set)
     multipart_uploads: dict[str, MultipartUpload] = field(default_factory=dict)
-    resumable_uploads: dict[str, ResumableUpload] = field(default_factory=dict)
 
     upload_mode: Literal["multipart", "resumable", "unknown"] = "multipart"
-    """The upload API that initiate-upload answers with, as the server chooses it. `unknown` names another one."""
+    """The upload API that initiate-upload answers with, as the server chooses it. Only multipart uploads are served:
+    `resumable` names the API of Google Cloud workspaces, and `unknown` another one."""
 
     presigned_urls_only: bool = False
     """Whether the Files API refuses to transfer data itself, so that only presigned URLs do."""
 
     abort_supported: bool = True
     """Whether multipart uploads can be aborted by a presigned URL, which Azure Databricks refuses."""
-
-    storage_proxy_available: bool = False
-    """Whether the storage proxy's probe succeeds, for a client whose proxy host is this server."""
 
     read_errors: list[int] = field(default_factory=list)
     """Statuses that the next downloads get, one each."""
@@ -320,11 +310,9 @@ class DummyStorage:
         self.volume_files = {}
         self.volume_dirs = set()
         self.multipart_uploads = {}
-        self.resumable_uploads = {}
         self.upload_mode = "multipart"
         self.presigned_urls_only = False
         self.abort_supported = True
-        self.storage_proxy_available = False
         self.read_errors = []
         self.upload_errors = []
         self.ranges_ignored = False
@@ -392,20 +380,17 @@ class DummyStorage:
         if self.upload_mode == "multipart":
             self.multipart_uploads[token] = MultipartUpload(path, overwrite)
             return {"multipart_upload": {"session_token": token}}
+        # Neither the SDK nor fsspec-databricks goes on with these sessions, so none is kept.
         if self.upload_mode == "resumable":
-            self.resumable_uploads[token] = ResumableUpload(path, overwrite)
             return {"resumable_upload": {"session_token": token}}
         # An upload API that no client knows.
         return {"other_upload": {"session_token": token}}
 
-    def vol_upload(self, kind: str, token: str | None, path: str):
-        uploads = (
-            self.multipart_uploads if kind == "multipart" else self.resumable_uploads
-        )
-        upload = uploads.get(token)
+    def vol_upload(self, token: str | None, path: str) -> MultipartUpload:
+        upload = self.multipart_uploads.get(token)
         if upload is None or upload.path != path:
             # Assumed: an unknown session, or one of another file, is not found.
-            raise ApiError("NOT_FOUND", f"No {kind} upload session {token}.", 404)
+            raise ApiError("NOT_FOUND", f"No multipart upload session {token}.", 404)
         return upload
 
     ### Workspace
@@ -524,13 +509,10 @@ async def scim_me(storage: Storage):
 ### Files API
 #
 # Files and directories in Unity Catalog volumes, under `/Volumes/<catalog>/<schema>/<volume>`. Uploads in parts
-# go through the upload API that initiate-upload names: multipart, as on AWS and Azure, or resumable, as on GCP.
-# Their parts go to presigned URLs, or to the Files API itself with the session in the query, as the storage proxy
-# takes them. The presigned URLs point back to this server, with `signed=true`.
+# are multipart uploads. Their parts go to presigned URLs, or to the Files API itself with the session in the query,
+# as the storage proxy takes them. The presigned URLs point back to this server, with `signed=true`.
 
 _max_page_size = 1000
-_resumable_granularity = 256 * 1024
-_probe_path = "/DatabricksInternal/Probe/fullstack/wis"
 
 
 def _volume_path(path: str | None) -> str:
@@ -630,9 +612,6 @@ async def files_download(
 
 @app.head("/api/2.0/fs/files{file_path:path}")
 async def files_get_metadata(storage: Storage, file_path: str):
-    if file_path == _probe_path:
-        # The storage proxy's probe: 200 when it serves the workspace.
-        return Response(status_code=200 if storage.storage_proxy_available else 403)
     path = _volume_path(file_path)
     # A HEAD response has no body: the SDK tells the error by its status alone.
     return Response(headers=storage.vol_get(path).headers())
@@ -649,87 +628,30 @@ async def files_upload(
     session_token: str | None = None,
     upload_id: str | None = None,
     part_number: int | None = None,
-    content_range: Annotated[str | None, Header()] = None,
     signed: str | None = None,
 ):
     path = _volume_path(file_path)
     _check_presigned(storage, signed)
     data = await request.body()
-    if storage.upload_errors and upload_type != "resumable":
+    if storage.upload_errors:
         raise ApiError("INTERNAL_ERROR", "Injected error", storage.upload_errors.pop(0))
     if _files_api_version(request) == "3.0" and upload_id is not None:
         # Assumed, as SDK 0.163 sends them: the parts of Files API 3.0 name their upload by `upload_id`.
         upload_type, session_token = "multipart", upload_id
 
     if upload_type == "multipart":
-        upload = storage.vol_upload("multipart", session_token, path)
+        upload = storage.vol_upload(session_token, path)
         if part_number is None or part_number < 1:
             raise ApiError("INVALID_PARAMETER_VALUE", f"Invalid part: {part_number}")
         # Uploading a part again replaces it, as object storage does.
         etag = base64.b64encode(hashlib.sha256(data).digest()).decode()
         upload.parts[part_number] = (etag, data)
         return Response(headers={"etag": etag})
-    if upload_type == "resumable":
-        return _resumable_put(storage, path, session_token, content_range, data)
     if upload_type is not None:
         raise ApiError("INVALID_PARAMETER_VALUE", f"Invalid upload_type: {upload_type}")
 
     storage.vol_write(path, data, _overwrite(overwrite))
     return Response(status_code=204)
-
-
-_content_range_pat = re.compile(
-    r"bytes (?:(?P<first>\d+)-(?P<last>\d+)|(?P<status>\*))/(?P<total>\d+|\*)"
-)
-
-
-def _resumable_put(
-    storage: DummyStorage,
-    path: str,
-    session_token: str | None,
-    content_range: str | None,
-    data: bytes,
-) -> Response:
-    """A chunk of a resumable upload, or a query of its status, as Google Cloud Storage takes them."""
-    upload = storage.vol_upload("resumable", session_token, path)
-    m = _content_range_pat.fullmatch(content_range or "")
-    if not m:
-        raise ApiError(
-            "INVALID_PARAMETER_VALUE", f"Invalid Content-Range: {content_range}"
-        )
-
-    if not m["status"]:
-        first, last = int(m["first"]), int(m["last"])
-        total = None if m["total"] == "*" else int(m["total"])
-        if first > len(upload.data) or len(data) != last - first + 1:
-            # Assumed: a gap or a wrong length is refused.
-            raise ApiError(
-                "INVALID_PARAMETER_VALUE", f"Unexpected chunk: {content_range}"
-            )
-        if total is None and len(data) % _resumable_granularity != 0:
-            raise ApiError(
-                "INVALID_PARAMETER_VALUE",
-                f"A chunk but the last must be a multiple of 256 KiB: {content_range}",
-            )
-        # A chunk overlapping what was received replaces it.
-        upload.data[first:] = data
-        if total is not None:
-            if len(upload.data) != total:
-                raise ApiError(
-                    "INVALID_PARAMETER_VALUE", f"Unexpected size: {content_range}"
-                )
-            del storage.resumable_uploads[session_token]
-            if path in storage.volume_files and not upload.overwrite:
-                # As Cloud Storage answers a failed precondition, which the SDK expects.
-                raise ApiError(
-                    "ALREADY_EXISTS", f"The file {path} already exists.", 412
-                )
-            storage.vol_write(path, upload.data, upload.overwrite)
-            return Response(status_code=200)
-
-    # 308 tells what was received so far, and nothing before the first byte.
-    headers = {"range": f"bytes=0-{len(upload.data) - 1}"} if upload.data else {}
-    return Response(status_code=308, headers=headers)
 
 
 def _files_api_version(request: Request) -> str:
@@ -755,7 +677,7 @@ async def files_upload_action(
     if version == "3.0" and upload_id is not None:
         upload_type, session_token = "multipart", upload_id
     if action == "complete-upload" and upload_type == "multipart":
-        upload = storage.vol_upload("multipart", session_token, path)
+        upload = storage.vol_upload(session_token, path)
         parts = (await _body(request)).get("parts") or []
         numbers = [p["part_number"] for p in parts]
         if not numbers or numbers != sorted(set(numbers)):
@@ -773,7 +695,7 @@ async def files_upload_action(
         return {}
     if action == "abort-upload" and upload_type == "multipart":
         # The SDK and fsspec-databricks abort with a POST. An abort URL's DELETE is served below.
-        storage.vol_upload("multipart", session_token, path)
+        storage.vol_upload(session_token, path)
         del storage.multipart_uploads[session_token]
         return {}
     raise ApiError(
@@ -794,14 +716,8 @@ async def files_delete(
     path = _volume_path(file_path)
     if action == "abort-upload":
         _check_presigned(storage, signed)
-        storage.vol_upload("multipart", session_token, path)
+        storage.vol_upload(session_token, path)
         del storage.multipart_uploads[session_token]
-        return Response(status_code=204)
-    if upload_type == "resumable":
-        # Deleting the session's URL cancels it, as on Cloud Storage.
-        _check_presigned(storage, signed)
-        storage.vol_upload("resumable", session_token, path)
-        del storage.resumable_uploads[session_token]
         return Response(status_code=204)
     if action or upload_type or session_token:
         raise ApiError(
@@ -907,18 +823,18 @@ async def files_create_download_url(
     return {"url": _presigned_url(request, path), "headers": []}
 
 
-async def _session_request(storage: DummyStorage, request: Request, kind: str):
+async def _session_request(storage: DummyStorage, request: Request):
     """The path and session token of a request for upload URLs, checked."""
     body = await _body(request)
     path = _volume_path(body.get("path"))
     token = body.get("session_token")
-    storage.vol_upload(kind, token, path)
+    storage.vol_upload(token, path)
     return body, path, token
 
 
 @app.post("/api/2.0/fs/create-upload-part-urls")
 async def files_create_upload_part_urls(storage: Storage, request: Request):
-    body, path, token = await _session_request(storage, request, "multipart")
+    body, path, token = await _session_request(storage, request)
     try:
         start, count = int(body["start_part_number"]), int(body["count"])
         expire_time = body["expire_time"]
@@ -943,13 +859,6 @@ async def files_create_upload_part_urls(storage: Storage, request: Request):
     }
 
 
-@app.post("/api/2.0/fs/create-resumable-upload-url")
-async def files_create_resumable_upload_url(storage: Storage, request: Request):
-    _, path, token = await _session_request(storage, request, "resumable")
-    url = _presigned_url(request, path, session_token=token, upload_type="resumable")
-    return {"resumable_upload_url": {"url": url, "headers": []}}
-
-
 @app.post("/api/2.0/fs/create-abort-upload-url")
 async def files_create_abort_upload_url(storage: Storage, request: Request):
     if not storage.abort_supported:
@@ -957,7 +866,7 @@ async def files_create_abort_upload_url(storage: Storage, request: Request):
         raise ApiError(
             "INVALID_PARAMETER_VALUE", "Abort of multipart upload is not supported."
         )
-    body, path, token = await _session_request(storage, request, "multipart")
+    body, path, token = await _session_request(storage, request)
     if "expire_time" not in body:
         raise ApiError("INVALID_PARAMETER_VALUE", "expire_time is required.")
     url = _presigned_url(request, path, action="abort-upload", session_token=token)
