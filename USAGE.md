@@ -232,13 +232,10 @@ fs.ls("dbfs:/Volumes/my_catalog/my_schema/my_volume/data")
 
 `fs.ls("dbfs:/Volumes")` lists the catalogs, then the schemas and volumes below.
 
-Reads and writes run concurrent requests. Large files are uploaded in parts, by the upload API that the workspace
-chooses for each upload:
+Reads and writes run concurrent requests. Large files are uploaded in parts, sent concurrently. Files go through the
+endpoints that the workspace names, as the Databricks SDK uses them.
 
-- multipart upload sends the parts concurrently;
-- resumable upload sends them one at a time.
-
-Reads retry after transient server errors. Writes do not.
+Reads and writes retry after transient server errors. A file replaced while it is read fails with an `OSError`.
 
 Copies, moves and deletes:
 

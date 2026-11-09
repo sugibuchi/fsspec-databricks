@@ -134,7 +134,8 @@ the SDK alone, without this package.
 
 Switches of `dummy` make the server answer as a given workspace:
 
-- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`;
+- `upload_mode` chooses the upload API that initiate-upload answers with: `multipart`, `resumable` or `unknown`.
+  Resumable uploads are served for SDK 0.158, which `test_dummy_api.py` runs;
 - `presigned_urls_only` refuses data transfers to the Files API itself;
 - `abort_supported = False` refuses abort URLs, as Azure Databricks does;
 - `read_errors` lists statuses that the next downloads fail with;
@@ -533,8 +534,6 @@ A request that is safe to send again is retried up to 3 times after a transient 
 - Range reads are retried.
 - So are a whole file's `PUT`, initiate-upload, multipart parts and complete-upload. A `PUT` sends no `overwrite`, so
   a repeated one replaces the first. A part sent again replaces the first under its number.
-- Resumable parts are not retried. The server may have taken part of a chunk, and only a query of the upload's status
-  would tell.
 
 #### Writing
 
@@ -545,31 +544,18 @@ A request that is safe to send again is retried up to 3 times after a transient 
 3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
 
-The server's answer to the initiation names the upload API, and the file builds a session object of it:
+Uploads in parts are multipart uploads only, as in the SDK since 0.163:
 
 - `_MultipartSession` sends parts concurrently, then completes the upload with their ETags.
-- `_ResumableSession` sends one part at a time, with `Content-Range`, so the file sets `sequential`. The last part
-  completes the upload. A `308` answer gives the bytes received, and the rest is sent again.
-- An answer naming neither API raises an `OSError`.
-
-Multipart support follows the endpoint, not the cloud. The endpoints listing, `GET /api/2.0/fs/endpoints`, gives each
-endpoint a `multipart_upload_supported` flag:
-
-- the offload path on the workspace host, which presigned URLs use, supports multipart uploads;
-- Files API 3.0 on the storage host supports them;
-- Files API 2.0 called directly on the workspace host does not.
-
-AWS and GCP workspaces answered the same, and both started multipart uploads in the live tests. The server's choice may
-change with API versions, so the file follows the server's answer per upload.
+- Files API 2.0 names the upload by a `session_token`, and Files API 3.0 by an `upload_id`.
+- An initiation answer naming another upload API raises an `OSError`. That covers resumable uploads, which the SDK
+  dropped.
 
 If a part fails, `close()` aborts the upload and raises an `OSError`:
 
-- A multipart upload is aborted by a `POST` to the Files API, as the SDK aborts. No abort URL is asked for, as Azure
+- The upload is aborted by a `POST` to the Files API, as the SDK aborts. No abort URL is asked for, as Azure
   Databricks refuses them with a 400 answer.
-- A resumable upload is aborted by a `DELETE` of its upload URL.
 - The abort is best effort. A failed abort is a WARNING, and the upload's own failure is raised.
-
-Part sizes must be multiples of 256 KB. The constructor refuses other minimum and maximum sizes.
 
 ### Workspace files
 
@@ -629,8 +615,8 @@ from the event loop. Code on the loop uses `open_async()` and awaits the file's 
 fsspec opens a file with `autocommit=False` inside `with fs.transaction:`. Each backend's `_open` then returns the
 library's `TransactionFile`, with a `FileTransaction` of `files/fsspec_transaction.py`:
 
-- Volumes use `AdaptiveWritableTransaction`, with `hold_last_part=True`. A resumable upload completes with its last
-  part, and the server chooses that API only once the upload starts.
+- Volumes use `AdaptiveWritableTransaction`. It holds back the completion of a multipart upload, and the `PUT` of a
+  small file, until commit.
 - Workspace files use `_WorkspaceTransaction`, in `workspace.py`. Commit closes the `WorkspaceFile`, which uploads it,
   and discard drops it.
 - DBFS uses `TempPathTransaction`. Its stream shows the file as it grows, so holding a last part would not hide it.
