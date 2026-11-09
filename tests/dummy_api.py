@@ -1294,6 +1294,8 @@ async def dbfs_read(
     length: int = 512 * 1024,
 ):
     _check_dbfs_enabled(storage)
+    if storage.read_errors:
+        raise ApiError("INTERNAL_ERROR", "Injected error", storage.read_errors.pop(0))
     path = _dbfs_path(path)
     entry = storage.dbfs_get(path)
     if entry.is_dir:

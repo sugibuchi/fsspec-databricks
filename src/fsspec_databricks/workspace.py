@@ -4,6 +4,7 @@ import io
 from io import UnsupportedOperation
 from typing import Any, Literal
 
+from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import BadRequest
 from databricks.sdk.service.workspace import (
     ExportFormat,
@@ -295,7 +296,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             language = value_of(language, Language)
 
         return WorkspaceFile(
-            self,
+            self.client,
             path,
             mode,
             export_format=export_format,
@@ -381,7 +382,7 @@ class WorkspaceFile(io.BytesIO):
 
     def __init__(
         self,
-        fs: WorkspaceFileSystem,
+        client: WorkspaceClient,
         path: str,
         mode: str = "rb",
         *,
@@ -392,7 +393,7 @@ class WorkspaceFile(io.BytesIO):
         super().__init__()
         # Set first, so that closing a file whose download failed uploads nothing.
         self._discarded = True
-        self.fs = fs
+        self.client = client
         self.path = path
         self.mode = mode
         self.export_format = export_format
@@ -417,7 +418,7 @@ class WorkspaceFile(io.BytesIO):
         workspace_path = parse_workspace_path(self.path)
         with (
             error_mapping(self.path),
-            self.fs.client.workspace.download(
+            self.client.workspace.download(
                 workspace_path, format=self.export_format
             ) as src,
         ):
@@ -428,7 +429,7 @@ class WorkspaceFile(io.BytesIO):
     def _upload(self) -> None:
         workspace_path = parse_workspace_path(self.path)
         with error_mapping(self.path):
-            self.fs.client.workspace.upload(
+            self.client.workspace.upload(
                 workspace_path,
                 self.getvalue(),
                 format=self.import_format,

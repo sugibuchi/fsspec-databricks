@@ -1,28 +1,21 @@
 import asyncio
 import logging
 import re
-import sys
 import threading
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
-from random import random
 from typing import Any, TypeVar
 
 from aiohttp import (
     ClientConnectionError,
     ClientError,
-    ClientHandlerType,
     ClientMiddlewareType,
-    ClientRequest,
-    ClientResponse,
     ClientResponseError,
     ClientSession,
     ClientTimeout,
-    TCPConnector,
 )
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.client_types import HostType
 from databricks.sdk.config import Config
 from databricks.sdk.errors import BadRequest, NotFound
 from databricks.sdk.service.catalog import CatalogInfo, SchemaInfo, VolumeInfo
@@ -41,7 +34,6 @@ from ._contrib.strategy.files.fsspec_transaction import (
 )
 from .base import BaseDatabricksFileSystem, root_dir_info
 from .error import (
-    access_error,
     error_mapping,
     file_exists_error,
     file_not_found_error,
@@ -50,6 +42,14 @@ from .error import (
     not_a_directory_error,
     not_empty_error,
     permission_error,
+)
+from .http_client import (
+    AioHttpSessionSupport,
+    HttpFileMixin,
+    HttpReadableMixin,
+    check_response,
+    response_error,
+    workspace_authenticator,
 )
 from .path import dbfs_root, parse_volume_path
 from .utils import to_datetime, to_rfc3339
@@ -126,7 +126,7 @@ def _parse(path: str) -> tuple[str | None, str | None, str | None, str | None, s
         raise file_not_found_error(path) from None
 
 
-class VolumeFileSystem(BaseDatabricksFileSystem):
+class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     """Unity Catalog Volume file system.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop. Its recursive
@@ -151,9 +151,6 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
 
     io_concurrency: int = 24
     """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""
-
-    connection_pool_size: int = 100
-    """The maximum number of connections in the aiohttp connection pool (TCPConnector limit)."""
 
     _storage_proxy_hostname: str = "http://storage-proxy.databricks.com"
     """The hostname of the Databricks storage proxy."""
@@ -192,16 +189,10 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
-        if connection_pool_size is not None:
-            self.connection_pool_size = connection_pool_size
-
+        self._init_session(connection_pool_size)
         self._lock = threading.Lock()
         self._workspace_id: int | None = None
         self._storage_proxy_available: bool | None = None
-
-        # Made on the loop that uses it, as TCPConnector needs a running loop.
-        self._session: ClientSession | None = None
-        self._session_loop: asyncio.AbstractEventLoop | None = None
 
         super().__init__(
             client=client,
@@ -211,42 +202,6 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
             io_concurrency=io_concurrency,
             **storage_options,
         )
-
-    def close(self):
-        """Close the file system and its HTTP session."""
-        if self.closed:
-            return
-        try:
-            session, self._session = self._session, None
-            loop, self._session_loop = self._session_loop, None
-            if session is not None and not session.closed and not loop.is_closed():
-                try:
-                    running = asyncio.get_running_loop()
-                except RuntimeError:
-                    running = None
-                if running is loop:
-                    # Nothing can wait for it on its own loop.
-                    loop.create_task(session.close())
-                elif loop.is_running() and not sys.is_finalizing():
-                    sync(loop, session.close, timeout=5.0)
-        finally:
-            super().close()
-
-    async def _get_session(self) -> ClientSession:
-        """The aiohttp session of the running loop, made on first use."""
-        if self.closed:
-            raise RuntimeError("The file system is already closed")
-        loop = asyncio.get_running_loop()
-        if (
-            self._session is None
-            or self._session.closed
-            or self._session_loop is not loop
-        ):
-            self._session = ClientSession(
-                connector=TCPConnector(limit=self.connection_pool_size)
-            )
-            self._session_loop = loop
-        return self._session
 
     @property
     def workspace_id(self) -> int:
@@ -276,7 +231,7 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
         try:
             async with session.head(
                 probe_url,
-                middlewares=(_workspace_authenticator(self.config),),
+                middlewares=(workspace_authenticator(self.config),),
                 timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
             ) as response:
                 available = response.status == 200
@@ -390,13 +345,29 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
             return
 
         catalog, schema, volume, _, full_path = _parse(path)
-        func, args, kwargs = _listing(
-            self.client, catalog, schema, volume, full_path, include_browse
-        )
+        if catalog is None:
+            entries = self._iter_in_thread(
+                self.client.catalogs.list, include_browse=include_browse
+            )
+        elif schema is None:
+            entries = self._iter_in_thread(
+                self.client.schemas.list, catalog, include_browse=include_browse
+            )
+        elif volume is None:
+            entries = self._iter_in_thread(
+                self.client.volumes.list,
+                catalog,
+                schema,
+                include_browse=include_browse,
+            )
+        else:
+            entries = self._iter_in_thread(
+                self.client.files.list_directory_contents, full_path
+            )
         listed = False
         with error_mapping(path):
             try:
-                async for entry in self._iter_in_thread(func, *args, **kwargs):
+                async for entry in entries:
                     listed = True
                     yield _map_info(entry, detail=True)
             except (NotFound, BadRequest):
@@ -503,24 +474,29 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
             base_url = self.config.host
             use_presigned_url = True
 
-        kwargs = {
-            "session": await self._get_session(),
-            "base_url": base_url,
-            "auth": _workspace_authenticator(self.config),
-            "concurrency_limit": self.io_limit,
-        }
         loop = asyncio.get_running_loop()
+        session = await self._get_session()
+        auth = workspace_authenticator(self.config)
         if "r" in mode:
             return VolumeReadableFile(
                 full_path,
                 loop,
                 int(info["size"]),
+                session=session,
+                base_url=base_url,
+                auth=auth,
                 prefer_presigned_url=use_presigned_url,
-                **kwargs,
+                concurrency_limit=self.io_limit,
             )
         else:
             return VolumeWritableFile(
-                full_path, loop, use_presigned_url=use_presigned_url, **kwargs
+                full_path,
+                loop,
+                session=session,
+                base_url=base_url,
+                auth=auth,
+                use_presigned_url=use_presigned_url,
+                concurrency_limit=self.io_limit,
             )
 
     async def open_async(self, path, mode="rb", **kwargs):
@@ -560,82 +536,8 @@ class VolumeFileSystem(BaseDatabricksFileSystem):
         return super().open(path, mode, **kwargs)
 
 
-def _workspace_authenticator(config: Config) -> ClientMiddlewareType:
-    cfg = config
-
-    async def auth(
-        request: ClientRequest, handler: ClientHandlerType
-    ) -> ClientResponse:
-        ### From https://github.com/databricks/databricks-sdk-py/blob/main/databricks/sdk/core.py
-        headers = await asyncio.to_thread(cfg.authenticate)
-        # Add X-Databricks-Org-Id header for workspace clients on unified hosts
-        if cfg.workspace_id and cfg.host_type == HostType.UNIFIED:
-            headers["X-Databricks-Org-Id"] = cfg.workspace_id
-        ### end
-
-        request.headers.update(headers)
-        return await handler(request)
-
-    return auth
-
-
-_retryable_statuses = frozenset({429, 500, 502, 503, 504})
-
-
-def _response_error(path: str, error: Exception, doing: str) -> OSError:
-    """An OSError for a failed request, by its HTTP status if it has one."""
-    status = getattr(error, "status", None)
-    message = f"{doing} failed" + (f" with status {status}" if status else "")
-    if status == 404:
-        return file_not_found_error(path, message)
-    if status in (401, 403):
-        return access_error(path, message)
-    if status == 409:
-        return file_exists_error(path, message)
-    return io_error(path, message)
-
-
-async def _check_response(response: ClientResponse, path: str, doing: str) -> None:
-    """Log the request, and raise an OSError for a failed response, logging its body."""
-    if response.ok:
-        logger.debug("%s: path=%s, status=%d", doing, path, response.status)
-        return
-    try:
-        body = await response.text()
-    except ClientError:
-        # The server may close the connection before a refused upload is sent.
-        body = None
-    logger.debug(
-        "%s: path=%s, status=%d, response=%s", doing, path, response.status, body
-    )
-    try:
-        response.raise_for_status()
-    except ClientResponseError as e:
-        raise _response_error(path, e, doing) from e
-
-
-class _VolumeFileMixin:
-    """Request settings shared by the file classes."""
-
-    timeout_total: float | None = None
-    """The maximum seconds for a whole request: connecting, sending and reading the response.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
-
-    timeout_connect: float | None = None
-    """The maximum seconds to get a connection, including the wait for a free one from the pool.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
-
-    timeout_sock_connect: float | None = 30
-    """The maximum seconds to connect to a peer for a new connection.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
-
-    timeout_sock_read: float | None = 120
-    """The maximum seconds between two reads of data from a peer.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+class _VolumeFileMixin(HttpFileMixin):
+    """The Files API URL of a file, shared by the file classes."""
 
     def _init_requests(
         self,
@@ -644,19 +546,11 @@ class _VolumeFileMixin:
         base_url: str,
         auth: ClientMiddlewareType,
     ) -> None:
-        self._session = session
-        self._base_url = base_url.rstrip("/")
+        self._init_http(session, base_url, auth)
         self._files_url = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(path)}"
-        self._auth = auth
-        self._timeout = ClientTimeout(
-            total=self.timeout_total,
-            connect=self.timeout_connect,
-            sock_connect=self.timeout_sock_connect,
-            sock_read=self.timeout_sock_read,
-        )
 
 
-class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
+class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFile):
     """A Unity Catalog Volume file read by range requests, through presigned URLs or the Files API."""
 
     min_block_size: int = 1 * _MiB
@@ -673,12 +567,6 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
 
     presigned_url_refresh_after: int = 30  # min
     """After how many minutes a presigned URL is renewed."""
-
-    fetch_max_retries: int = 3
-    """The maximum number of retries of a range request after a transient error."""
-
-    fetch_retry_delay: float = 1.0
-    """The base delay in seconds before the first retry of a range request. It doubles with each retry."""
 
     def __init__(
         self,
@@ -724,7 +612,7 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
                     middlewares=(self._auth,),
                     timeout=self._timeout,
                 ) as response:
-                    await _check_response(response, self.path, "Creating presigned URL")
+                    await check_response(response, self.path, "Creating presigned URL")
                     result = await response.json()
 
                 self._presigned_url = result["url"]
@@ -734,31 +622,6 @@ class VolumeReadableFile(_VolumeFileMixin, AdaptiveReadableFile):
                 self._presigned_url_refresh_time = refresh_time
 
         return self._presigned_url, dict(self._presigned_url_headers)
-
-    async def _fetch_range(self, start: int, end: int) -> bytes:
-        try:
-            delay = self.fetch_retry_delay
-            for _ in range(self.fetch_max_retries):
-                try:
-                    return await self._request_range(start, end)
-                except ClientResponseError as e:
-                    if e.status not in _retryable_statuses:
-                        raise
-                    logger.warning(
-                        "Retrying range request after status %d: path=%s, range=%d-%d",
-                        e.status,
-                        self.path,
-                        start,
-                        end,
-                    )
-                # The jitter keeps concurrent range requests from retrying together.
-                await asyncio.sleep(delay * (1 + random()))
-                delay *= 2
-            return await self._request_range(start, end)
-        except (ClientError, TimeoutError) as e:
-            raise _response_error(
-                self.path, e, f"Reading the range {start}-{end}"
-            ) from e
 
     async def _request_range(self, start: int, end: int) -> bytes:
         if self.use_presigned_url:
@@ -847,7 +710,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         async with self._session.post(
             url, json=body, middlewares=(self._auth,), timeout=self._timeout
         ) as response:
-            await _check_response(response, self.path, doing)
+            await check_response(response, self.path, doing)
             return await response.json()
 
     async def _delete(
@@ -861,7 +724,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             data=b"",
             timeout=self._timeout,
         ) as response:
-            await _check_response(response, self.path, "Aborting upload")
+            await check_response(response, self.path, "Aborting upload")
 
     async def _upload_all(self, data: bytes) -> None:
         async with self._session.put(
@@ -870,7 +733,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             middlewares=(self._auth,),
             timeout=self._timeout,
         ) as response:
-            await _check_response(response, self.path, "Uploading")
+            await check_response(response, self.path, "Uploading")
 
     async def _start_multipart_upload(self) -> None:
         async with self._session.post(
@@ -879,7 +742,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
             middlewares=(self._auth,),
             timeout=self._timeout,
         ) as response:
-            await _check_response(response, self.path, "Initiating upload")
+            await check_response(response, self.path, "Initiating upload")
             result = await response.json()
 
         # The server chooses the API of each upload: the file follows it.
@@ -904,7 +767,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         try:
             return await self._upload_session.upload_part(data, start, end, index, last)
         except (ClientError, TimeoutError) as e:
-            raise _response_error(self.path, e, f"Uploading part {index}") from e
+            raise response_error(self.path, e, f"Uploading part {index}") from e
 
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
         assert self._upload_session is not None
@@ -942,7 +805,7 @@ class _MultipartSession:
             middlewares=file._middlewares(),
             timeout=file._timeout,
         ) as response:
-            await _check_response(response, file.path, f"Uploading part {part_number}")
+            await check_response(response, file.path, f"Uploading part {part_number}")
             return part_number, response.headers.get("etag", "")
 
     async def _part_url(
@@ -995,7 +858,7 @@ class _MultipartSession:
             middlewares=(file._auth,),
             timeout=file._timeout,
         ) as response:
-            await _check_response(response, file.path, "Completing upload")
+            await check_response(response, file.path, "Completing upload")
 
     async def _abort_url(self) -> tuple[str, dict[str, str], dict[str, Any] | None]:
         file = self.file
@@ -1140,18 +1003,3 @@ __all__ = [
     "VolumeWritableFile",
     "volumes_root_info",
 ]
-
-
-def _listing(client, catalog, schema, volume, full_path, include_browse):
-    """The SDK listing of a path: the SDK's method, and its positional and keyword arguments."""
-    if catalog is None:
-        return client.catalogs.list, (), {"include_browse": include_browse}
-    if schema is None:
-        return client.schemas.list, (catalog,), {"include_browse": include_browse}
-    if volume is None:
-        return (
-            client.volumes.list,
-            (catalog, schema),
-            {"include_browse": include_browse},
-        )
-    return client.files.list_directory_contents, (full_path,), {}

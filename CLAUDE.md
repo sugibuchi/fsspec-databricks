@@ -70,8 +70,9 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
   and call the SDK in threads with `_run_in_thread`, passing the SDK's bound method and its arguments.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
-- `VolumeFileSystem` is an async fsspec file system on fsspec's loop. Its aiohttp session is created on the loop using
-  it, as `TCPConnector` needs a running loop.
+- `VolumeFileSystem` and `DBFS` are async fsspec file systems on fsspec's loop. Their files call the REST APIs with
+  aiohttp, through the helpers of `http_client.py`.
+- Their aiohttp session is created on the loop using it, as `TCPConnector` needs a running loop.
 - Never block on the loop from code running in it. File objects' synchronous methods raise there.
 - `src/fsspec_databricks/_contrib/strategy/` is a copy of fsspec-alt-strategies. Never edit it: DEVELOPMENT.md says how
   to refresh it.
@@ -86,8 +87,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Workspace files are `WorkspaceFile`s, sync and buffered in memory, transferred whole, up to the API's 10 MB.
 - Legacy DBFS `rmdir` never deletes recursively. `tests/test_dbfs.py` checks it on the dummy server.
 - Logging follows s3fs and gcsfs. Each module has `logging.getLogger(__name__)`, and the library installs no handlers.
-- Log one DEBUG line per request to Databricks, where it leaves the process: `_run_in_thread` in `base.py`, and Volumes' HTTP
-  helpers in `volume.py`. Range reads are not logged. Keep it cheap, with lazy `%` formatting.
+- Log one DEBUG line per request to Databricks, where it leaves the process: `_run_in_thread` in `base.py`, and
+  `check_response` in `http_client.py`. Range reads are not logged. Keep it cheap, with lazy `%` formatting.
 - Log retries and aborted uploads at WARNING. Log nothing else: the library's monitors report operations.
 
 ## Conventions
