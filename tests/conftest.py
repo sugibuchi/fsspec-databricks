@@ -152,8 +152,6 @@ def _api_environment(request, monkeypatch):
     monkeypatch.setenv("DATABRICKS_TOKEN", "dummy")
     monkeypatch.setenv("DATABRICKS_AUTH_TYPE", "pat")
     monkeypatch.setenv("DATABRICKS_CONFIG_FILE", _no_config_file)
-    # The dummy answers the probe: the storage proxy is unavailable unless a test says otherwise.
-    monkeypatch.setattr(VolumeFileSystem, "_storage_proxy_hostname", url)
 
 
 def _event_loop(thread_name: str):

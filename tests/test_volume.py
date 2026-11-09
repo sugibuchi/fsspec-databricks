@@ -31,10 +31,15 @@ from fsspec_databricks._contrib.strategy.files.fsspec_transaction import (
 )
 from fsspec_databricks.path import parse_volume_path
 from fsspec_databricks.volume import (
+    _FILES_API_V2,
+    _FILES_API_V3,
+    _IO_OFFLOAD,
     VolumeFileSystem,
     VolumeReadableFile,
     VolumeWritableFile,
+    _Endpoint,
     _MultipartSession,
+    _parse_endpoint,
     _ResumableSession,
 )
 from tests.utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
@@ -116,34 +121,267 @@ def test_volume_fs_session():
         assert sync(fs.loop, fs._get_session) is session
 
 
-def test_volume_fs_storage_proxy_probe_timeout(dummy_client):
-    # Connections are accepted by the backlog, but no response ever comes.
-    with socket.create_server(("127.0.0.1", 0)) as server:
-        port = server.getsockname()[1]
-
-        with VolumeFileSystem(client=dummy_client) as fs:
-            fs._storage_proxy_hostname = f"http://127.0.0.1:{port}"
-            fs._storage_proxy_probe_timeout = 0.1
-
-            assert fs.storage_proxy_available is False
+def _defaults(host: str) -> list[_Endpoint]:
+    return [
+        _Endpoint(_IO_OFFLOAD, host, multipart_upload_supported=True),
+        _Endpoint(_FILES_API_V2, host, multipart_upload_supported=False),
+    ]
 
 
-def test_volume_fs_storage_proxy_probe_connection_refused(dummy_client):
+def test_volume_fs_endpoints_not_served(dummy_client, dummy, dummy_api):
+    """Without the endpoints API, the SDK's defaults: asked once per file system."""
+    with VolumeFileSystem(client=dummy_client) as fs:
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+    assert len(dummy.requests_to("/api/2.0/fs/endpoints")) == 1
+
+
+def test_volume_fs_endpoints_unreachable(dummy_client, dummy_api):
     # Refused without a socket: Windows retries a refused connection for seconds, and a freed port can be reused.
     refused = ClientConnectionError("Connection refused")
     with (
-        patch("aiohttp.ClientSession.head", side_effect=refused) as head,
+        patch("aiohttp.ClientSession.get", side_effect=refused) as get,
         VolumeFileSystem(client=dummy_client) as fs,
     ):
-        assert fs.storage_proxy_available is False
-        head.assert_called_once()
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+        get.assert_called_once()
 
 
-def test_volume_fs_storage_proxy_probe_answered(dummy_client, dummy):
-    dummy.storage_proxy_available = True
+def test_volume_fs_endpoints_timeout(dummy_client, dummy_api):
+    # Connections are accepted by the backlog, but no response ever comes.
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        port = server.getsockname()[1]
+        with VolumeFileSystem(client=dummy_client) as fs:
+            fs._endpoints_timeout = 0.1
+            endpoints = sync(fs.loop, fs._fetch_endpoints, f"http://127.0.0.1:{port}")
+            assert endpoints == []
+
+
+def test_volume_fs_endpoints_listed(dummy_client, dummy, dummy_api):
+    """The usable entries, in order; none usable gives the defaults."""
+    host = dummy_api.removeprefix("http://")
+    dummy.endpoints = [
+        {"api": "UNKNOWN", "scheme": "http", "hostname": host},
+        {"api": "FILES_API", "api_version": "3.0", "scheme": "http", "hostname": host},
+        {"api": "IO_OFFLOAD", "scheme": "http", "hostname": host},
+    ]
     with VolumeFileSystem(client=dummy_client) as fs:
-        assert fs.storage_proxy_available is True
-        assert fs.workspace_id == dummy.workspace_id
+        assert sync(fs.loop, fs._get_endpoints) == [
+            _Endpoint(_FILES_API_V3, dummy_api, False),
+            _Endpoint(_IO_OFFLOAD, dummy_api, False),
+        ]
+
+    dummy.endpoints = [{"api": "UNKNOWN", "scheme": "http", "hostname": host}]
+    with VolumeFileSystem(client=dummy_client) as fs:
+        assert sync(fs.loop, fs._get_endpoints) == _defaults(dummy_api)
+
+
+_https = "https://example.cloud.databricks.com"
+_http = "http://127.0.0.1:8000"
+
+
+@pytest.mark.parametrize(
+    ("entry", "workspace", "expected"),
+    [
+        (
+            {
+                "api": "IO_OFFLOAD",
+                "scheme": "https",
+                "hostname": "example.cloud.databricks.com",
+            },
+            _https,
+            _Endpoint(_IO_OFFLOAD, _https, False),
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "3.0",
+                "scheme": "https",
+                "hostname": "files.example.com:8443",
+                "multipart_upload_supported": True,
+            },
+            _https,
+            _Endpoint(_FILES_API_V3, "https://files.example.com:8443", True),
+        ),
+        # The storage proxy: Files API 2.0 over plain HTTP on another host.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "http",
+                "hostname": "proxy",
+            },
+            _https,
+            _Endpoint(_FILES_API_V2, "http://proxy", False),
+        ),
+        # Plain HTTP elsewhere carries the credentials in the clear.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "3.0",
+                "scheme": "http",
+                "hostname": "files",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "IO_OFFLOAD",
+                "scheme": "http",
+                "hostname": "example.cloud.databricks.com",
+            },
+            _https,
+            None,
+        ),
+        # On a workspace reached by plain HTTP, its own host may use it.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "3.0",
+                "scheme": "http",
+                "hostname": "127.0.0.1:8000",
+            },
+            _http,
+            _Endpoint(_FILES_API_V3, _http, False),
+        ),
+        # Unknown protocols and malformed addresses.
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "4.0",
+                "scheme": "https",
+                "hostname": "h",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "ftp",
+                "hostname": "h",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "https",
+                "hostname": "h/p",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "https",
+                "hostname": "u@h",
+            },
+            _https,
+            None,
+        ),
+        (
+            {
+                "api": "FILES_API",
+                "api_version": "2.0",
+                "scheme": "https",
+                "hostname": "h:x",
+            },
+            _https,
+            None,
+        ),
+        ({"api": "FILES_API", "api_version": "2.0", "scheme": "https"}, _https, None),
+        ({"api": ["IO_OFFLOAD"], "scheme": "https", "hostname": "h"}, _https, None),
+        ("IO_OFFLOAD", _https, None),
+    ],
+)
+def test_volume_parse_endpoint(entry, workspace, expected):
+    assert _parse_endpoint(entry, workspace) == expected
+
+
+@pytest.mark.parametrize(
+    "kind", ["io_offload", "files_api_2", "storage_proxy", "files_api_3"]
+)
+def test_volume_open_on_endpoint(dummy_client, dummy, dummy_api, kind):
+    """Files read and written in parts through the first endpoint listed."""
+    port = dummy_api.rsplit(":", 1)[1]
+    entry = {
+        "io_offload": {"api": "IO_OFFLOAD", "hostname": f"127.0.0.1:{port}"},
+        "files_api_2": {
+            "api": "FILES_API",
+            "api_version": "2.0",
+            "hostname": f"127.0.0.1:{port}",
+        },
+        # Another host name of the dummy, as the storage proxy has one of its own.
+        "storage_proxy": {
+            "api": "FILES_API",
+            "api_version": "2.0",
+            "hostname": f"localhost:{port}",
+        },
+        "files_api_3": {
+            "api": "FILES_API",
+            "api_version": "3.0",
+            "hostname": f"127.0.0.1:{port}",
+        },
+    }[kind]
+    dummy.endpoints = [{**entry, "scheme": "http", "multipart_upload_supported": True}]
+    file = "/Volumes/c/s/v/endpoint.bin"
+    data = randbytes(20 * 1000 * 1000)
+
+    with VolumeFileSystem(client=dummy_client) as fs:
+        with fs.open(file, "wb") as f:
+            f.write(data)
+        assert dummy.volume_files[file].data == data
+        with fs.open(file, "rb") as f:
+            assert f.read() == data
+
+    presigned = dummy.requests_to("/api/2.0/fs/create-")
+    v3 = dummy.requests_to("/api/3.0/fs/files")
+    if kind == "io_offload":
+        assert {r.path for r in presigned} == {
+            "/api/2.0/fs/create-upload-part-urls",
+            "/api/2.0/fs/create-download-url",
+        }
+    else:
+        assert presigned == []
+    if kind == "files_api_3":
+        actions = [r.params.get("action") for r in v3 if r.method == "POST"]
+        assert actions == ["initiate-upload", "complete-upload"]
+        assert all("upload_id" in r.params for r in v3 if r.method == "PUT")
+    else:
+        assert v3 == []
+
+
+def test_volume_write_endpoint_takes_parts(dummy_client, dummy, dummy_api):
+    """Reads take the first endpoint; writes the first taking multipart uploads."""
+    host = dummy_api.removeprefix("http://")
+    dummy.endpoints = [
+        {"api": "FILES_API", "api_version": "2.0", "scheme": "http", "hostname": host},
+        {
+            "api": "IO_OFFLOAD",
+            "scheme": "http",
+            "hostname": host,
+            "multipart_upload_supported": True,
+        },
+    ]
+    file = "/Volumes/c/s/v/endpoint.bin"
+    data = randbytes(20 * 1000 * 1000)
+
+    with VolumeFileSystem(client=dummy_client) as fs:
+        with fs.open(file, "wb") as f:
+            f.write(data)
+        with fs.open(file, "rb") as f:
+            assert f.read() == data
+
+    # Parts through presigned URLs, ranges from the Files API itself.
+    assert dummy.requests_to("/api/2.0/fs/create-upload-part-urls")
+    assert dummy.requests_to("/api/2.0/fs/create-download-url") == []
 
 
 ### Requests, on the dummy server
@@ -337,10 +575,12 @@ def test_volume_workspace_id(client: WorkspaceClient):
         assert isinstance(workspace_id, int)
 
 
-def test_volume_storage_proxy_available(client: WorkspaceClient):
+def test_volume_endpoints(client: WorkspaceClient):
+    """The workspace lists endpoints, or the SDK's defaults are taken: either way, one to read and write by."""
     with VolumeFileSystem(client=client) as fs:
-        available = fs.storage_proxy_available
-        assert isinstance(available, bool)
+        endpoints = sync(fs.loop, fs._get_endpoints)
+        assert endpoints
+        assert all(e.base_url.startswith(("https://", "http://")) for e in endpoints)
 
 
 @pytest.mark.parametrize(

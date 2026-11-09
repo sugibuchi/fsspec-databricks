@@ -120,6 +120,7 @@ to it over HTTP, so the SDK's requests, errors and mixins run as against a works
 REST references describe:
 
 - the Files API: directories, downloads with ranges, uploads whole or in parts, presigned URLs and aborts;
+- the endpoints list and Files API 3.0, as SDK 0.163 speaks them, as the reference has neither;
 - the Workspace API;
 - the legacy DBFS API;
 - the Unity Catalog API's reads of catalogs, schemas and volumes.
@@ -128,7 +129,7 @@ Parts go to presigned URLs, or to the Files API itself, as through the storage p
 files, the Workspace files and the DBFS root, separate as in Databricks. `test_dummy_api.py` checks the server through
 the SDK alone, without this package.
 
-`dummy.requests` records each request served: its method, path, and query and body parameters without data.
+`dummy.requests` records each request served: its method, path, headers, and query and body parameters without data.
 `dummy.requests_to(prefix, method)` filters them. Tests counting requests assert on these.
 
 Switches of `dummy` make the server answer as a given workspace:
@@ -137,7 +138,10 @@ Switches of `dummy` make the server answer as a given workspace:
 - `presigned_urls_only` refuses data transfers to the Files API itself;
 - `abort_supported = False` refuses abort URLs, as Azure Databricks does;
 - `read_errors` lists statuses that the next downloads fail with;
-- `storage_proxy_available` answers the storage proxy's probe;
+- `upload_errors` lists statuses that the next uploads of whole files or parts fail with;
+- `ranges_ignored` answers the whole file to a range;
+- `endpoints` lists the entries of the endpoints list. Unset, the endpoints API answers 404, as before its rollout;
+- `storage_proxy_available` answers the storage proxy's probe, which SDK 0.158 sends;
 - `legacy_dbfs_disabled` answers as a workspace disabling the DBFS root;
 - `dbfs_add_block_errors` counts the next DBFS add-blocks that fail.
 
@@ -482,11 +486,28 @@ systems one aiohttp `ClientSession`, with `connection_pool_size` connections:
 
 A failed request raises an `OSError`, chosen by its HTTP status or by the API's `error_code`.
 
-#### Storage proxy or presigned URLs
+#### Endpoints
 
-On first open, the file system probes the Databricks storage proxy, `storage-proxy.databricks.com`, with the workspace
-ID. If it answers, all requests go to it. Otherwise, requests go to the workspace's host, and data moves through
-presigned URLs from the Files API.
+On first open, the file system asks the workspace where file data goes, as SDK 0.163 asks: `GET /api/2.0/fs/endpoints`.
+The list names endpoints best first, and the file system keeps those it can speak:
+
+| Entry                         | Data goes                                                            |
+|-------------------------------|----------------------------------------------------------------------|
+| `IO_OFFLOAD`                  | Through presigned URLs, which the host's Files API 2.0 gives         |
+| `FILES_API` 2.0               | To the Files API 2.0 of the host. On another host, the storage proxy |
+| `FILES_API` 3.0               | To `/api/3.0/fs/files` of the host, a multipart upload by its ID     |
+
+- An entry of another protocol, or with a malformed address, is skipped.
+- Plain HTTP is taken only for Files API 2.0 on another host, or on a workspace reached by plain HTTP. The SDK refuses
+  plain HTTP for Files API 3.0 even there. The dummy server needs it.
+- The request is sent once per file system, with a 10-second timeout and no retry. A failure, a 404 or no usable
+  entry gives the SDK's defaults: `IO_OFFLOAD`, then Files API 2.0, both on the workspace's host.
+- A file read takes the first endpoint. A file written takes the first taking multipart uploads, else `IO_OFFLOAD` on
+  the workspace's host.
+- A failed transfer is not tried again on the next endpoint, as the SDK tries it.
+
+Whole files are uploaded by one `PUT` to the Files API of the endpoint's host. With `IO_OFFLOAD`, that is the
+workspace's Files API 2.0, as in the SDK.
 
 Files smaller than `min_presigned_url_size`, 1 MB, are read from the Files API directly. Presigned URLs for reads are
 renewed after 30 minutes.
@@ -638,10 +659,10 @@ installed.
 
 - Each request to Databricks is one DEBUG line: its API or HTTP method, the path and the outcome.
   `BaseDatabricksFileSystem._run_in_thread` logs the SDK's calls. `check_response` in `http_client.py` logs the
-  files' HTTP requests, and `volume.py` its storage proxy probe.
+  files' HTTP requests, and `volume.py` its request for the endpoints list.
 - Range reads are not logged, as a read makes many. Their retries are still logged.
-- Retries and aborted uploads are WARNINGs.
-- The fallback from the storage proxy is DEBUG: outside Databricks, the proxy is normally absent.
+- Retries, aborted uploads and failed aborts are WARNINGs.
+- A failed request for the endpoints list is DEBUG: workspaces before the API's rollout answer 404.
 - Operations, such as `find` or `rm`, are not logged here. The library's monitors report them.
 
 ### The copy of fsspec-alt-strategies

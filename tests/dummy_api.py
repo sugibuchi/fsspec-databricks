@@ -288,6 +288,9 @@ class DummyStorage:
     ranges_ignored: bool = False
     """Whether downloads answer the whole file to a Range, as an HTTP server may."""
 
+    endpoints: list[dict] | None = None
+    """The entries the endpoints API lists. None: the API is not served, as on workspaces before its rollout."""
+
     workspace: dict[str, WorkspaceObject] = field(default_factory=dict)
     dbfs: dict[str, DbfsEntry] = field(default_factory=dict)
     dbfs_handles: dict[int, str] = field(default_factory=dict)
@@ -325,6 +328,7 @@ class DummyStorage:
         self.read_errors = []
         self.upload_errors = []
         self.ranges_ignored = False
+        self.endpoints = None
         self.workspace = {"/": WorkspaceObject("DIRECTORY", 0)}
         self.dbfs = {"/": DbfsEntry(True, 0)}
         self.dbfs_handles = {}
@@ -378,9 +382,13 @@ class DummyStorage:
         self.vol_mkdirs(posixpath.dirname(path))
         self.volume_files[path] = VolumeFile(bytes(data), _now_ms())
 
-    def vol_initiate_upload(self, path: str, overwrite: bool) -> dict:
+    def vol_initiate_upload(self, path: str, overwrite: bool, version: str) -> dict:
         self.vol_check_writable(path, overwrite)
         token = str(uuid.uuid4())
+        if version == "3.0":
+            # Assumed, as SDK 0.163 speaks Files API 3.0: multipart only, named by an `upload_id`.
+            self.multipart_uploads[token] = MultipartUpload(path, overwrite)
+            return {"upload_id": token}
         if self.upload_mode == "multipart":
             self.multipart_uploads[token] = MultipartUpload(path, overwrite)
             return {"multipart_upload": {"session_token": token}}
@@ -571,7 +579,16 @@ def _byte_range(header: str, size: int) -> tuple[int, int] | None:
     return first, last
 
 
+@app.get("/api/2.0/fs/endpoints")
+async def files_endpoints(storage: Storage):
+    # Assumed, as SDK 0.163 reads it: the endpoints of file transfers, best first.
+    if storage.endpoints is None:
+        raise ApiError("ENDPOINT_NOT_FOUND", "No API found for this request.", 404)
+    return {"endpoints": storage.endpoints}
+
+
 @app.get("/api/2.0/fs/files{file_path:path}")
+@app.get("/api/3.0/fs/files{file_path:path}")
 async def files_download(
     storage: Storage,
     file_path: str,
@@ -622,6 +639,7 @@ async def files_get_metadata(storage: Storage, file_path: str):
 
 
 @app.put("/api/2.0/fs/files{file_path:path}")
+@app.put("/api/3.0/fs/files{file_path:path}")
 async def files_upload(
     storage: Storage,
     file_path: str,
@@ -629,6 +647,7 @@ async def files_upload(
     overwrite: str | None = None,
     upload_type: str | None = None,
     session_token: str | None = None,
+    upload_id: str | None = None,
     part_number: int | None = None,
     content_range: Annotated[str | None, Header()] = None,
     signed: str | None = None,
@@ -638,6 +657,9 @@ async def files_upload(
     data = await request.body()
     if storage.upload_errors and upload_type != "resumable":
         raise ApiError("INTERNAL_ERROR", "Injected error", storage.upload_errors.pop(0))
+    if _files_api_version(request) == "3.0" and upload_id is not None:
+        # Assumed, as SDK 0.163 sends them: the parts of Files API 3.0 name their upload by `upload_id`.
+        upload_type, session_token = "multipart", upload_id
 
     if upload_type == "multipart":
         upload = storage.vol_upload("multipart", session_token, path)
@@ -710,7 +732,12 @@ def _resumable_put(
     return Response(status_code=308, headers=headers)
 
 
+def _files_api_version(request: Request) -> str:
+    return "3.0" if request.url.path.startswith("/api/3.0/") else "2.0"
+
+
 @app.post("/api/2.0/fs/files{file_path:path}")
+@app.post("/api/3.0/fs/files{file_path:path}")
 async def files_upload_action(
     storage: Storage,
     file_path: str,
@@ -718,11 +745,15 @@ async def files_upload_action(
     action: str | None = None,
     upload_type: str | None = None,
     session_token: str | None = None,
+    upload_id: str | None = None,
     overwrite: str | None = None,
 ):
     path = _volume_path(file_path)
+    version = _files_api_version(request)
     if action == "initiate-upload":
-        return storage.vol_initiate_upload(path, _overwrite(overwrite))
+        return storage.vol_initiate_upload(path, _overwrite(overwrite), version)
+    if version == "3.0" and upload_id is not None:
+        upload_type, session_token = "multipart", upload_id
     if action == "complete-upload" and upload_type == "multipart":
         upload = storage.vol_upload("multipart", session_token, path)
         parts = (await _body(request)).get("parts") or []

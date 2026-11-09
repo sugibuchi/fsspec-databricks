@@ -3,12 +3,12 @@ import logging
 import re
 import threading
 import urllib.parse
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import UnsupportedOperation
 from typing import Any, TypeVar
 
 from aiohttp import (
-    ClientConnectionError,
     ClientError,
     ClientMiddlewareType,
     ClientSession,
@@ -125,6 +125,69 @@ def _parse(path: str) -> tuple[str | None, str | None, str | None, str | None, s
         raise file_not_found_error(path) from None
 
 
+_IO_OFFLOAD = ("IO_OFFLOAD", None)
+_FILES_API_V2 = ("FILES_API", "2.0")
+_FILES_API_V3 = ("FILES_API", "3.0")
+
+
+@dataclass(frozen=True)
+class _Endpoint:
+    """An endpoint of file transfers: its protocol, as the endpoints list names it, and its base URL.
+
+    - `IO_OFFLOAD` moves data through presigned URLs, which the Files API 2.0 of its host gives.
+    - `FILES_API` 2.0 and 3.0 take data themselves, with the workspace's credentials. 2.0 on another host than the
+      workspace is the storage proxy.
+    """
+
+    kind: tuple[str, str | None]
+    base_url: str
+    multipart_upload_supported: bool
+
+    @property
+    def api_version(self) -> str:
+        """The version of the Files API URLs: IO_OFFLOAD's are 2.0."""
+        return "3.0" if self.kind == _FILES_API_V3 else "2.0"
+
+    @property
+    def presigned(self) -> bool:
+        return self.kind == _IO_OFFLOAD
+
+
+def _parse_endpoint(entry: Any, workspace_host: str) -> _Endpoint | None:
+    """An entry of the endpoints list, or None if unusable: an unknown protocol, or an unsafe or malformed address.
+
+    Follows the SDK's rules, but one: plain HTTP is allowed on the workspace host whenever the workspace uses it,
+    for Files API 3.0 too.
+    """
+    if not isinstance(entry, dict):
+        return None
+    kind = (entry.get("api"), entry.get("api_version"))
+    if kind not in (_IO_OFFLOAD, _FILES_API_V2, _FILES_API_V3):
+        return None
+    scheme, hostname = entry.get("scheme"), entry.get("hostname")
+    if scheme not in ("http", "https") or not isinstance(hostname, str) or not hostname:
+        return None
+    base_url = f"{scheme}://{hostname}"
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        port = parsed.port
+    except ValueError:
+        return None
+    # A bare host and port: no path, query or user, so requests go to the host named.
+    if parsed.netloc != hostname or parsed.username is not None or port == 0:
+        return None
+    if scheme == "http":
+        # Plain HTTP carries the credentials in the clear: only to a workspace reached that way, or the storage proxy.
+        workspace = urllib.parse.urlsplit(workspace_host)
+        if parsed.hostname == workspace.hostname:
+            if workspace.scheme != "http":
+                return None
+        elif kind != _FILES_API_V2:
+            return None
+    # As the SDK reads it: an unset flag is false.
+    return _Endpoint(kind, base_url, entry.get("multipart_upload_supported") is True)
+
+
 class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     """Unity Catalog Volume file system.
 
@@ -151,11 +214,8 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     io_concurrency: int = 24
     """The maximum number of concurrent range reads and part uploads, shared by all the files opened."""
 
-    _storage_proxy_hostname: str = "http://storage-proxy.databricks.com"
-    """The hostname of the Databricks storage proxy."""
-
-    _storage_proxy_probe_timeout: float = 3.0
-    """The timeout in seconds for the storage proxy probe request."""
+    _endpoints_timeout: float = 10.0
+    """The timeout in seconds of the request for the endpoints list, which is never retried."""
 
     def __init__(
         self,
@@ -191,7 +251,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         self._init_session(connection_pool_size)
         self._lock = threading.Lock()
         self._workspace_id: int | None = None
-        self._storage_proxy_available: bool | None = None
+        self._endpoints: list[_Endpoint] | None = None
 
         super().__init__(
             client=client,
@@ -210,49 +270,38 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
                 self._workspace_id = self.client.get_workspace_id()
             return self._workspace_id
 
-    @property
-    def storage_proxy_available(self) -> bool:
-        """Whether the Databricks storage proxy is available for this workspace."""
-        if self._storage_proxy_available is None:
-            sync(self.loop, self._probe_storage_proxy)
-        return self._storage_proxy_available
+    async def _get_endpoints(self) -> list["_Endpoint"]:
+        """The endpoints of file transfers, best first: asked once, as the SDK asks, else the SDK's defaults."""
+        if self._endpoints is None:
+            host = self.config.host.rstrip("/")
+            endpoints = [
+                endpoint
+                for entry in await self._fetch_endpoints(host)
+                if (endpoint := _parse_endpoint(entry, host)) is not None
+            ]
+            self._endpoints = endpoints or [
+                _Endpoint(_IO_OFFLOAD, host, multipart_upload_supported=True),
+                _Endpoint(_FILES_API_V2, host, multipart_upload_supported=False),
+            ]
+        return self._endpoints
 
-    async def _probe_storage_proxy(self) -> bool:
-        if self._storage_proxy_available is not None:
-            return self._storage_proxy_available
-
-        workspace_id = await asyncio.to_thread(lambda: self.workspace_id)
-        probe_url = (
-            f"{self._storage_proxy_hostname}/api/2.0/fs/files"
-            f"/DatabricksInternal/Probe/fullstack/wis?ew={workspace_id}"
-        )
+    async def _fetch_endpoints(self, host: str) -> list[Any]:
+        """The entries of the endpoints list, or none if the workspace cannot answer: one request, not retried."""
         session = await self._get_session()
         try:
-            async with session.head(
-                probe_url,
+            async with session.get(
+                f"{host}/api/2.0/fs/endpoints",
                 middlewares=(workspace_authenticator(self.config),),
-                timeout=ClientTimeout(total=self._storage_proxy_probe_timeout),
+                timeout=ClientTimeout(total=self._endpoints_timeout),
             ) as response:
-                available = response.status == 200
-                outcome = response.status
-        except (TimeoutError, ClientConnectionError) as e:
-            # The proxy can be unresolvable or unreachable from this network.
-            available = False
-            outcome = type(e).__name__
-        logger.debug(
-            "HEAD storage proxy probe: workspace_id=%d, status=%s",
-            workspace_id,
-            outcome,
-        )
-
-        if not available:
-            # Outside Databricks the proxy is normally absent: the fallback is expected.
-            logger.debug(
-                "Storage proxy unavailable, using the workspace host: workspace_id=%d",
-                workspace_id,
-            )
-        self._storage_proxy_available = available
-        return available
+                logger.debug("Listing endpoints: status=%d", response.status)
+                # A 404 before the API's rollout on the workspace.
+                body = await response.json() if response.status == 200 else {}
+        except (ClientError, TimeoutError, ValueError) as e:
+            logger.debug("Listing endpoints: failed=%s", type(e).__name__)
+            return []
+        entries = body.get("endpoints") if isinstance(body, dict) else None
+        return entries if isinstance(entries, list) else []
 
     ### File/directory information
     async def _info(self, path, include_browse: bool | None = None, **kwargs):
@@ -466,35 +515,37 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         if path_in_volume is None or path_in_volume == "/":
             raise is_a_directory_error(path)
 
-        if await self._probe_storage_proxy():
-            base_url = self._storage_proxy_hostname
-            use_presigned_url = False
-        else:
-            base_url = self.config.host
-            use_presigned_url = True
-
+        endpoints = await self._get_endpoints()
         loop = asyncio.get_running_loop()
         session = await self._get_session()
         auth = workspace_authenticator(self.config)
         if "r" in mode:
+            endpoint = endpoints[0]
             return VolumeReadableFile(
                 full_path,
                 loop,
                 int(info["size"]),
                 session=session,
-                base_url=base_url,
+                base_url=endpoint.base_url,
                 auth=auth,
-                prefer_presigned_url=use_presigned_url,
+                api_version=endpoint.api_version,
+                prefer_presigned_url=endpoint.presigned,
                 concurrency_limit=self.io_limit,
             )
         else:
+            # Parts need an endpoint taking multipart uploads. Else, as the SDK defaults: presigned URLs.
+            endpoint = next(
+                (e for e in endpoints if e.multipart_upload_supported),
+                _Endpoint(_IO_OFFLOAD, self.config.host.rstrip("/"), True),
+            )
             return VolumeWritableFile(
                 full_path,
                 loop,
                 session=session,
-                base_url=base_url,
+                base_url=endpoint.base_url,
                 auth=auth,
-                use_presigned_url=use_presigned_url,
+                api_version=endpoint.api_version,
+                use_presigned_url=endpoint.presigned,
                 concurrency_limit=self.io_limit,
             )
 
@@ -544,9 +595,13 @@ class _VolumeFileMixin(HttpFileMixin):
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
+        api_version: str,
     ) -> None:
         self._init_http(session, base_url, auth)
-        self._files_url = f"{self._base_url}/api/2.0/fs/files{urllib.parse.quote(path)}"
+        self.api_version = api_version
+        self._files_url = (
+            f"{self._base_url}/api/{api_version}/fs/files{urllib.parse.quote(path)}"
+        )
 
 
 class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFile):
@@ -576,11 +631,12 @@ class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFi
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
+        api_version: str = "2.0",
         prefer_presigned_url: bool = True,
         **kwargs,
     ):
         super().__init__(path, loop, size, **kwargs)
-        self._init_requests(path, session, base_url, auth)
+        self._init_requests(path, session, base_url, auth, api_version)
 
         self.use_presigned_url = (
             prefer_presigned_url and size >= self.min_presigned_url_size
@@ -703,6 +759,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
         session: ClientSession,
         base_url: str,
         auth: ClientMiddlewareType,
+        api_version: str = "2.0",
         use_presigned_url: bool = True,
         **kwargs,
     ):
@@ -716,7 +773,7 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
                 )
 
         super().__init__(path, loop, **kwargs)
-        self._init_requests(path, session, base_url, auth)
+        self._init_requests(path, session, base_url, auth, api_version)
 
         self.use_presigned_url = use_presigned_url
         self._upload_session: _MultipartSession | _ResumableSession | None = None
@@ -779,8 +836,15 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
 
         # The server chooses the API of each upload: the file follows it.
         if "multipart_upload" in result:
+            token = result["multipart_upload"]["session_token"]
             self._upload_session = _MultipartSession(
-                self, result["multipart_upload"]["session_token"]
+                self, token, {"upload_type": "multipart", "session_token": token}
+            )
+        elif "upload_id" in result:
+            # Files API 3.0 names a multipart upload by its ID.
+            upload_id = result["upload_id"]
+            self._upload_session = _MultipartSession(
+                self, upload_id, {"upload_id": upload_id}
             )
         elif "resumable_upload" in result:
             self._upload_session = await _ResumableSession.start(
@@ -829,9 +893,13 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
 class _MultipartSession:
     """A multipart upload session: parts in parallel, completed with their ETags."""
 
-    def __init__(self, file: VolumeWritableFile, session_token: str):
+    def __init__(
+        self, file: VolumeWritableFile, session_token: str, upload: dict[str, str]
+    ):
         self.file = file
         self.session_token = session_token
+        # The query naming the upload in the Files API's requests: its version's own.
+        self.upload = upload
 
     async def upload_part(
         self, data: bytes, start: int, end: int, index: int, last: bool
@@ -879,22 +947,14 @@ class _MultipartSession:
         return (
             file._files_url,
             {"Content-Type": "application/octet-stream"},
-            {
-                "session_token": self.session_token,
-                "upload_type": "multipart",
-                "part_number": part_number,
-            },
+            {**self.upload, "part_number": part_number},
         )
 
     async def complete(self, parts: list[Any]) -> None:
         file = self.file
         async with file._session.post(
             file._files_url,
-            params={
-                "action": "complete-upload",
-                "upload_type": "multipart",
-                "session_token": self.session_token,
-            },
+            params={"action": "complete-upload", **self.upload},
             json={
                 "parts": [
                     {"part_number": i, "etag": etag} for i, etag in sorted(parts)
@@ -911,11 +971,7 @@ class _MultipartSession:
         file = self.file
         async with file._session.post(
             file._files_url,
-            params={
-                "action": "abort-upload",
-                "upload_type": "multipart",
-                "session_token": self.session_token,
-            },
+            params={"action": "abort-upload", **self.upload},
             middlewares=(file._auth,),
             timeout=file._timeout,
         ) as response:
