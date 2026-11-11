@@ -259,8 +259,8 @@ Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 
 | Parameter               | Description                                                                          | Default |
 |-------------------------|--------------------------------------------------------------------------------------|---------|
-| `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `16`    |
-| `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `24`    |
+| `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `32`    |
+| `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `16`    |
 
 `VolumeFileSystem` also takes `connection_pool_size`, the maximum number of HTTP connections. It defaults to `100`.
 

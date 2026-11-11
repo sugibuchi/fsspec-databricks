@@ -436,7 +436,7 @@ message.
 ### Volumes
 
 `VolumeFileSystem`, in `volume.py`, implements the primitives, such as `_ils`, `_info`, `_rm_file`, `_rmdir`,
-`_create_directory` and `_cp_file`. Its `io_concurrency` defaults to 24. Its `storage_profile` declares only
+`_create_directory` and `_cp_file`. Its `operation_concurrency` defaults to 32 and its `io_concurrency` to 16, as measured on a live workspace. Its `storage_profile` declares only
 `fs_type="tree"`, so the strategies take the way that is right on any storage.
 
 The APIs called depend on the depth of the path. `include_browse` is passed to the Unity Catalog APIs.
