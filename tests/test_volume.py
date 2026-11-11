@@ -23,6 +23,7 @@ from aiohttp import (
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from fsspec.asyn import sync
+from utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks._contrib.strategy.files.fsspec_transaction import (
@@ -40,7 +41,6 @@ from fsspec_databricks.volume import (
     _Endpoint,
     _parse_endpoint,
 )
-from tests.utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
 
 pytestmark = pytest.mark.backend("volume")
 

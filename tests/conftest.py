@@ -20,19 +20,18 @@ import pytest
 from aiohttp import ClientSession
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
+from dummy_api import dummy_storage, serve_app
 from fsspec.asyn import get_loop, sync
-
-from fsspec_databricks.base import BaseDatabricksFileSystem
-from fsspec_databricks.spec import DatabricksFileSystem
-from fsspec_databricks.volume import VolumeFileSystem
-
-from .dummy_api import dummy_storage, serve_app
-from .utils import (
+from utils import (
     legacy_dbfs_disabled,
     prepare_dbfs_test_root,
     prepare_volume_test_root,
     prepare_workspace_test_root,
 )
+
+from fsspec_databricks.base import BaseDatabricksFileSystem
+from fsspec_databricks.spec import DatabricksFileSystem
+from fsspec_databricks.volume import VolumeFileSystem
 
 log = logging.getLogger(__name__)
 

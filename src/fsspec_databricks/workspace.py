@@ -5,6 +5,7 @@ from io import UnsupportedOperation
 from typing import Any, Literal
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.config import Config
 from databricks.sdk.errors import BadRequest
 from databricks.sdk.service.workspace import (
     ExportFormat,
@@ -35,6 +36,7 @@ workspace_root_info = {
     "type": "directory",
     "created": None,
     "modified": None,
+    "islink": False,
 }
 
 NotebookFormat = Literal[
@@ -101,8 +103,8 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
 
     def __init__(
         self,
-        client=None,
-        config=None,
+        client: WorkspaceClient | None = None,
+        config: Config | None = None,
         config_params: dict[str, Any] | None = None,
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,

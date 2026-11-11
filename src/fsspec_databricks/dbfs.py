@@ -7,6 +7,8 @@ from io import UnsupportedOperation
 from typing import Any
 
 from aiohttp import ClientError, ClientMiddlewareType, ClientSession
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.config import Config
 from databricks.sdk.errors import DatabricksError
 from databricks.sdk.service.files import DbfsAPI, FileInfo
 from fsspec.asyn import sync
@@ -94,8 +96,8 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
 
     def __init__(
         self,
-        client=None,
-        config=None,
+        client: WorkspaceClient | None = None,
+        config: Config | None = None,
         config_params: dict[str, Any] | None = None,
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,

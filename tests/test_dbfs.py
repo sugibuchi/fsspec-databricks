@@ -10,10 +10,10 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import ResourceDoesNotExist
 from fsspec.asyn import sync
+from utils import bytes_sig, dbfs_download, init_dbfs_test_dir
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.dbfs import DBFS, DbfsReadableFile
-from tests.utils import bytes_sig, dbfs_download, init_dbfs_test_dir
 
 pytestmark = pytest.mark.backend("dbfs")
 

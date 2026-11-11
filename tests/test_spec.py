@@ -8,15 +8,15 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.workspace import ImportFormat
 from fsspec_alt_strategies.monitor import Monitor, monitoring
-
-from fsspec_databricks import DatabricksFileSystem, use
-from tests.utils import (
+from utils import (
     init_dbfs_test_dir,
     init_volume_test_dir,
     init_workspace_test_dir,
     volume_download,
     workspace_download,
 )
+
+from fsspec_databricks import DatabricksFileSystem, use
 
 
 def volume_dbfs_url(path: str) -> str:
