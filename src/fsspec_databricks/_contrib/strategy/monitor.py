@@ -54,13 +54,13 @@ def monitored(
     A filesystem inheriting `Monitored` is returned as it is. Any other is
     wrapped, as the entry of its class says, or of the nearest class it
     inherits. Its profile's ``fs_type`` picks a `TreeFileSystem` or a
-    `FlatFileSystem`, a tree if unknown. The entry also says whether it is
-    async, and its limits. The wrapper is new, and may be dropped once used.
+    `FlatFileSystem`, a tree if unknown, and the entry gives its limits. The
+    wrapper is async if the filesystem is an `AsyncFileSystem`. It is new, and
+    may be dropped once used.
 
     A filesystem no entry names is wrapped only if ``wrap_unknown_fs``: as
     a `TreeFileSystem`, one request at a time, with an unknown profile. That
-    is right on any storage, if slow. It is async as the filesystem is an
-    `AsyncFileSystem`.
+    is right on any storage, if slow.
 
     Parameters
     ----------
@@ -104,14 +104,13 @@ def monitored(
             raise ValueError(f"No known implementation says how to wrap {name}")
         entry = {
             "storage_profile": StorageProfile(fs_type="tree"),
-            "async": isinstance(fs, AsyncFileSystem),
             "operation_concurrency": 1,
             "io_concurrency": 1,
         }
 
     # A family unknown is a tree, the way right on any storage.
     fs_type = entry["storage_profile"].fs_type or "tree"
-    wrapper = _wrapper(fs_type, entry["async"])
+    wrapper = _wrapper(fs_type, isinstance(fs, AsyncFileSystem))
     options: dict[str, Any] = {
         "operation_concurrency": entry["operation_concurrency"],
         "io_concurrency": entry["io_concurrency"],

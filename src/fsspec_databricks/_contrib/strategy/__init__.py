@@ -4,11 +4,12 @@
 
 fsspec's defaults assume a flat key space, as object stores have. The strategies
 here come in two families: `tree`, for storages with a hierarchical namespace,
-and `flat`, for object stores. They work on any fsspec filesystem, as
-functions, as bases of a filesystem class, or through a wrapper.
+and `flat`, for object stores. Each family's abstract filesystem class runs
+them as its recursive methods, and the wrappers give them to any existing
+fsspec filesystem.
 
-They are meant to be copied into a project, not installed. Each is imported
-from its module, so that a copy may leave out those it does not use. The
+They are meant to be copied into a project, not installed. Each class is
+imported from its module, so that a copy may leave out what it does not use. The
 interface they share, such as `OperationHandler` and `Monitor`, is not copied:
 it is the package ``fsspec_alt_strategies``, installed once, so that all
 copies in a project share it.
@@ -18,6 +19,8 @@ re-exported here. It needs the wrappers of both families: a copy keeping it
 keeps `tree` and `flat`.
 
 Source, documentation and releases: https://github.com/sugibuchi/fsspec-alt-strategies
+
+This module depends on `monitor`.
 """
 
 from __future__ import annotations

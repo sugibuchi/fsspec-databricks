@@ -934,14 +934,10 @@ wheels = [
 
 [[package]]
 name = "fsspec-alt-strategies"
-version = "0.1.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.2.0.post24+g3cd847f13"
+source = { git = "https://github.com/sugibuchi/fsspec-alt-strategies?subdirectory=packages%2Fcommon&branch=wip#3cd847f13c3e9a28cbfa0b2abc16e45beed45820" }
 dependencies = [
     { name = "fsspec" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/7b/92fe5e2c8443e4bff3db117ef347e15f2dd101a202b9fe46e6c59fa82ad9/fsspec_alt_strategies-0.1.0.tar.gz", hash = "sha256:bf658b2c293910ac9a2946d2dbdf4191668544b43bba424e942d2ac625660a73", size = 16084, upload-time = "2026-11-08T17:59:28.585Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4b/ab/38e5c830fb494ababe93ad66c6f1a26cc95570894478f4ecf30bf033bbc3/fsspec_alt_strategies-0.1.0-py3-none-any.whl", hash = "sha256:73064fff6a58e17744720c30367854f95d941f9cbc279d7eac1a8517a638f5b6", size = 17476, upload-time = "2026-11-08T17:59:27.448Z" },
 ]
 
 [[package]]
@@ -973,7 +969,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.0" },
     { name = "databricks-sdk", specifier = ">=0.80.0" },
     { name = "fsspec", specifier = ">=2024.6.0" },
-    { name = "fsspec-alt-strategies", specifier = ">=0.1,<0.2" },
+    { name = "fsspec-alt-strategies", git = "https://github.com/sugibuchi/fsspec-alt-strategies?subdirectory=packages%2Fcommon&branch=wip" },
 ]
 
 [package.metadata.requires-dev]

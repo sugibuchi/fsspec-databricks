@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Tsuyoshi SUGIBUCHI
 # SPDX-License-Identifier: Apache-2.0
-"""Paths and depths, as the strategies take them, and folders as fsspec's walk gives them.
+"""Paths and depths, as the strategies take them, and directories as fsspec's walk gives them.
 
 This module depends on nothing else in the package.
 """
@@ -25,9 +25,9 @@ def _check_maxdepth(maxdepth: int | None) -> None:
 
 
 def _triples(
-    folder: str, entries: list[dict[str, Any]], detail: bool
+    directory: str, entries: list[dict[str, Any]], detail: bool
 ) -> tuple[str, Any, Any]:
-    """A folder's ``(path, dirs, files)``, as fsspec's ``walk`` yields them."""
+    """A directory's ``(path, dirs, files)``, as fsspec's ``walk`` yields them."""
     dirs: dict[str, Any] = {}
     files: dict[str, Any] = {}
     for entry in entries:
@@ -35,5 +35,5 @@ def _triples(
         (dirs if entry["type"] == "directory" else files)[name] = entry
 
     if detail:
-        return folder, dirs, files
-    return folder, list(dirs), list(files)
+        return directory, dirs, files
+    return directory, list(dirs), list(files)

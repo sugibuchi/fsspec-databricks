@@ -198,9 +198,9 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     storage_profile = StorageProfile(
         fs_type="tree",
         parents_required=False,
-        implicit_folders=False,
+        implicit_directories=False,
         renames_files=False,
-        renames_folders=False,
+        renames_directories=False,
     )
     """What the Files API does.
 
@@ -385,7 +385,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         except Exception:
             return False
 
-    async def _ils(self, path, include_browse: bool | None = None, **kwargs):
+    async def _list(self, path, include_browse: bool | None = None, **kwargs):
         """List a folder a page at a time, as the SDK's listing fetches them: a catalog, a schema, a volume or a directory."""
         if self._strip_protocol(path) == dbfs_root:
             yield dict(volumes_root_info)

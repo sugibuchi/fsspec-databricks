@@ -75,15 +75,7 @@ class Operation(OperationHandler, Generic[T, S]):
 
     Examples
     --------
-    >>> rm = tree_rm(
-    ...     "data/2024",
-    ...     ils=fs._ils,
-    ...     info=fs._info,
-    ...     rm_file=fs._rm_file,
-    ...     rm_folder=fs._rmdir,
-    ...     profile=StorageProfile(),
-    ...     concurrency_limit=asyncio.Semaphore(32),
-    ... )
+    >>> rm = _tree_rm(fs, "data/2024")  # fs, a TreeFileSystem.
     >>> async with rm as op:
     ...     async for path in op:
     ...         if isinstance(path, Exception):

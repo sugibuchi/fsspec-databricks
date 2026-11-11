@@ -78,16 +78,18 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
     storage_profile = StorageProfile(
         fs_type="tree",
         parents_required=False,
-        implicit_folders=False,
+        implicit_directories=False,
         renames_files=True,
-        renames_folders=True,
+        renames_directories=True,
+        deletes_directories=True,
     )
     """What the legacy DBFS API does.
 
     - It lists one directory per request, so the tree strategies suit it.
     - Writing a file creates its missing parent directories, as `mkdirs` does.
     - Directories are objects of their own: an empty one exists.
-    - Its move renames a file, or a directory with all in it, in one request.
+    - Its move renames a file, or a directory with all in it, in one request: `_mv_file` and `_mv_tree`.
+    - Its delete deletes a directory with all in it, in one request: `_rm_tree`.
     """
 
     def __init__(
@@ -152,7 +154,7 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
             status = await self._run_in_thread(self.client.dbfs.get_status, dbfs_path)
         return map_info(status, detail=True)
 
-    async def _ils(self, path, **kwargs):
+    async def _list(self, path, **kwargs):
         """List a folder a page at a time, as the SDK's listing fetches them."""
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
@@ -176,6 +178,10 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
         src, dst = parse_dbfs_path(path1), parse_dbfs_path(path2)
         with error_mapping(path1):
             await self._run_in_thread(self.client.dbfs.move, src, dst)
+
+    async def _mv_tree(self, path1, path2):
+        """Move a directory with all in it, or a file, with the API's move: one request."""
+        await self._mv_file(path1, path2)
 
     async def _delete(self, path: str, recursive: bool) -> None:
         dbfs_path = parse_dbfs_path(path)

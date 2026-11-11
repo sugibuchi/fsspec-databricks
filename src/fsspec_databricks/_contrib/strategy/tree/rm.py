@@ -2,88 +2,79 @@
 # SPDX-License-Identifier: Apache-2.0
 """A recursive delete that walks the tree and deletes while it walks.
 
-`tree_rm` is an alternative to fsspec's recursive ``_rm``. fsspec's lists the
-whole tree first, then deletes each path. `tree_rm` deletes each folder's files
-as soon as the folder is listed, and each folder once it is empty.
+`_tree_rm` is an alternative to fsspec's recursive ``_rm``. fsspec's lists the
+whole tree first, then deletes each path. `_tree_rm` deletes each directory's files
+as soon as the directory is listed, and each directory once it is empty.
 
-This module depends on `_jobs`, and `jobs`, `operation` and `paths` of
-`common`.
+This module depends on `_jobs`, and `jobs` and `paths` of `common`.
 """
 
 from __future__ import annotations
 
-import asyncio
 from glob import has_magic
 from typing import TYPE_CHECKING, Any
 
 from fsspec_alt_strategies.states import RmState
 
 from ..common.jobs import _Job, _Roots
-from ..common.operation import Operation
 from ..common.paths import _check_maxdepth
 from ._jobs import _TreeJobs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Sequence
+    from collections.abc import Awaitable, Sequence
 
-    from fsspec_alt_strategies.profile import StorageProfile
-
-    from ..common.types import _Ils, _Info, _Request
+    from ..common.operation import Operation
     from .walk import _Listing
 
-__all__ = ["RmState", "tree_rm"]
+__all__: list[str] = []
 
 
-def tree_rm(
+def _tree_rm(
+    fs: Any,
     path: str | Sequence[str],
     *,
-    ils: _Ils,
-    info: _Info,
-    rm_file: _Request,
-    rm_folder: _Request,
-    rm_tree: _Request | None = None,
-    profile: StorageProfile,
     maxdepth: int | None = None,
-    concurrency_limit: asyncio.Semaphore,
 ) -> Operation[str, RmState]:
-    """Delete a folder and everything in it, deleting while the tree is walked.
+    """Delete a directory and everything in it, deleting while the tree is walked.
 
-    The tree is walked as `tree_walk` walks it. Each folder's files are deleted
-    as soon as the folder is listed, while other folders are still being
-    listed. A folder is deleted once everything in it is, so the deepest go
-    first. A folder with anything in it that failed is kept.
+    The tree is walked as `_tree_walk` walks it. Each directory's files are deleted
+    as soon as the directory is listed, while other directories are still being
+    listed. A directory is deleted once everything in it is, so the deepest go
+    first. A directory with anything in it that failed is kept.
 
-    It yields each file and folder once deleted, and the error of each folder
+    It yields each file and directory once deleted, and the error of each directory
     that failed to list or path that failed to be deleted. A path found already
     gone is not yielded.
 
-    It wins over fsspec's ``_rm`` on storages that list one folder per request
+    It wins over fsspec's ``_rm`` on storages that list one directory per request
     and have no recursive delete of their own, such as Databricks volumes. The
     deletions then start after the first listing, not after the last. It also
     keeps going past a failure, and reports each.
 
     It loses on object stores, which list a whole tree in one paginated request:
-    fsspec's ``_rm`` makes fewer requests there. On a storage deleting a folder
-    with everything in it in one request, that request wins: give it as
-    ``rm_tree``.
+    fsspec's ``_rm`` makes fewer requests there. On a storage deleting a directory
+    with everything in it in one request, that request wins: the profile's
+    ``deletes_directories=True`` says the filesystem's ``_rm_tree``, called
+    ``rm_tree`` below, sends it.
 
-    With ``rm_tree``, each folder root is first deleted whole by one
-    ``rm_tree``, with no walk. A root whose deletion fails, e.g. as the
-    storage refuses so large a folder, is walked and deleted file by file, as
-    without it. A real failure then shows on its files. A root deleted whole
-    is yielded once: what was in it is neither listed, yielded nor counted.
+    With ``deletes_directories``, each root is deleted whole by one ``rm_tree``,
+    with no walk, as each file is deleted: concurrently, under the same limit
+    and cancelling. A root whose deletion fails yields the error, with its
+    cause, and is kept. ``path`` missing raises, as without it. A root deleted
+    whole is yielded once, and counted as a directory: what was in it is neither
+    listed, yielded nor counted.
 
     A glob pattern deletes each path it matches, and all in it, as fsspec's
     ``_rm`` with ``recursive=True`` does. So does a list of paths and
-    patterns. They are matched as `tree_glob` matches them, in one search,
-    then the folders matched are walked at once.
+    patterns. They are matched as `_tree_glob` matches them, in one search,
+    then the directories matched are walked at once.
 
     With ``maxdepth``, it deletes what fsspec's ``_rm`` deletes with it: the
     paths at most ``maxdepth`` levels below ``path``, or below a pattern's
-    matches one level less, then ``path`` itself. Folders deeper are not
-    listed. A folder at the limit is found but not listed, so it is deleted
-    by one ``rm_folder``, as fsspec deletes each path it finds. One with
-    anything in it then fails, and the folders above it are kept.
+    matches one level less, then ``path`` itself. Directories deeper are not
+    listed. A directory at the limit is found but not listed, so it is deleted
+    by one ``rm_dir``, as fsspec deletes each path it finds. One with
+    anything in it then fails, and the directories above it are kept.
     ``rm_tree`` is not used, as it would delete what is deeper.
 
     Once cancelled, it starts no new listing or deletion, and yields the
@@ -92,182 +83,71 @@ def tree_rm(
     unknown. Iterating it raises FileNotFoundError if ``path`` does not exist,
     or matches nothing.
 
-    Requests: one ``ils`` per folder, one ``rm_file`` per file, and one
-    ``rm_folder`` per folder. Patterns, or a list, add the requests of their
-    `tree_glob`. With ``rm_tree``, a root deleted whole costs one ``rm_tree``
-    instead. A single ``path`` then costs an ``info`` first, as ``rm_tree``
-    is given folders only. Each request holds a permit of
-    ``concurrency_limit`` while it runs.
+    Requests: one recursive ``_ils`` per root, or one ``_ils`` per directory with
+    ``maxdepth``, one ``rm_file`` per file, and one
+    ``rm_dir`` per directory. Patterns, or a list, add the requests of their
+    `_tree_glob`. With ``deletes_directories``, a root costs one ``rm_tree``
+    instead. Each request holds a permit of the filesystem's
+    ``operation_limit`` while it runs.
 
-    The profile's ``implicit_folders=True`` saves the ``rm_folder`` of each
-    folder, as a folder goes with its last file. Such a folder is not yielded,
-    as one found already gone is not.
+    The filesystem's profile's ``implicit_directories=True`` saves the
+    ``rm_dir`` of each directory, as a directory goes with its last file. Such a
+    directory is not yielded, as one found already gone is not.
 
-    Parameters
-    ----------
-    path : str or sequence of str
-        The folder to delete, as ``ils`` takes it. If it is a file, that file is
-        deleted. If it is a glob pattern, or a list of paths and patterns, all
-        they match is deleted.
-    ils : callable
-        Lists a folder, called as ``ils(path)``: an async iterator of its
-        entries, as fsspec's ``_ls`` gives them, e.g. the filesystem's
-        ``_ils``.
-    info : callable
-        Describes a path, called as ``info(path)``: e.g. the filesystem's
-        ``_info``. Only patterns use it.
-    rm_file : callable
-        Deletes a file, called as ``rm_file(path)``: e.g. the filesystem's
-        ``_rm_file``.
-    rm_folder : callable
-        Deletes an empty folder, called as ``rm_folder(path)``: e.g. the
-        filesystem's ``_rmdir``, or its ``_rm_file`` as fsspec's ``_rm`` does
-        without one. A FileNotFoundError from it counts as deleted, as object
-        stores have no folders to delete.
-    rm_tree : callable, optional
-        Deletes a folder with everything in it, in one request, called as
-        ``rm_tree(path)`` on folders only: e.g. a storage's recursive delete.
-        Without it, every folder is walked.
-    profile : StorageProfile
-        What the storage does: ``StorageProfile()`` if it is unknown.
-    maxdepth : int, optional
-        The deepest level to delete: 1 deletes only what is in ``path``, and
-        ``path`` if it is then empty. No limit by default.
-    concurrency_limit : asyncio.Semaphore
-        Held by each request while it runs. Share one to limit several
-        operations, or files, together.
+    The filesystem's primitives are called below by what they do: ``_ils`` is
+    its ``_ils``, ``info`` its ``_info``, ``rm_file`` its ``_rm_file``, and
+    ``rm_dir`` its ``_rmdir``. A FileNotFoundError from ``rm_dir``
+    counts as deleted, as object stores have no directories to delete.
 
-    Returns
-    -------
-    Operation
-        Yielding each path deleted, or an error. Its state is an `RmState`.
+    ``path`` is the directory deleted from ``fs``, as its ``_ils`` takes it. A
+    file is deleted alone. A glob pattern, or a list of paths and patterns,
+    deletes all they match. ``maxdepth`` of 1 deletes only what is in
+    ``path``, and ``path`` if it is then empty.
 
-    Raises
-    ------
-    ValueError
-        If ``maxdepth`` is less than 1.
-
-    See Also
-    --------
-    tree_walk : The walk under it.
-
-    Examples
-    --------
-    >>> rm = tree_rm(
-    ...     "data/2024",
-    ...     ils=fs._ils,
-    ...     info=fs._info,
-    ...     rm_file=fs._rm_file,
-    ...     rm_folder=fs._rmdir,
-    ...     profile=StorageProfile(),
-    ...     concurrency_limit=asyncio.Semaphore(32),
-    ... )
-    >>> async with rm as op:
-    ...     async for path in op:
-    ...         if isinstance(path, Exception):
-    ...             op.cancel()  # Stop at the first failure.
-    ...             print(path)
-    >>> op.state.files_deleted
-    1234
+    The operation yields each path deleted, or an error, and its state is an
+    `RmState`. The call raises ValueError if ``maxdepth`` is less than 1.
     """
     _check_maxdepth(maxdepth)
-    return Operation(
-        lambda op: _Deletion(
-            ils,
-            info,
-            rm_file,
-            rm_folder,
-            # A folder deleted whole would take what is deeper than maxdepth.
-            rm_tree if maxdepth is None else None,
-            path,
-            profile,
-            maxdepth,
-            concurrency_limit,
-            op,
-        ).outcomes(),
-        RmState(folders_deleted=0),
-    )
+    return _Deletion.operation(fs=fs, path=path, maxdepth=maxdepth)
 
 
 class _Deletion(_TreeJobs):
-    """The jobs of one `tree_rm`: a deletion per file, then per folder."""
+    """The jobs of one `_tree_rm`: a deletion per file, then per directory."""
 
-    def __init__(
-        self,
-        ils: _Ils,
-        info: _Info,
-        rm_file: _Request,
-        rm_folder: _Request,
-        rm_tree: _Request | None,
-        path: str | Sequence[str],
-        profile: StorageProfile,
-        maxdepth: int | None,
-        concurrency_limit: asyncio.Semaphore,
-        op: Operation[str, RmState],
-    ) -> None:
-        super().__init__(ils, info, concurrency_limit, op, maxdepth)
+    def __init__(self, *, path: str | Sequence[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
         self.path = path
-        self.rm_file = rm_file
-        self.rm_folder = rm_folder
-        self.rm_tree = rm_tree
-
-        # The roots deleted whole, yielded with the first step.
-        self.whole: list[str] = []
-        self.implicit_folders = bool(profile.implicit_folders)
+        # Unknown until setup reads the profile.
+        self.deletes_directories = False
+        self.implicit_directories = False
         self.files_found = 0
         self.files_deleted = 0
-        self.folders_deleted = 0
+        self.directories_deleted = 0
+
+    async def setup(self) -> None:
+        profile = await self.fs._get_storage_profile()
+        # A directory deleted whole would take what is deeper than maxdepth.
+        self.deletes_directories = (
+            self.maxdepth is None and profile.deletes_directories is True
+        )
+        self.implicit_directories = bool(profile.implicit_directories)
 
     async def prepare(self) -> _Roots:
-        """Find the roots, then delete whole the folders that can be: the rest are walked."""
+        """Find the roots: a glob's matches, or the path, of unknown kind.
+
+        With deletes_directories, each directory root is queued for its rm_tree, as a
+        file's deletion, and none is walked: rm_tree takes files too.
+        """
         if not isinstance(self.path, str) or has_magic(self.path):
             roots = await self.glob_roots(self.path)
-            known = True  # The glob found the folders to be folders.
         else:
-            roots = _Roots([self.path])
-            known = False  # Of unknown kind, until asked.
+            roots = _Roots([{"name": self.path}])
 
-        if self.rm_tree is None or self.op.cancelling():
+        if not self.deletes_directories:
             return roots
-
-        sources = list(roots.folders)
-        kinds = await asyncio.gather(*(self.delete_whole(s, known) for s in sources))
-        self.whole = [s for s, k in zip(sources, kinds, strict=True) if k == "whole"]
-        self.folders_deleted = len(self.whole)
-        files = [s for s, k in zip(sources, kinds, strict=True) if k == "file"]
-
-        return _Roots(
-            [s for s, k in zip(sources, kinds, strict=True) if k == "walk"],
-            [*roots.files, *files],
-            roots.errors,
-        )
-
-    async def delete_whole(self, folder: str, known: bool) -> str:
-        """Delete a root by one ``rm_tree``, and tell how it went: whole, file or walk.
-
-        A root of unknown kind is asked first, as ``rm_tree`` takes folders
-        only. A missing root, or a failed deletion, is walked instead: the walk
-        then raises, or shows the failure on the files.
-        """
-        try:
-            if not known:
-                async with self.concurrency_limit:
-                    if (await self.info(folder))["type"] != "directory":
-                        return "file"
-
-            async with self.concurrency_limit:
-                await self.rm_tree(folder)  # type: ignore[misc]
-        except Exception:
-            return "walk"
-
-        return "whole"
-
-    async def begin(
-        self, roots: _Roots, source: AsyncGenerator[_Listing] | None
-    ) -> list[Any]:
-        whole, self.whole = self.whole, []
-        return [*whole, *await super().begin(roots, source)]
+        self.waiting.extend(_Job("tree", d) for d in roots.directories)
+        return roots._replace(directories=[])
 
     def state(self) -> RmState:
         return RmState(
@@ -275,18 +155,18 @@ class _Deletion(_TreeJobs):
             current=self.current,
             files_found=self.files_found,
             files_deleted=self.files_deleted,
-            folders_deleted=self.folders_deleted,
+            directories_deleted=self.directories_deleted,
         )
 
-    def file_root(self, path: str) -> None:
+    def file_root(self, entry: dict[str, Any]) -> None:
         self.files_found = 1
-        self.waiting.append(_Job("file", path))
+        self.waiting.append(_Job("file", entry))
 
-    def at_limit(self, folder: str) -> None:
+    def at_limit(self, directory: str) -> None:
         # Deleted only if empty: one that is not fails, as fsspec's deletion
-        # of each path found does. An implicit folder is no path to delete.
-        if not self.implicit_folders:
-            self.waiting.append(_Job("folder", folder))
+        # of each path found does. An implicit directory is no path to delete.
+        if not self.implicit_directories:
+            self.waiting.append(_Job("directory", {"name": directory}))
 
     def add(self, listing: _Listing) -> None:
         self.track(listing)
@@ -294,44 +174,52 @@ class _Deletion(_TreeJobs):
         for entry in listing.entries:
             if entry["type"] != "directory":
                 self.files_found += 1
-                self.waiting.append(_Job("file", entry["name"].rstrip("/")))
+                self.waiting.append(
+                    _Job("file", {**entry, "name": entry["name"].rstrip("/")})
+                )
 
         # Empty, or all in it deleted before its last part came.
-        if listing.last and self.finished(listing.folder):
-            self.remove(listing.folder)
+        if listing.last and self.finished(listing.directory):
+            self.remove(listing.directory)
 
     def run(self, job: _Job) -> Awaitable[Any]:
-        if job.kind == "folder":
-            return self.rm_folder(job.source)
-        return self.rm_file(job.source)
+        if job.kind == "tree":
+            return self.fs._rm_tree(job.path)
+        if job.kind == "directory":
+            return self.fs._rmdir(job.path)
+        return self.fs._rm_file(job.path)
 
     def done(self, job: _Job) -> list[Any]:
-        if job.kind == "folder":
-            self.folders_deleted += 1
+        if job.kind in ("directory", "tree"):
+            self.directories_deleted += 1
         else:
             self.files_deleted += 1
 
-        self.after(job.source)
-        return [job.source]
+        self.after(job.path)
+        return [job.path]
 
     def failed(self, job: _Job, error: Exception) -> list[Any]:
-        if isinstance(error, FileNotFoundError):
-            # Already gone: an object store's folder, or deleted by another.
-            self.after(job.source)
+        missing = isinstance(error, FileNotFoundError)
+        if missing and job.kind == "tree" and job.path == self.path:
+            raise error  # The path missing, as the walk would find it.
+
+        if missing:
+            # Already gone: an object store's directory, or deleted by another.
+            self.after(job.path)
             return []
 
         # Yielded among paths, the error must tell its path itself.
-        error.add_note(f"Deleting {job.source!r} failed.")
+        error.add_note(f"Deleting {job.path!r} failed.")
         return [error]
 
     def after(self, path: str) -> None:
-        """Queue the deletion of a path's folder, if it is now empty."""
-        if (folder := self.child_done(path)) is not None:
-            self.remove(folder)
+        """Queue the deletion of a path's directory, if it is now empty."""
+        if (directory := self.child_done(path)) is not None:
+            self.remove(directory)
 
-    def remove(self, folder: str) -> None:
-        """Queue the deletion of an empty folder, unless it went with its last file."""
-        if self.implicit_folders:
-            self.after(folder)  # Gone already, as a FileNotFoundError tells.
+    def remove(self, directory: str) -> None:
+        """Queue the deletion of an empty directory, unless it went with its last file."""
+        if self.implicit_directories:
+            self.after(directory)  # Gone already, as a FileNotFoundError tells.
         else:
-            self.waiting.append(_Job("folder", folder))
+            self.waiting.append(_Job("directory", {"name": directory}))

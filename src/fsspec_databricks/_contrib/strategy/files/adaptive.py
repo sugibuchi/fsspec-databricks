@@ -89,20 +89,28 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     ``_fetch_range`` request, which a subclass implements. Requests cost too,
     so it sends as few as the reads allow:
 
-    - A read fetches what it asks for, in one request up to ``max_block_size``,
-      and in even parts fetched together beyond.
+    - A read fetches what it asks for. From twice ``split_size``, it is split
+      into even parts of at least that, up to ``spread`` of them, fetched
+      together: one request returns its bytes at a bounded rate, e.g. about 70
+      MiB/s on Azure, where several in parallel go faster. No part exceeds
+      ``max_block_size``.
     - A read smaller than ``min_block_size`` fetches the block of that size
       holding it, aligned to a multiple of it. So reads near each other share
-      it, e.g. a Parquet file's footer and its metadata.
+      it, e.g. a Parquet file's footer and its metadata. Keeping it small
+      keeps scattered small reads cheap.
     - A read that starts where the last one ended continues a run. A run that
       has read n bytes is assumed to read n more: they are fetched ahead,
       topped up once half of them are read. They are split into ``spread``
       blocks, fetched at once as the concurrency limit allows. Their blocks
       double in size up to ``max_block_size``, so at most ``spread`` times
       ``max_block_size`` bytes are fetched ahead.
-    - A seek within the blocks fetched keeps them and the run. A seek elsewhere
-      cancels the blocks in flight and ends the run, so that scattered reads,
-      such as a Parquet file's column chunks, fetch nothing ahead.
+    - A seek within the blocks fetched keeps them and the run. So does a seek
+      forward past them by at most ``max_gap``, and by less than the run has
+      read: the bytes skipped are not fetched, and the run goes on fetching
+      ahead. A seek
+      elsewhere cancels the blocks in flight and ends the run, so that
+      scattered reads, such as a Parquet file's column chunks, fetch nothing
+      ahead.
     - Fetched blocks are kept, up to ``kept_size`` bytes, for later reads that
       come back to them.
 
@@ -158,6 +166,12 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         once. The class attribute if None.
     min_block_size, max_block_size : int, optional
         The smallest and largest request. The class attributes if None.
+    split_size : int, optional
+        The smallest part a read is split into. The class attribute if None.
+    max_gap : int, optional
+        The longest forward seek past the blocks fetched that keeps the run,
+        if shorter than what the run has read.
+        The class attribute if None, ``min_block_size`` if that is None too.
     kept_size : int, optional
         The most bytes of fetched blocks kept. The class attribute if None.
     version : str, optional
@@ -194,11 +208,26 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     ...         return data
     """
 
-    min_block_size: int = _MiB // 2
-    """The smallest request, which smaller reads fetch whole."""
+    min_block_size: int = 64 * 1024
+    """The smallest request, which smaller reads fetch whole.
+
+    64 KiB holds a Parquet file's footer and its metadata in most files, as
+    Parquet readers ask for, and keeps a small random read from fetching much
+    more than it asks.
+    """
 
     max_block_size: int = 8 * _MiB
     """The largest request. Larger reads are split, to fetch the parts together."""
+
+    split_size: int = 4 * _MiB
+    """The smallest part a read is split into: a read below twice it is one request.
+
+    Splitting fetches faster, but sends more requests, which storages count and
+    bill: e.g. an 8 MiB column chunk is two requests.
+    """
+
+    max_gap: int | None = None
+    """The longest forward seek past the blocks fetched that keeps the run: ``min_block_size`` if None."""
 
     kept_size: int = 8 * _MiB
     """The most bytes of fetched blocks kept for reads that come back to them."""
@@ -216,6 +245,8 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         spread: int | None = None,
         min_block_size: int | None = None,
         max_block_size: int | None = None,
+        split_size: int | None = None,
+        max_gap: int | None = None,
         kept_size: int | None = None,
         version: str | None = None,
     ) -> None:
@@ -227,6 +258,11 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         self.max_block_size = max(
             max_block_size or self.max_block_size, self.min_block_size
         )
+        self.split_size = split_size or self.split_size
+        if max_gap is not None:
+            self.max_gap = max_gap
+        elif self.max_gap is None:
+            self.max_gap = self.min_block_size
         self.kept_size = self.kept_size if kept_size is None else kept_size
 
         self._pos = 0
@@ -378,8 +414,9 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         if pos == self._settled:
             return
 
-        self._settled = pos
+        last, self._settled = self._settled, pos
         queue = self._requests.queue
+        fetched = queue[-1].end if queue else last
         if queue and queue[0].start <= pos <= queue[-1].end:
             # Many readers seek before each read, even in sequence: within the
             # blocks fetched, or right after them, the run goes on.
@@ -387,6 +424,14 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             while queue and queue[0].end <= pos:
                 behind.append(queue.popleft())
             await self._drop(behind)
+        elif last < pos and pos - fetched <= min(self.max_gap, self._run - 1):
+            # A few bytes skipped, fewer than the run has read: still reading in
+            # sequence, the run goes on fetching ahead, but the bytes skipped
+            # are not fetched. Scattered small reads skip more than they read,
+            # and fetch nothing ahead.
+            run = self._run
+            await self._drop_all()
+            self._run = run
         else:
             await self._drop_all()
 
@@ -404,7 +449,9 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             start = pos - pos % self.min_block_size
             await self._send(start, max(end, start + self.min_block_size))
         elif (start := queue[-1].end if queue else pos) < end:
-            await self._send(start, end)
+            # Even parts of at least split_size, up to spread of them.
+            parts = max(1, min(self.spread, (end - start) // self.split_size))
+            await self._send(start, end, math.ceil((end - start) / parts))
 
         if not continuing:
             return
@@ -419,12 +466,13 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             await self._send(start, end + ahead, self._block_size(ahead))
 
     async def _send(self, start: int, stop: int, largest: int | None = None) -> None:
-        """Fetch [start, stop), within the file, in even parts of at most ``largest``."""
+        """Fetch [start, stop), within the file, in even parts of at most ``largest``, or ``max_block_size``."""
         stop = min(stop, self.size)
         if stop <= start:
             return
 
-        parts = math.ceil((stop - start) / (largest or self.max_block_size))
+        largest = min(largest or self.max_block_size, self.max_block_size)
+        parts = math.ceil((stop - start) / largest)
         part = math.ceil((stop - start) / parts)
         for s in range(start, stop, part):
             e = min(s + part, stop)
@@ -504,7 +552,11 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     - A write waits while the concurrency limit allows no upload. So the
       memory a file holds is its parts in flight, at most one per permit, and
       one part being filled. A limit shared by files bounds their parts in
-      flight together.
+      flight together: a filesystem's ``io_limit``, shared by all its files,
+      bounds the bytes all its writes have in flight to its permits times
+      ``max_block_size``, e.g. 16 times 16 MiB. That is the memory to plan for,
+      however many files are written at once, with one part being filled per
+      file. A smaller limit, or ``max_block_size``, lowers it.
     - Every part but the last has at least ``min_block_size`` bytes, as storages
       such as S3 require. So ``flush`` uploads nothing.
     - ``flush(force=True)`` finishes the file as closing does, as fsspec's
@@ -513,10 +565,19 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     - A part that fails stops the writes, and closing aborts the upload. Either
       raises OSError, its cause the part's error. Any failure or cancellation
       while closing or force-flushing aborts too, as does a failed start.
-    - Leaving a ``with`` block by an exception uploads nothing: a small file is
-      never sent, and a multipart upload is aborted. So does a file the garbage
-      collector finds open. The file is written whole, or not at all.
+    - Leaving a ``with`` block by an exception sends no more data: a small
+      file is never sent, and a multipart upload is aborted. So does a file the
+      garbage collector finds open.
     - An abort failing too adds a note to the error raised, never replacing it.
+
+    What a failed write leaves at the path is the storage's. The file only
+    decides which requests to send, and when. On a storage where an upload is
+    invisible until the request completing it, such as S3, Google Cloud
+    Storage or Azure, the file is written whole, or not at all, and a failed
+    write leaves the file that was there. On one where a file is visible while
+    it is written, e.g. DBFS's create, add-block and close, a failed write may
+    leave part of it, and the earlier file gone. A subclass's docstring says
+    which its storage is.
 
     Some storages take parts only in order, one at a time, e.g. Google Cloud
     Storage's resumable uploads, where each part but the last is a multiple of
@@ -533,6 +594,18 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     - The last part is the one given ``last``: with the file's size, as its
       ``end``. A storage where it makes the file visible completes nothing.
 
+    Mode "xb" creates the file only if none is at the path, and
+    ``exclusive`` is then True. The subclass checks it with the storage's
+    means, raising FileExistsError if a file is there:
+
+    - best, by a conditional write in the request creating the file, e.g.
+      S3's or Azure's ``If-None-Match: *`` on the completion, or a create
+      refusing an existing path, so that no other writer can slip in;
+    - where the storage has none, by asking first, e.g. on opening, which
+      races with another writer. Its docstring then says so.
+
+    The upload is aborted after a refusal, as after any failure.
+
     Some storages limit each request's size, e.g. to 1 MiB. ``max_request_size``
     declares it, and no ``_upload_all`` or ``_upload_part`` call exceeds it:
 
@@ -547,6 +620,9 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         The file's path, for messages.
     loop : asyncio.AbstractEventLoop
         The loop the uploads run on, e.g. the filesystem's ``loop``.
+    mode : {"wb", "xb"}, default "wb"
+        Whether the file replaces one at the path, or is created only if
+        none is there.
     concurrency_limit : asyncio.Semaphore, optional
         Held by each upload while it runs. Share one between files to limit
         their uploads, and so their memory, together. The file's own, of
@@ -569,8 +645,8 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     Raises
     ------
     ValueError
-        If ``spread`` is less than 1, or ``max_request_size`` less than
-        ``min_block_size``.
+        If ``mode`` is neither "wb" nor "xb", ``spread`` is less than 1, or
+        ``max_request_size`` less than ``min_block_size``.
 
     See Also
     --------
@@ -593,13 +669,14 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     """The most bytes a request may upload, if the storage limits it."""
 
     mode: str = "wb"
-    """The mode, as fsspec's files have it: only writing, from the start."""
+    """The mode, as fsspec's files have it: "wb", or "xb" to create only."""
 
     def __init__(
         self,
         path: str,
         loop: asyncio.AbstractEventLoop,
         *,
+        mode: str = "wb",
         concurrency_limit: asyncio.Semaphore | None = None,
         spread: int | None = None,
         min_block_size: int | None = None,
@@ -608,8 +685,12 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         sequential: bool | None = None,
         max_request_size: int | None = None,
     ) -> None:
+        if mode not in ("wb", "xb"):
+            raise ValueError(f"mode must be 'wb' or 'xb': {mode!r}")
+
         super().__init__(path, loop, concurrency_limit=concurrency_limit, spread=spread)
 
+        self.mode = mode
         self.min_block_size = min_block_size or self.min_block_size
         self.max_block_size = max(
             max_block_size or self.max_block_size, self.min_block_size
@@ -628,8 +709,13 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         self._buffer = bytearray()
         self._multipart = False
 
+    @property
+    def exclusive(self) -> bool:
+        """Whether the file is created only if none is at the path: mode "xb"."""
+        return self.mode == "xb"
+
     # Leaving a with block by an exception aborts, as the garbage collector
-    # does: the file is written whole, or not at all.
+    # does: no more data is sent.
 
     def __exit__(
         self, exc_type: object, exc: BaseException | None, *rest: object
@@ -678,7 +764,11 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
 
     @abstractmethod
     async def _upload_all(self, data: bytes) -> None:
-        """Upload the whole file in one request."""
+        """Upload the whole file in one request.
+
+        With ``exclusive``, it creates the file only if none is at the path,
+        as the storage allows: else it raises FileExistsError.
+        """
 
     @abstractmethod
     async def _start_multipart_upload(self) -> None:
@@ -696,11 +786,24 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
 
     @abstractmethod
     async def _complete_multipart_upload(self, parts: list[Any]) -> None:
-        """Commit the parts uploaded, given what each upload returned, in order."""
+        """Commit the parts uploaded, given what each upload returned, in order.
+
+        With ``exclusive``, where the storage checks it on completion, it
+        raises FileExistsError if a file is at the path.
+        """
 
     @abstractmethod
     async def _abort_multipart_upload(self) -> None:
-        """Discard the parts uploaded, leaving no file."""
+        """Clean up an unfinished upload, as far as the storage allows: best effort.
+
+        Where the storage has a request discarding an unfinished upload, e.g.
+        S3's AbortMultipartUpload, the abort sends it. Where it has none, the
+        abort sends nothing, and leaves it to the storage, e.g. Azure's
+        uncommitted blocks, collected a week after the last block. Where the
+        upload is invisible until completed, an abort never deletes or
+        replaces a file already at the path. It may be called after
+        ``_start_multipart_upload`` failed, with nothing to clean up.
+        """
 
     # Finishing and aborting, for _AsyncFile.
 
@@ -784,8 +887,9 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
             and len(buffer) <= cap
         ):
             # Even an empty file is created.
-            await self._upload_all(bytes(buffer))
+            data = bytes(buffer)
             buffer.clear()
+            await self._upload_all(data)
             return
 
         block = min(self._block_size(len(buffer) if closing else self._pos), cap)
@@ -819,11 +923,15 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
                     self._raise_failed_upload()
 
                 start = offset + taken
+                # One copy, through a view: a slice of the bytearray would copy
+                # it once more. The view goes before the buffer is resized.
+                with memoryview(buffer) as view:
+                    part = bytes(view[taken : taken + size])
                 await self._requests.send(
                     start,
                     start + size,
                     self._upload_part,
-                    bytes(buffer[taken : taken + size]),
+                    part,
                     start,
                     start + size,
                     len(self._requests.queue),

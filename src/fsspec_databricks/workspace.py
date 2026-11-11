@@ -85,16 +85,18 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
     storage_profile = StorageProfile(
         fs_type="tree",
         parents_required=True,
-        implicit_folders=False,
+        implicit_directories=False,
         renames_files=False,
-        renames_folders=False,
+        renames_directories=False,
+        deletes_directories=True,
     )
     """What the Workspace API does.
 
     - It lists one directory per request, so the tree strategies suit it.
     - An import into a missing directory fails: the parents are made first, by `mkdirs`.
     - Directories are objects of their own: an empty one exists, and is deleted by a request of its own.
-    - It has no move, of files or directories.
+    - Its delete deletes a directory with all in it, in one request: `_rm_tree`.
+    - It has no move, of files or directories: a move copies, then deletes.
     """
 
     def __init__(
@@ -146,7 +148,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             )
         return _map_info(status, detail=True)
 
-    async def _ils(self, path, **kwargs):
+    async def _list(self, path, **kwargs):
         """List a folder a page at a time, as the SDK's listing fetches them."""
         if self._strip_protocol(path) == dbfs_root:
             yield dict(workspace_root_info)

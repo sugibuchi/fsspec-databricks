@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """A recursive delete that deletes the keys of a prefix in batches, as it lists them.
 
-`flat_rm` is an alternative to fsspec's recursive ``_rm`` for flat storages.
+`_flat_rm` is an alternative to fsspec's recursive ``_rm`` for flat storages.
 fsspec's, and the object stores' own, list every key first, then delete them,
-in batches where the storage can. `flat_rm` sends each batch as soon as the
+in batches where the storage can. `_flat_rm` sends each batch as soon as the
 listing has given its keys.
 
-This module depends on `_jobs`, and `jobs`, `operation` and `paths` of `common`.
+This module depends on `_jobs`, and `jobs` and `paths` of `common`.
 """
 
 from __future__ import annotations
@@ -18,162 +18,89 @@ from typing import TYPE_CHECKING, Any
 from fsspec_alt_strategies.states import RmState
 
 from ..common.jobs import _Job, _Roots
-from ..common.operation import Operation
 from ..common.paths import _check_maxdepth, _trim
-from ._jobs import _FlatJobs, _keys_of
+from ._jobs import _check_batch_size, _FlatJobs, _keys_of
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Awaitable, Sequence
 
-    from ..common.types import _IExpand, _Info, _Requests
+    from ..common.operation import Operation
 
-__all__ = ["RmState", "flat_rm"]
+__all__: list[str] = []
 
 
-def flat_rm(
+def _flat_rm(
+    fs: Any,
     path: str | Sequence[str],
     *,
-    iexpand: _IExpand,
-    info: _Info,
-    rm_files: _Requests,
-    batch_size: int,
     maxdepth: int | None = None,
-    concurrency_limit: asyncio.Semaphore,
 ) -> Operation[str, RmState]:
     """Delete the keys under a prefix, in batches sent as the listing goes on.
 
     It deletes what fsspec's ``_rm`` with ``recursive=True`` deletes: the
-    keys under ``path``, or ``path`` itself if it is a file. A folder's
+    keys under ``path``, or ``path`` itself if it is a file. A directory's
     marker, a key ending with "/", is deleted as any key is. A glob pattern, or
     a list of paths and patterns, deletes all they match, as with fsspec's
-    ``_rm``. They are matched as `flat_glob` matches them, then the keys under
-    the folders matched are listed, one folder after another.
+    ``_rm``. They are matched as `_flat_glob` matches them, then the keys under
+    the directories matched are listed, one directory after another.
 
     With ``maxdepth``, it deletes the keys fsspec's ``_rm`` deletes with it:
     those at most ``maxdepth`` levels below ``path``, or below a pattern's
-    matches one level less. A folder's marker counts at its folder's level.
+    matches one level less. A directory's marker counts at its directory's level.
     The keys deeper are listed all the same, as a prefix lists every key
     under it, but kept.
 
-    The keys are grouped in batches of ``batch_size``, each deleted by one
-    ``rm_files``, while the listing goes on. The last batch, smaller, goes once
-    the listing ends. It yields each key once its batch is deleted, and the
-    error of each batch that failed, noting its keys.
+    The keys are grouped in batches of the filesystem's ``rm_batch_size``, each
+    deleted by one ``_rm_files``, while the listing goes on. The last batch,
+    smaller, goes once the listing ends. It yields each key once its batch is
+    deleted, and the error of each batch that failed, noting its keys.
 
     It wins over fsspec's ``_rm`` on large prefixes of flat storages: the
     deletions start after the first page of the listing, not after the last,
     and the keys are held a batch at a time. It sends the same requests as a
-    storage deleting in batches of ``batch_size``. It loses on storages with a
-    hierarchical namespace, whose folders a listing by prefix does not see:
-    `tree_rm` suits those.
+    storage deleting in batches of ``rm_batch_size``. It loses on storages with a
+    hierarchical namespace, whose directories a listing by prefix does not see:
+    `_tree_rm` suits those.
 
     Once cancelled, it takes nothing more from the listing, and sends no new
     batch, but yields the outcomes of those sent. Closed, it waits for those
     without yielding them. Iterating it raises FileNotFoundError if ``path``
     does not exist, or matches nothing. An error from the listing ends it too.
 
-    Requests: the pages of one ``iexpand`` per folder, one after another, and one
-    ``rm_files`` per batch, as ``concurrency_limit`` allows. One ``info`` for
-    ``path`` if nothing is under it. Patterns, or a list, add the requests of
-    their `flat_glob`.
+    Requests: the pages of one recursive ``_ils`` per directory, one after another, and
+    one ``_rm_files`` per batch. One ``_info`` for ``path`` if nothing is
+    under it. Patterns, or a list, add the requests of their `_flat_glob`.
+    Each request but the listing holds a permit of the filesystem's
+    ``operation_limit`` while it runs.
 
-    Parameters
-    ----------
-    path : str or sequence of str
-        The folder to delete, as ``iexpand`` takes paths. If it is a file, that
-        file is deleted. If it is a glob pattern, or a list of paths and
-        patterns, all they match is deleted.
-    iexpand : callable
-        Lists every key starting with a prefix, called as ``iexpand(prefix)``: an
-        async iterator of entries as fsspec's ``_ls`` gives them, in order of
-        their names, each key once, as an object store lists them.
-    info : callable
-        Describes a path, called as ``info(path)``: e.g. the filesystem's
-        ``_info``.
-    rm_files : callable
-        Deletes several files in one request, called as ``rm_files(paths)``
-        with a list: e.g. wrapping S3's DeleteObjects. A key missing is no
-        error. It raises if any is not deleted, as the whole batch then fails.
-    batch_size : int
-        The most keys of one ``rm_files``, e.g. 1000 on S3.
-    maxdepth : int, optional
-        The deepest level to delete: 1 deletes only the keys right in
-        ``path``. No limit by default.
-    concurrency_limit : asyncio.Semaphore
-        Held by each ``rm_files`` and ``info`` while it runs. The listing holds
-        none. Share one to limit several operations, or files, together.
+    ``path`` is the directory deleted from ``fs``, as its ``_ils`` takes
+    paths. A file is deleted alone. A glob pattern, or a list of paths and
+    patterns, deletes all they match. ``maxdepth`` of 1 deletes only the keys
+    right in ``path``.
 
-    Returns
-    -------
-    Operation
-        Yielding each key deleted, or an error. Its state is an `RmState`.
+    The filesystem's ``_rm_files`` deletes several keys in one request, e.g.
+    by S3's DeleteObjects. A key missing is no error, and it raises if any key
+    is not deleted, as the whole batch then fails. ``rm_batch_size`` is the
+    most keys of one ``_rm_files``.
 
-    Raises
-    ------
-    ValueError
-        If ``batch_size`` or ``maxdepth`` is less than 1.
-
-    See Also
-    --------
-    tree_rm : The same, for storages listing one folder per request.
-
-    Examples
-    --------
-    >>> rm = flat_rm(
-    ...     "data/2024",
-    ...     iexpand=fs._iexpand,
-    ...     info=fs._info,
-    ...     rm_files=fs._rm_files,
-    ...     batch_size=1000,
-    ...     concurrency_limit=asyncio.Semaphore(32),
-    ... )
-    >>> async with rm as op:
-    ...     async for path in op:
-    ...         if isinstance(path, Exception):
-    ...             print("failed:", path)
-    >>> op.state.files_deleted
-    1234
+    The operation yields each key deleted, or an error, and its state is an
+    `RmState`. The call raises ValueError if ``rm_batch_size`` or ``maxdepth``
+    is less than 1.
     """
-    if batch_size < 1:
-        raise ValueError(f"batch_size must be at least 1: {batch_size}")
+    _check_batch_size(fs.rm_batch_size)
     _check_maxdepth(maxdepth)
 
-    return Operation(
-        lambda op: _Deletion(
-            path,
-            iexpand=iexpand,
-            info=info,
-            rm_files=rm_files,
-            batch_size=batch_size,
-            maxdepth=maxdepth,
-            concurrency_limit=concurrency_limit,
-            op=op,
-        ).outcomes(),
-        RmState(),
-    )
+    return _Deletion.operation(fs=fs, path=path, maxdepth=maxdepth)
 
 
 class _Deletion(_FlatJobs):
-    """The jobs of one `flat_rm`: a deletion per batch of keys."""
+    """The jobs of one `_flat_rm`: a deletion per batch of keys."""
 
-    def __init__(
-        self,
-        path: str | Sequence[str],
-        *,
-        iexpand: _IExpand,
-        info: _Info,
-        rm_files: _Requests,
-        batch_size: int,
-        maxdepth: int | None,
-        concurrency_limit: asyncio.Semaphore,
-        op: Operation[str, RmState],
-    ) -> None:
-        super().__init__(iexpand, info, concurrency_limit, op, maxdepth)
+    def __init__(self, *, path: str | Sequence[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
 
         self.path = path
-        self.rm_files = rm_files
-        self.batch_size = batch_size
+        self.batch_size: int = self.fs.rm_batch_size
 
         self.batch: list[str] = []
         self.files_found = 0
@@ -182,7 +109,7 @@ class _Deletion(_FlatJobs):
     async def prepare(self) -> _Roots:
         if not isinstance(self.path, str) or has_magic(self.path):
             return await self.glob_roots(self.path)
-        return _Roots([_trim(self.path)])
+        return _Roots([{"name": _trim(self.path)}])
 
     def state(self) -> RmState:
         return RmState(
@@ -203,7 +130,7 @@ class _Deletion(_FlatJobs):
             self.send()
 
     def run(self, job: _Job) -> Awaitable[Any]:
-        return self.rm_files(list(job.paths))
+        return self.fs._rm_files(list(job.paths))
 
     def done(self, job: _Job) -> list[Any]:
         self.files_deleted += len(job.paths)
@@ -217,4 +144,4 @@ class _Deletion(_FlatJobs):
     def send(self) -> None:
         """Queue the deletion of the batch, and start another."""
         paths, self.batch = tuple(self.batch), []
-        self.waiting.append(_Job("delete", paths[-1], paths=paths))
+        self.waiting.append(_Job("delete", {"name": paths[-1]}, paths=paths))

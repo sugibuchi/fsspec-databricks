@@ -41,8 +41,12 @@ dependencies = [
     "databricks-sdk>=0.80.0",
     "aiohttp>=3.12.0",
     # The interface of the strategies copied into _contrib/strategy, to its minor version: see DEVELOPMENT.md.
-    "fsspec-alt-strategies>=0.1,<0.2",
+    "fsspec-alt-strategies>=0.2,<0.4",
 ]
+
+[tool.uv.sources]
+# Until 0.3.0 is on PyPI, the interface of the copy, from the library's wip branch.
+fsspec-alt-strategies = { git = "https://github.com/sugibuchi/fsspec-alt-strategies", branch = "wip", subdirectory = "packages/common" }
 
 [project.urls]
 Homepage = "https://github.com/sugibuchi/fsspec-databricks"
