@@ -6,9 +6,7 @@ build-backend = "hatchling.build"
 name = "fsspec-databricks"
 dynamic = ["version"]
 description = "An fsspec file system for Databricks: Unity Catalog Volumes, Workspace files and legacy DBFS"
-authors = [
-    { name = "Tsuyoshi SUGIBUCHI", email = "sugibuchi@gmail.com" }
-]
+authors = [{ name = "Tsuyoshi SUGIBUCHI" }]
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
