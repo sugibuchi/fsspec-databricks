@@ -665,7 +665,8 @@ It is copied whole, as its `wrapper.py` needs `flat/` too. Its modules keep thei
 and ruff skips them.
 
 Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.2,<0.4`. Until 0.3.0 is on PyPI,
-`[tool.uv.sources]` takes it from the library's `wip` branch.
+`[tool.uv.sources]` takes it from a checkout of the library's `wip` branch beside this repository, at
+`../fsspec-alt-strategies`.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.

@@ -934,11 +934,13 @@ wheels = [
 
 [[package]]
 name = "fsspec-alt-strategies"
-version = "0.2.0.post24+g3cd847f13"
-source = { git = "https://github.com/sugibuchi/fsspec-alt-strategies?subdirectory=packages%2Fcommon&branch=wip#3cd847f13c3e9a28cbfa0b2abc16e45beed45820" }
+source = { editable = "../fsspec-alt-strategies/packages/common" }
 dependencies = [
     { name = "fsspec" },
 ]
+
+[package.metadata]
+requires-dist = [{ name = "fsspec", specifier = ">=2024.2.0" }]
 
 [[package]]
 name = "fsspec-databricks"
@@ -969,7 +971,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.0" },
     { name = "databricks-sdk", specifier = ">=0.80.0" },
     { name = "fsspec", specifier = ">=2024.6.0" },
-    { name = "fsspec-alt-strategies", git = "https://github.com/sugibuchi/fsspec-alt-strategies?subdirectory=packages%2Fcommon&branch=wip" },
+    { name = "fsspec-alt-strategies", editable = "../fsspec-alt-strategies/packages/common" },
 ]
 
 [package.metadata.requires-dev]

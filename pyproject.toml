@@ -45,8 +45,9 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-# Until 0.3.0 is on PyPI, the interface of the copy, from the library's wip branch.
-fsspec-alt-strategies = { git = "https://github.com/sugibuchi/fsspec-alt-strategies", branch = "wip", subdirectory = "packages/common" }
+# Until 0.3.0 is on PyPI, the interface of the copy, from a checkout of the library's wip branch beside this one,
+# as fsspec-alt-strategies-workbench takes it.
+fsspec-alt-strategies = { path = "../fsspec-alt-strategies/packages/common", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/sugibuchi/fsspec-databricks"
