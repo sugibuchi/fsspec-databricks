@@ -42,8 +42,6 @@ if TYPE_CHECKING:
     import asyncio
     from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
-    from fsspec_alt_strategies.profile import StorageProfile
-
 
 __all__ = ["TreeFileSystem"]
 
@@ -93,7 +91,7 @@ class TreeFileSystem(_BaseFileSystem):
 
     ``storage_profile``, a `StorageProfile`, tells the strategies what the
     storage does. It is required, unless ``_load_storage_profile`` is
-    overridden to find it with a request. `StorageProfile()` says the storage
+    overridden to find it with a request. `UNKNOWN` says the storage
     is unknown, and the strategies then take the way right on any storage.
 
     A recursive ``mv``, or one of a single file, moves each file with
@@ -118,8 +116,7 @@ class TreeFileSystem(_BaseFileSystem):
     Raises
     ------
     ValueError
-        If a concurrency is less than 1, or ``storage_profile`` is not set
-        while ``_load_storage_profile`` is not overridden.
+        If a concurrency is less than 1.
 
     See Also
     --------
@@ -129,7 +126,7 @@ class TreeFileSystem(_BaseFileSystem):
     --------
     >>> class MyFileSystem(TreeFileSystem):
     ...     protocol = "my"
-    ...     storage_profile = StorageProfile()  # Unknown.
+    ...     storage_profile = UNKNOWN
     ...
     ...     async def _ils(self, path, recursive=False, **kwargs): ...
     ...     async def _info(self, path, **kwargs): ...
@@ -146,12 +143,6 @@ class TreeFileSystem(_BaseFileSystem):
     ...     def _open(self, path, mode="rb", **kwargs):
     ...         return MyFile(self, path, mode, concurrency_limit=self.io_limit)
     >>> fs = MyFileSystem(operation_concurrency=32, io_concurrency=8)
-    """
-
-    storage_profile: StorageProfile
-    """What the storage does, for the strategies.
-
-    A subclass sets it, or overrides ``_load_storage_profile`` instead.
     """
 
     def __init__(

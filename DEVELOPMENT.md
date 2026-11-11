@@ -665,15 +665,19 @@ installed.
 ### The copy of fsspec-alt-strategies
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl` from
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.3.0. Its modules keep their
-license headers and relative imports, and ruff skips them.
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch after 0.3.0: its
+`_version.py` names the commit. Its modules keep their license headers and relative imports, and ruff skips them.
+Its `LICENSE` stays with them.
 
 It keeps only what the backends use: `tree/`, `common/`, `files/`, `router.py`, and `wrapper/` with only its tree
 wrapper. The backends are all trees, so the router never imports `flat/`. `monitored()` is unused, so its `monitor.py`,
 and the `__init__.py` re-exporting it, are left out: the copy is a namespace package. `_version.py` stays, as the
 copy's command line recognises a previous copy by it.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`, from PyPI.
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`. Until the library's
+next release, `[tool.uv.sources]` takes it from a checkout of the library's `wip` branch beside this repository, at
+`../fsspec-alt-strategies`, as the copy needs what 0.3.0 lacks, e.g. `UNKNOWN`. CI's `test` and `live` jobs check
+it out there too.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.
