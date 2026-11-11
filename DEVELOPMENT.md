@@ -661,9 +661,13 @@ installed.
 ### The copy of fsspec-alt-strategies
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl` from
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.3.0. It is copied whole, as its
-`monitor.py` needs both families' wrappers. Its modules keep their license headers and relative imports, and ruff skips
-them.
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.3.0. Its modules keep their
+license headers and relative imports, and ruff skips them.
+
+It keeps only what the backends use: `tree/`, `common/`, `files/`, `router.py`, and `wrapper/` with only its tree
+wrapper. The backends are all trees, so the router never imports `flat/`. `monitored()` is unused, so its `monitor.py`,
+and the `__init__.py` re-exporting it, are left out: the copy is a namespace package. `_version.py` stays, as the
+copy's command line recognises a previous copy by it.
 
 Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`, from PyPI.
 
@@ -678,6 +682,13 @@ To refresh the copy:
    uv run --with "fsspec-alt-strategies-impl[cli]==<version>" fsspec-alt-strategies-impl copy src/fsspec_databricks/_contrib/strategy
    ```
 
-2. Update the version above, and the interface's bounds in `pyproject.toml` to the copy's minor version, then run
+2. Delete again what the backends do not use:
+
+   ```bash
+   cd src/fsspec_databricks/_contrib/strategy
+   rm -r flat monitor.py __init__.py wrapper/adlfs.py wrapper/flat.py wrapper/gcsfs.py wrapper/s3fs.py
+   ```
+
+3. Update the version above, and the interface's bounds in `pyproject.toml` to the copy's minor version, then run
    `uv lock`.
-3. Run the tests.
+4. Run the tests.
