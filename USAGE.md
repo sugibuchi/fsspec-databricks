@@ -23,7 +23,9 @@ fsspec_databricks.use()
 fs = fsspec.filesystem("dbfs")
 ```
 
-### Options
+---
+
+## Options
 
 Besides the [authentication parameters](AUTHENTICATION.md):
 
@@ -41,7 +43,9 @@ Unity Catalog Volumes have [defaults of their own](#options-for-volumes). Worksp
 
 Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
 
-### Logging
+---
+
+## Logging
 
 The library logs under the `fsspec_databricks` logger, and installs no handlers. To trace each request to Databricks,
 enable its debug level:
