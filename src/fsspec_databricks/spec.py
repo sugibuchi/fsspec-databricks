@@ -365,7 +365,8 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     def _outer(self, fs: AsyncFileSystem, path: str) -> str:
         if self._uses_local_fs:
             return from_local_path(path, self.legacy_dbfs_local_root)
-        return path
+        else:
+            return path
 
     async def _roots(self, path: str) -> list[dict[str, Any]]:
         if self._uses_local_fs:

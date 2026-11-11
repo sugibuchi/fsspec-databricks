@@ -118,7 +118,8 @@ def response_error(
     # DBFS answers an existing file with a 400.
     if status == 409 or error_code == "RESOURCE_ALREADY_EXISTS":
         return file_exists_error(path, message)
-    return io_error(path, message)
+    else:
+        return io_error(path, message)
 
 
 def _error_code(body: str | None) -> str | None:
@@ -222,7 +223,10 @@ def _transient_cause(error: BaseException) -> BaseException | None:
         error = error.__cause__
     if isinstance(error, ClientResponseError):
         return error if error.status in retryable_statuses else None
-    return error if isinstance(error, ClientConnectionError | TimeoutError) else None
+    else:
+        return (
+            error if isinstance(error, ClientConnectionError | TimeoutError) else None
+        )
 
 
 def _retry_after(error: BaseException) -> float | None:

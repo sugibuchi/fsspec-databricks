@@ -383,8 +383,9 @@ class DummyStorage:
         # Neither the SDK nor fsspec-databricks goes on with these sessions, so none is kept.
         if self.upload_mode == "resumable":
             return {"resumable_upload": {"session_token": token}}
-        # An upload API that no client knows.
-        return {"other_upload": {"session_token": token}}
+        else:
+            # An upload API that no client knows.
+            return {"other_upload": {"session_token": token}}
 
     def vol_upload(self, token: str | None, path: str) -> MultipartUpload:
         upload = self.multipart_uploads.get(token)
@@ -558,7 +559,8 @@ def _byte_range(header: str, size: int) -> tuple[int, int] | None:
     last = min(int(m["last"]), size - 1) if m["last"] else size - 1
     if first >= size or first > last:
         return None
-    return first, last
+    else:
+        return first, last
 
 
 @app.get("/api/2.0/fs/endpoints")
@@ -970,7 +972,8 @@ async def workspace_list(storage: Storage, path: str | None = None):
     children = _children(storage.workspace, path)
     if not children:
         return {}
-    return {"objects": [storage.workspace[p].info(p) for p in children]}
+    else:
+        return {"objects": [storage.workspace[p].info(p) for p in children]}
 
 
 @app.post("/api/2.0/workspace/mkdirs")
@@ -1121,7 +1124,8 @@ async def dbfs_list(storage: Storage, path: str | None = None):
     children = sorted(_children(storage.dbfs, path))
     if not children:
         return {}
-    return {"files": [storage.dbfs[p].info(p) for p in children]}
+    else:
+        return {"files": [storage.dbfs[p].info(p) for p in children]}
 
 
 @app.post("/api/2.0/dbfs/mkdirs")

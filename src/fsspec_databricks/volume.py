@@ -571,8 +571,9 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
         f = sync(self.loop, self._open_file, path, mode)
         if autocommit or "r" in mode:
             return f
-        # In a transaction, the upload is completed on commit, and aborted on discard.
-        return TransactionFile(AdaptiveWritableTransaction(f))
+        else:
+            # In a transaction, the upload is completed on commit, and aborted on discard.
+            return TransactionFile(AdaptiveWritableTransaction(f))
 
     def open(self, path, mode="rb", **kwargs):
         """Open a file in a Unity Catalog Volume.
