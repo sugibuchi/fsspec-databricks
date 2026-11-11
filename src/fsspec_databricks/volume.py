@@ -190,9 +190,9 @@ def _parse_endpoint(entry: Any, workspace_host: str) -> _Endpoint | None:
 class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     """Unity Catalog Volume file system.
 
-    An async fsspec file system: its synchronous methods run on fsspec's event loop. Its recursive
-    operations walk the folder tree with the tree strategies of fsspec-alt-strategies, copied into
-    `_contrib.strategy`. Its files call the Files API with aiohttp, the rest the SDK.
+    An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
+    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. Its files call the Files
+    API with aiohttp.
     """
 
     storage_profile = StorageProfile(
@@ -244,10 +244,10 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
             The parameters of a Databricks SDK `Config`, used without `client` or `config`.
         operation_concurrency : int, optional
             The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
-            Defaults to 16.
+            Defaults to 32.
         io_concurrency : int, optional
             The maximum number of concurrent range reads and part uploads, shared by all the files opened.
-            Defaults to 24.
+            Defaults to 16.
         connection_pool_size : int, optional
             The maximum number of connections in the aiohttp connection pool. Defaults to 100.
         **storage_options
@@ -335,7 +335,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
                     include_browse=include_browse,
                 )
             else:
-                # Files first: they are asked about more often than directories
+                # Files first: they are asked about more often than directories.
                 try:
                     return await self._file_info(full_path)
                 except NotFound:
@@ -367,7 +367,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
 
         try:
             if path_in_volume is None or path_in_volume == "/":
-                # The root, the volumes root, catalogs, schemas and volumes
+                # The root, the volumes root, catalogs, schemas and volumes.
                 return (await self._info(path))["type"] == "directory"
             with error_mapping(path):
                 await self._directory_info(full_path)
@@ -392,7 +392,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
             return False
 
     async def _list(self, path, include_browse: bool | None = None, **kwargs):
-        """List a folder a page at a time, as the SDK's listing fetches them: a catalog, a schema, a volume or a directory."""
+        """List a folder: a catalog, a schema, a volume or a directory."""
         if self._strip_protocol(path) == dbfs_root:
             yield dict(volumes_root_info)
             return
@@ -426,7 +426,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
             except (NotFound, BadRequest):
                 if volume is None or listed:
                     raise
-                # A file lists as itself
+                # A file lists as itself.
                 yield await self._file_info(full_path)
 
     ### File/directory operations
@@ -437,7 +437,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
             await self._cp_directory(path2)
             return
 
-        # The Files API has no copy: stream the content with concurrent reads and uploads
+        # The Files API has no copy: stream the content with concurrent reads and uploads.
         async with src:
             dst = await self.open_async(path2, "wb")
             async with dst:
@@ -464,8 +464,8 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
                 path, "Catalogs, schemas and volumes are not deleted as directories"
             )
 
-        # Checked first: deleting a missing directory succeeds on some clouds, e.g.
-        # AWS, where rmdir must raise FileNotFoundError.
+        # Checked first: deleting a missing directory succeeds on some clouds, e.g. AWS, where rmdir must raise
+        # FileNotFoundError.
         info = await self._info(path)
         if info["type"] != "directory":
             raise not_a_directory_error(path)
@@ -491,7 +491,7 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
     async def _check_open_target(self, path: str, mode: str) -> dict[str, Any] | None:
         """Check that the path can be opened in the mode, and return its info if needed."""
         if "r" not in mode and "x" not in mode:
-            # Writing only needs to refuse directories
+            # Writing only needs to refuse directories.
             if await self._isdir(path):
                 raise is_a_directory_error(path)
             return None
@@ -749,7 +749,10 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
     """The largest part."""
 
     min_multipart_size: int = 5 * _MiB
-    """The size from which a file is uploaded in parts."""
+    """The size from which parts are uploaded while writing.
+
+    A file closed before any part was sent goes in one request if it is smaller, or would go as one part.
+    """
 
     url_expiration_duration_min: int = 60  # 1 hour
     """How many minutes the upload and abort URLs are valid."""

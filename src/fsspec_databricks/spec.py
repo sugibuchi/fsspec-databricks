@@ -40,7 +40,7 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     root_marker = "/"
 
     transfer_concurrency: int = 8
-    """The files copied between two backends at a time."""
+    """The maximum number of files copied or moved between two backends at a time."""
 
     use_local_fs_in_workspace: bool = True
     """Whether to use the local file system, rather than the Databricks APIs, when running in a Databricks workspace."""
@@ -332,9 +332,9 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
     def legacy_dbfs_enabled(self) -> bool:
         """Whether legacy DBFS is enabled in the workspace.
 
-        With the local file system, it is enabled when its local mount exists: no API is called. Otherwise, the
-        legacy DBFS backend asks the workspace setting once. The first call then blocks until it answers, so never
-        call it on the event loop. Nothing internal asks it outside the local file system.
+        With the local file system, it is enabled when its local mount exists: no API is called. Otherwise, it is
+        `DBFS.legacy_dbfs_enabled`, which blocks on its first call. The router asks it only with the local file
+        system.
         """
         if not self._uses_local_fs:
             return self._legacy_fs.legacy_dbfs_enabled

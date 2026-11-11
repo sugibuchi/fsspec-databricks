@@ -19,7 +19,7 @@ uvx ruff format .                               # format
 uvx pre-commit run --all-files                  # the hooks: ruff, whitespace, end of files, YAML
 ```
 
-CI, in `.github/workflows/ci.yaml`, runs on pull requests and pushes to `main`:
+CI, in `.github/workflows/ci.yaml`, runs on pull requests, pushes to `main`, and by hand:
 
 - `lint`: ruff check, ruff format check, zizmor and actionlint;
 - `test`: pytest on the dummy server on Python 3.11 to 3.14, with coverage to Codecov from 3.14;
@@ -29,8 +29,7 @@ CI, in `.github/workflows/ci.yaml`, runs on pull requests and pushes to `main`:
 
 The live jobs hold Databricks credentials. Keep their supply chain fixed:
 
-- `uv.lock` is committed, and CI installs with `uv sync --locked`. After changing dependencies, run `uv lock` and
-  commit `uv.lock`.
+- `uv.lock` is committed, and CI installs with `uv sync --locked`, which fails on a stale lock.
 - Pin every action to a full commit SHA, with its version in a comment, e.g. `@<sha>  # v7.0.1`. Dependabot updates
   them. Also pin uv's `version`.
 - Check out with `persist-credentials: false`: no job pushes.
@@ -66,14 +65,15 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - `_route(path)` gives the backend and its path. Inside a workspace, that path is a local path, and `_outer` maps the
   names returned back with `from_local_path`.
 - Every backend must be async. The local file system is wrapped in the library's `SyncTreeWrapper`.
-- Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass `BaseDatabricksFileSystem` in `base.py`,
-  and call the SDK in threads with `_run_in_thread`, passing the SDK's bound method and its arguments.
+- Every Databricks API backend is an async `TreeFileSystem`. Volumes, Workspace and DBFS subclass
+  `BaseDatabricksFileSystem` in `base.py`, and call the SDK in threads with `_run_in_thread`, passing the SDK's bound
+  method and its arguments.
 - Wrap Databricks SDK calls in `error_mapping(path)`, so that callers get `OSError` subclasses.
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
 - `VolumeFileSystem` and `DBFS` are async fsspec file systems on fsspec's loop. Their files call the REST APIs with
   aiohttp, through the helpers of `http_client.py`.
 - Their aiohttp session is created on first use, as `TCPConnector` needs a running loop. A file system runs on one
-  loop, as fsspec caches it: never check the running loop, nor make a client again for another.
+  loop, as fsspec caches it: never check the running loop, nor make the session again for another.
 - Never block on the loop from code running in it. File objects' synchronous methods raise there.
 - `src/fsspec_databricks/_contrib/strategy/` is a copy of fsspec-alt-strategies. Never edit it: DEVELOPMENT.md says how
   to refresh it.

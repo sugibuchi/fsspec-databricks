@@ -140,13 +140,10 @@ def parse_volume_path(
 
     Returns
     -------
-    tuple[str, str, str, str, str]
-        A tuple containing the catalog name, schema name, volume name, local path within the volume, and full absolute path.
-        If a components is not present in the path, its corresponding value in the tuple will be None.
-
-        - Example: `dbfs:/Volumes/catalog_a/schema_b` returns `("catalog_a", "schema_b", None, None, "/Volumes/catalog_a/schema_b")`
-
-        Returned paths are guaranteed to start with a slash ("/").
+    tuple[str | None, str | None, str | None, str | None, str]
+        The catalog, schema and volume names, the path in the volume, and the full path. A component missing from
+        the path is None, e.g. `dbfs:/Volumes/catalog_a/schema_b` gives
+        `("catalog_a", "schema_b", None, None, "/Volumes/catalog_a/schema_b")`. The paths start with "/".
     """
     stripped = strip_scheme(path)
     m = volume_path_pat.fullmatch(stripped)
@@ -171,8 +168,7 @@ def parse_workspace_path(path: str) -> str:
     Returns
     -------
     str
-        The path within the workspace.
-        Returned path is guaranteed to start with a slash ("/").
+        The path within the workspace, starting with "/".
     """
     stripped = strip_scheme(path)
     m = workspace_path_pat.fullmatch(stripped)
@@ -193,8 +189,7 @@ def parse_dbfs_path(path: str) -> str:
     Returns
     -------
     str
-        The path within DBFS.
-        Returned path is guaranteed to start with a slash ("/").
+        The path within DBFS, starting with "/".
     """
     return strip_scheme(path)
 

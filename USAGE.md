@@ -36,7 +36,7 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
 | `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                       | `8`     |
 
-Unity Catalog Volumes have [options of their own](#options-for-volumes). Workspace files and legacy DBFS default to
+Unity Catalog Volumes have [defaults of their own](#options-for-volumes). Workspace files and legacy DBFS default to
 `16` and `8`. Workspace files are transferred whole, so `io_concurrency` does not limit them.
 
 Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
@@ -161,7 +161,8 @@ keeps a file invisible in its own way:
 Limits:
 
 - The files are committed one after another. A transaction is not atomic across files or backends.
-- Only files written with `open` or `pipe_file` join the transaction. Copies, moves and deletes take effect at once.
+- Only files written with `open`, `pipe_file` or `put_file` join the transaction. Copies, moves and deletes take
+  effect at once.
 - Files opened with `open_async` take no part in the transaction.
 - On legacy DBFS, other clients may see the temporary file. Commit deletes the file it replaces, then moves the new one:
   two requests.
@@ -237,11 +238,8 @@ endpoints that the workspace names, as the Databricks SDK uses them.
 
 Reads and writes retry after transient server errors. A file replaced while it is read fails with an `OSError`.
 
-Copies, moves and deletes:
-
-- A copy reads the file and writes it again, as the Files API cannot copy. It uses the options for reads and writes.
-- A move is a copy, then a delete. It replaces an existing file at the destination.
-- A recursive delete sends concurrent requests.
+A copy reads the file and writes it again, as the Files API cannot copy. It uses the options for reads and writes. A
+move is a copy, then a delete. It replaces an existing file at the destination.
 
 ### Modes
 
@@ -266,8 +264,8 @@ Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 
 Files size their requests by how they are read or written:
 
-- reads fetch blocks of 256 KB to 4 MB;
-- sequential reads fetch up to 128 MB ahead, for each file opened;
+- reads fetch blocks of 64 KB to 8 MB;
+- sequential reads fetch up to 256 MB ahead, for each file opened;
 - files from 5 MB are uploaded in parts of 5 MB to 16 MB.
 
 For a slow or distant network, lower the concurrency:
@@ -360,5 +358,4 @@ with fs.open("dbfs:/mnt/my-mount/data.csv", "rb") as f:
 - On a workspace without legacy DBFS, DBFS paths raise `PermissionError`, and `ls("/")` lists `/Volumes` and
   `/Workspace`.
 
-Databricks has deprecated legacy DBFS. Its support is tested offline only, on a simulated API, as no test workspace
-enables it.
+Databricks has deprecated legacy DBFS. The README's [Status](README.md#status) says how its support is tested.

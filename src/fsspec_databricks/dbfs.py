@@ -71,8 +71,8 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
     """Legacy DBFS file system, on the DBFS API.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
-    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. A recursive `rm`
-    deletes each directory by the API's own recursive delete, `_rm_tree`. Its files call the API with aiohttp.
+    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies, with the API's own
+    recursive move and delete, as `storage_profile` says. Its files call the API with aiohttp.
     """
 
     storage_profile = StorageProfile(
@@ -115,7 +115,7 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
             The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
             Defaults to 16.
         io_concurrency : int, optional
-            The maximum number of concurrent reads and writes of the files opened, shared by all of them.
+            The maximum number of concurrent reads and uploads of the files opened, shared by all of them.
             Defaults to 8.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
@@ -155,7 +155,6 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
         return map_info(status, detail=True)
 
     async def _list(self, path, **kwargs):
-        """List a folder a page at a time, as the SDK's listing fetches them."""
         dbfs_path = parse_dbfs_path(path)
         with error_mapping(path):
             async for entry in self._iter_in_thread(self.client.dbfs.list, dbfs_path):
@@ -180,7 +179,7 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
             await self._run_in_thread(self.client.dbfs.move, src, dst)
 
     async def _mv_tree(self, path1, path2):
-        """Move a directory with all in it, or a file, with the API's move: one request."""
+        """Move a directory with all in it: `_mv_file`, as the API's move takes both."""
         await self._mv_file(path1, path2)
 
     async def _delete(self, path: str, recursive: bool) -> None:
@@ -319,8 +318,8 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
         mode : str, optional
             The file mode, such as `rb` or `w`. Append and update modes are not supported.
         **kwargs
-            Passed to `fsspec.AbstractFileSystem.open`. Options of the other backends, such as
-            `notebook_format`, are ignored.
+            Passed to `fsspec.AbstractFileSystem.open`, e.g. `compression`, `encoding`, `errors` and
+            `newline`. Options of the other backends, such as `notebook_format`, are ignored.
         """
         return super().open(path, mode, **kwargs)
 
@@ -382,7 +381,7 @@ class DbfsReadableFile(HttpReadableMixin, AdaptiveReadableFile):
 class DbfsWritableFile(HttpFileMixin, AdaptiveWritableFile):
     """A legacy DBFS file written by one put, or by the API's stream: create, add-blocks, close.
 
-    The stream takes blocks one at a time, in order, so the file is `sequential`. Each part is sent as add-blocks of
+    The stream takes blocks one at a time, in order, so the file is `sequential`. Each part is one add-block of
     1 MB at most, the API's limit. A file of 1 MB at most is sent in one put.
 
     DBFS cannot abort a stream. Its create replaces the file there, and the file grows with each block. So an abort

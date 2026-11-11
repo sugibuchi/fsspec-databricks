@@ -111,8 +111,8 @@ class BaseDatabricksFileSystem(
 ):
     """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
 
-    A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
-    they run in threads with `_run_in_thread`, which logs each.
+    A subclass implements the primitives of `TreeFileSystem`, with `_list` for `_ils`, and `_create_directory`. The
+    SDK's calls block, so they run in threads with `_run_in_thread`, which logs each.
     """
 
     protocol = scheme
@@ -250,7 +250,7 @@ class BaseDatabricksFileSystem(
     async def _mkdir(self, path, create_parents=True, **kwargs):
         parent = self._parent(path)
         if not await self._isdir(parent):
-            # Tell a missing parent from a file
+            # Tell a missing parent from a file.
             try:
                 await self._info(parent)
             except FileNotFoundError:
@@ -262,7 +262,7 @@ class BaseDatabricksFileSystem(
         if await self._exists(path):
             raise file_exists_error(path)
 
-        # The APIs create the parents too
+        # The APIs create the parents too.
         await self._create_directory(path)
 
     async def _makedirs(self, path, exist_ok=False):
