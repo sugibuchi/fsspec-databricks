@@ -4,7 +4,7 @@ from .path import scheme, strip_scheme, unstrip_scheme
 
 
 class DatabricksLocalFileSystem(LocalFileSystem):
-    """File system accessing resources referenced by DBFS URLs or POSIX paths as ones in the local file system.
+    """The local file system, taking `dbfs:/` URLs as well as POSIX paths.
 
     `DatabricksFileSystem` passes local paths, with legacy DBFS paths under their mount point.
     """

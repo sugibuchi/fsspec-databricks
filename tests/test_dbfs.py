@@ -10,10 +10,10 @@ import pytest
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import ResourceDoesNotExist
 from fsspec.asyn import sync
+from utils import bytes_sig, dbfs_download, init_dbfs_test_dir
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.dbfs import DBFS, DbfsReadableFile
-from tests.utils import bytes_sig, dbfs_download, init_dbfs_test_dir
 
 pytestmark = pytest.mark.backend("dbfs")
 
@@ -106,7 +106,7 @@ def test_dbfs_rm(dbfs_client, fs_class, dbfs_test_root):
 
 
 def test_dbfs_rm_recursive_is_native(dbfs_client, dbfs_test_root, dummy):
-    """A recursive `rm` is the API's own recursive delete: one request."""
+    """A recursive `rm` is the API's own recursive delete: one delete, after a status request."""
     test_dir = init_dbfs_test_dir(
         dbfs_client, dbfs_test_root, items={"dir": {"a.bin": b"a", "sub": {}}}
     )

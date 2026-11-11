@@ -5,16 +5,14 @@
 ``AsyncFileSystem.open_async`` returns a file whose methods are awaited, with
 the API of fsspec's ``AbstractAsyncStreamedFile``. An `AsyncFileAdapter`
 gives that API to the file objects of `files.adaptive`, so that a filesystem
-implements its requests once, for both ``open`` and ``open_async``:
-
->>> async def open_async(self, path, mode="rb", **kwargs):
-...     return AsyncFileAdapter(MyFile(self, path, mode))
-
-The adapter only awaits what the file implements already: the file objects
+implements its requests once, for both ``open`` and ``open_async``. The adapter only awaits what the file implements already: the file objects
 stay files, with Python's sync API.
 
 A `SyncFileAdapter` gives the same API to any other file object with Python's
 sync API, e.g. a storage SDK's own, running its blocking calls in a thread.
+
+This module depends on nothing else in the package: it imports `_async_file`
+only for type checking.
 """
 
 from __future__ import annotations
@@ -41,21 +39,18 @@ class AsyncFileAdapter:
     - ``read``, ``write``, ``flush`` and ``close`` are awaited. Each awaits the
       file's async counterpart of the sync method, e.g. ``_read``.
     - ``seek``, ``tell``, ``readable``, ``writable`` and ``seekable`` are not:
-      they send no request.
+      they run the file's own, which send no request.
     - ``path``, ``mode``, ``size``, ``loc`` and ``closed`` describe the file.
 
-    ``seek`` and ``tell`` run the file's own: they must need no request.
-
     Unlike fsspec's, leaving an ``async with`` block by an exception uploads
-    nothing of a written file, as leaving a ``with`` block does. Close
-    it: the garbage collector aborts a file left open, keeping nothing
-    written.
+    nothing of a written file, as leaving a ``with`` block does. Close it: the
+    garbage collector aborts a file left open, keeping nothing written.
 
     Parameters
     ----------
     file : AdaptiveReadableFile or AdaptiveWritableFile
-        The file. Its requests run on its ``loop``: the awaited methods raise
-        RuntimeError on another one.
+        The file. Its requests run on its ``loop``, which the awaited methods
+        must run on, as the filesystem's async methods must.
 
     Examples
     --------
@@ -95,12 +90,6 @@ class AsyncFileAdapter:
         """The position, as fsspec's files keep it."""
         return self.file.tell()
 
-    def _on_loop(self) -> _AsyncFile:
-        """The file, once checked that this runs on its loop."""
-        if asyncio.get_running_loop() is not self.file.loop:
-            raise RuntimeError(f"Awaited outside the loop of {self.path}")
-        return self.file
-
     def readable(self) -> bool:
         return self.file.readable()
 
@@ -117,22 +106,22 @@ class AsyncFileAdapter:
         return self.file.tell()
 
     async def read(self, length: int | None = -1) -> bytes:
-        return await self._on_loop()._read(-1 if length is None else length)
+        return await self.file._read(-1 if length is None else length)
 
     async def write(self, data: Any) -> int:
-        return await self._on_loop()._write(data)
+        return await self.file._write(data)
 
     async def flush(self, force: bool = False) -> None:
-        await self._on_loop()._flush(force)
+        await self.file._flush(force)
 
     async def close(self) -> None:
-        await self._on_loop().aclose()
+        await self.file.aclose()
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc_info: object) -> None:
-        await self._on_loop().__aexit__(*exc_info)
+        await self.file.__aexit__(*exc_info)
 
 
 class SyncFileAdapter:

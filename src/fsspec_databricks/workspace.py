@@ -5,6 +5,7 @@ from io import UnsupportedOperation
 from typing import Any, Literal
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.config import Config
 from databricks.sdk.errors import BadRequest
 from databricks.sdk.service.workspace import (
     ExportFormat,
@@ -35,6 +36,7 @@ workspace_root_info = {
     "type": "directory",
     "created": None,
     "modified": None,
+    "islink": False,
 }
 
 NotebookFormat = Literal[
@@ -47,7 +49,7 @@ NotebookFormat = Literal[
 
 
 def _map_info(info: ObjectInfo, detail: bool) -> dict[str, Any] | str:
-    """Map a Databricks SDK `ObjectInfo` instance to a dictionary in the format used by `fsspec.info()`."""
+    """Map an SDK `ObjectInfo` to an fsspec info dict, or to its name."""
 
     if detail:
         return {
@@ -78,29 +80,31 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
     """Databricks Workspace file system.
 
     An async fsspec file system: its synchronous methods run on fsspec's event loop, and the SDK's calls in
-    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies. A recursive `rm`
-    deletes each directory by the API's own recursive delete, `_rm_tree`.
+    threads. Its recursive operations are the tree strategies of fsspec-alt-strategies, with the API's own
+    recursive delete, as `storage_profile` says. Its files are `WorkspaceFile`s, transferred whole by the SDK.
     """
 
     storage_profile = StorageProfile(
         fs_type="tree",
         parents_required=True,
-        implicit_folders=False,
+        implicit_directories=False,
         renames_files=False,
-        renames_folders=False,
+        renames_directories=False,
+        deletes_directories=True,
     )
     """What the Workspace API does.
 
     - It lists one directory per request, so the tree strategies suit it.
     - An import into a missing directory fails: the parents are made first, by `mkdirs`.
     - Directories are objects of their own: an empty one exists, and is deleted by a request of its own.
-    - It has no move, of files or directories.
+    - Its delete deletes a directory with all in it, in one request: `_rm_tree`.
+    - It has no move, of files or directories: a move copies, then deletes.
     """
 
     def __init__(
         self,
-        client=None,
-        config=None,
+        client: WorkspaceClient | None = None,
+        config: Config | None = None,
         config_params: dict[str, Any] | None = None,
         operation_concurrency: int | None = None,
         io_concurrency: int | None = None,
@@ -120,8 +124,9 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             The maximum number of concurrent API requests of a recursive operation, such as `rm` or `copy`.
             Defaults to 16.
         io_concurrency : int, optional
-            Adds to the threads running SDK calls. Defaults to 8. Files do not use it: each is downloaded and
-            uploaded whole, in the thread that opens or closes it.
+            The maximum number of files read or written at a time by the methods on many paths, such as `cat`
+            and `put`. Defaults to 8. Files opened do not use it: each is downloaded and uploaded whole, in the
+            thread that opens or closes it.
         **storage_options
             Standard fsspec storage options, such as `asynchronous` and `loop`.
         """
@@ -146,8 +151,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             )
         return _map_info(status, detail=True)
 
-    async def _ils(self, path, **kwargs):
-        """List a folder a page at a time, as the SDK's listing fetches them."""
+    async def _list(self, path, **kwargs):
         if self._strip_protocol(path) == dbfs_root:
             yield dict(workspace_root_info)
             return
@@ -202,8 +206,8 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             )
 
     async def _rm_file(self, path, **kwargs):
-        # Checked first: the API deletes an empty directory as a file. The
-        # strategies give only files, but fsspec's non-recursive rm may not.
+        # Checked first: the API deletes an empty directory as a file. The strategies give only files, but fsspec's
+        # non-recursive rm may not.
         if (await self._info(path))["type"] != "file":
             raise is_a_directory_error(path)
         await self._delete(path, recursive=False)
@@ -267,7 +271,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             raise file_exists_error(path)
 
         if info and info["object_type"] == "NOTEBOOK":
-            # File exists and is a notebook
+            # An existing notebook.
             export_format = (
                 value_of(notebook_format, ExportFormat) or ExportFormat.SOURCE
             )
@@ -276,7 +280,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             )
             language = value_of(language or info["language"], Language)
         elif info:
-            # File exists and is not a notebook
+            # An existing file, not a notebook.
             if notebook_format is not None:
                 raise ValueError(
                     f"notebook_format is not applicable for non-notebook object: {path}"
@@ -285,7 +289,7 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
             import_format = ImportFormat.RAW
             language = None
         else:
-            # File does not exist yet
+            # A new file.
             if write_mode(mode) and notebook_format and not language:
                 raise ValueError(
                     f"language must be specified when writing a notebook: {path}"

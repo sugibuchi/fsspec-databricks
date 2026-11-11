@@ -41,7 +41,8 @@ class AioHttpSessionSupport:
     def _init_session(self, connection_pool_size: int | None = None) -> None:
         if connection_pool_size is not None:
             self.connection_pool_size = connection_pool_size
-        # Made on the loop that uses it, as TCPConnector needs a running loop.
+        # Made on first use, as TCPConnector needs a running loop. A file system runs on one loop, as fsspec caches
+        # it: the session's loop is kept only to close it there.
         self._session: ClientSession | None = None
         self._session_loop: asyncio.AbstractEventLoop | None = None
 
@@ -68,19 +69,14 @@ class AioHttpSessionSupport:
             sync(loop, session.close, timeout=5.0)
 
     async def _get_session(self) -> ClientSession:
-        """The aiohttp session of the running loop, made on first use."""
+        """The aiohttp session of the file system, made on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
-        loop = asyncio.get_running_loop()
-        if (
-            self._session is None
-            or self._session.closed
-            or self._session_loop is not loop
-        ):
+        if self._session is None:
             self._session = ClientSession(
                 connector=TCPConnector(limit=self.connection_pool_size)
             )
-            self._session_loop = loop
+            self._session_loop = asyncio.get_running_loop()
         return self._session
 
 
@@ -154,27 +150,23 @@ async def check_response(response: ClientResponse, path: str, doing: str) -> Non
 
 
 class HttpFileMixin:
-    """Request settings shared by the file classes calling the REST APIs with aiohttp."""
+    """Request settings shared by the file classes calling the REST APIs with aiohttp.
+
+    The timeouts are those of aiohttp's `ClientTimeout`, in seconds, and `None` or `0` means none. See the `aiohttp
+    documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_.
+    """
 
     timeout_total: float | None = None
-    """The maximum seconds for a whole request: connecting, sending and reading the response.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds for a whole request: connecting, sending and reading the response."""
 
     timeout_connect: float | None = None
-    """The maximum seconds to get a connection, including the wait for a free one from the pool.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds to get a connection, including the wait for a free one from the pool."""
 
     timeout_sock_connect: float | None = 30
-    """The maximum seconds to connect to a peer for a new connection.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds to connect to a peer for a new connection."""
 
     timeout_sock_read: float | None = 120
-    """The maximum seconds between two reads of data from a peer.
-    `None` or `0` means no timeout.
-    See the `aiohttp documentation <https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts>`_."""
+    """The maximum seconds between two reads of data from a peer."""
 
     max_retries: int = 3
     """The maximum number of retries of a request that is safe to send again, after a transient error."""
@@ -197,8 +189,10 @@ class HttpFileMixin:
         )
 
     async def _retried(self, send: Callable[[], Awaitable[T]], doing: str) -> T:
-        """Send a request, and again after a transient error, as the SDK does: a 429 or 5xx answer, or a lost
-        connection. Only for requests that are safe to send again."""
+        """Send a request, and again after a transient error, as the SDK does: a 429 or 5xx answer, or a lost connection.
+
+        Only for requests that are safe to send again.
+        """
         delay = self.retry_delay
         for _ in range(self.max_retries):
             try:

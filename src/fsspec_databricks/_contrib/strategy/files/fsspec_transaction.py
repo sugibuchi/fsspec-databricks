@@ -34,13 +34,13 @@ A storage with a way of its own gets a subclass of `FileTransaction`.
 ...     return TransactionFile(LocalBufferTransaction(path, opener))
 
 A `TransactionFile` is a file: text and compression wrappers work on it. Its
-methods are sync, as fsspec's transactions are: call them from a thread other
-than the filesystem's loop, as fsspec's sync API. fsspec commits a
+methods are sync, as fsspec's transactions are: as with fsspec's sync API, call
+them from a thread other than the filesystem's loop. fsspec commits a
 transaction's files one after another: a transaction is not atomic across
 files.
 
-This module depends on nothing but the standard library: it imports the file
-classes only for type checking.
+This module depends on nothing else in the package: it imports `adaptive` only
+for type checking.
 """
 
 from __future__ import annotations
@@ -153,9 +153,9 @@ class TransactionFile(io.RawIOBase):
     discarded. The garbage collector discards a file neither committed nor
     discarded, its commit failed or not, warning with a ResourceWarning. On a
     thread running an event loop, which must not wait, the discard runs on a
-    thread of its own. A discard failing
-    leaves what was staged, as if the process had died. So does the
-    interpreter shutting down, when no discard is tried.
+    thread of its own. A discard failing leaves what was staged, as if the
+    process had died. So does the interpreter shutting down, when no discard is
+    tried.
 
     Parameters
     ----------
@@ -395,8 +395,8 @@ def _temp_path(path: str) -> str:
 class TempPathTransaction(FileTransaction):
     """A file written to a temporary path, renamed to its own on commit.
 
-    The temporary path is in the file's folder, hidden by a leading ".", so
-    that a rename stays within one folder, container or bucket. Starting the
+    The temporary path is in the file's directory, hidden by a leading ".", so
+    that a rename stays within one directory, container or bucket. Starting the
     staging opens a file there, and ending it closes it, which writes it in
     full. Commit renames it, and discard deletes it.
 
@@ -542,6 +542,11 @@ class AdaptiveWritableTransaction(FileTransaction):
     stands in for the file's ``_complete_multipart_upload`` and
     ``_upload_all``, on that file only, so as to hold that request back.
     Discard aborts the multipart upload, or drops the small file.
+
+    It needs a storage where an upload is invisible until the request
+    completing it, such as S3, Google Cloud Storage or Azure. On one where a
+    file is visible while it is written, e.g. DBFS, it hides nothing: use a
+    `TempPathTransaction` there.
 
     It costs nothing more than writing the file without a transaction, and
     other clients see nothing until commit. A small file is held in memory

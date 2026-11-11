@@ -50,9 +50,9 @@ class _AsyncFile(io.RawIOBase):
 
     ``flush(force=True)`` finishes the file as closing does, as fsspec's files
     do: what was written is then shown, e.g. the upload completed. The file
-    then allows no more writes, and closing sends nothing more. A class says
-    how it finishes in ``_finish``, which frees what the file holds: one whose
-    buffer goes then allows no reads either.
+    then allows no more writes, and closing sends nothing more. A class
+    finishes in `_finish`, which frees what the file holds: a file reading
+    from a buffer it frees then allows no reads either.
 
     A request holds the concurrency limit while it runs. Shared by files, the
     limit bounds their requests together, and so the memory these hold.

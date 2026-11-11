@@ -83,9 +83,9 @@ Without the options, `FSSPEC_DATABRICKS_TEST_API` and `FSSPEC_DATABRICKS_TEST_FS
 | `test_utils.py`       | `utils.py`                                      |
 
 A backend test takes the `client` fixture, or one built on it. It runs once per API chosen: on the dummy server, and
-on the live workspace. Live tests are opt in, and once asked for, a workspace that cannot be reached is an error, not
-a skip. The live DBFS tests also skip when the workspace disables
-legacy DBFS. No test workspace enables it, so DBFS is tested on the dummy server only.
+on the live workspace. Live tests are opt in. Once asked for, a workspace that cannot be reached is an error, not a
+skip. The live DBFS tests skip when the workspace disables legacy DBFS. No test workspace enables it, so DBFS is
+tested on the dummy server only.
 
 Some tests make sense on one side only:
 
@@ -94,8 +94,8 @@ Some tests make sense on one side only:
 - The `dummy_only` and `live_only` markers restrict the others.
 - A test is skipped when `--api` excludes its side.
 
-Each backend test has a `backend` marker, e.g. a module's `pytestmark = pytest.mark.backend("volume")`. A test spanning
-backends names all of them, and runs only when `--fs` selects them all. Tests of no backend always run.
+Each backend test has a `backend` marker, e.g. a module's `pytestmark = pytest.mark.backend("volume")`. A test
+spanning backends names all of them, and runs only when `--fs` selects them all. Tests of no backend always run.
 
 Tests on the dummy server never need credentials. An autouse fixture points the default client configuration at the
 dummy server, so `WorkspaceFileSystem()` and the like never reach a workspace.
@@ -120,7 +120,7 @@ to it over HTTP, so the SDK's requests, errors and mixins run as against a works
 REST references describe:
 
 - the Files API: directories, downloads with ranges, uploads whole or in parts, presigned URLs and aborts;
-- the endpoints list and Files API 3.0, as SDK 0.163 speaks them, as the reference has neither;
+- the endpoints list and Files API 3.0, missing from the reference, as SDK 0.163 speaks them;
 - the Workspace API;
 - the legacy DBFS API;
 - the Unity Catalog API's reads of catalogs, schemas and volumes.
@@ -304,14 +304,14 @@ strategies for fsspec. Each backend implements only the primitives of its API, a
   the parent directories. The strategies then skip the requests it makes needless.
 - **Router:** `DatabricksFileSystem` is an `AsyncRoutingFileSystem`. It sends each path to its backend, and copies or
   moves files between backends with the source's strategy.
-- **File objects:** Volume and DBFS files are adaptive files, whose blocks and parts grow with sequential access. Transactions
-  hold a file's writes back until fsspec's transaction commits.
+- **File objects:** Volume and DBFS files are adaptive files, whose blocks and parts grow with sequential access.
+  Transactions hold a file's writes back until fsspec's transaction commits.
 - **Monitors:** the operations behind fsspec's methods report their progress to the monitors of the interface
   package, and can be cancelled.
 
 The strategies are copied into the package rather than installed, so that a release of the library never changes this
-package's behaviour. Their shared interface, `fsspec-alt-strategies`, is installed. "The copy of fsspec-alt-strategies"
-below says how the copy is kept.
+package's behaviour. Their shared interface, `fsspec-alt-strategies`, is installed.
+[The copy of fsspec-alt-strategies](#the-copy-of-fsspec-alt-strategies) says how the copy is kept.
 
 ### The SDK for metadata, HTTP for file data
 
@@ -369,12 +369,13 @@ The library's router does the rest:
   strategies, which monitors see as calls to the backend, with the router in `Call.via`.
 - A path or pattern at the root is walked by fsspec's own methods, over `_roots`.
 - A change of the root raises `PermissionError`.
-- A recursive copy or move between two backends is `tree_cp` or `tree_mv`, under one call of the router. Each file is
-  streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
+- A recursive copy or move between two backends is `_tree_cp` or `_tree_mv`, under one call of the router. Each file
+  is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
 - A move between backends deletes each source file once it is copied, then the source folders left empty.
 
 No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
-`_cross_fs_cp_file`, and a copy within one backend is its own only when both paths route to it.
+`_cross_fs_cp_entry` and `_cross_fs_mv_entry`, which stream the data. A copy within one backend is its own only when
+both paths route to it.
 
 No request checks whether legacy DBFS is enabled:
 
@@ -401,7 +402,7 @@ mixin and the library's `SyncClientSupport`:
 
 - SDK calls run in the file system's own threads, `operation_concurrency` of them, made on first use. `_run_in_thread`
   takes the SDK's bound method and its arguments. It overrides the library's to log each call.
-- `_iter_in_thread` takes an SDK listing a batch at a time, in those threads. A backend's `_ils` uses it, so the
+- `_iter_in_thread` takes an SDK listing a batch at a time, in those threads. A backend's `_list` uses it, so the
   strategies act on a folder's first page while the next ones are fetched.
 - `close()`, or collecting the file system, shuts the threads down.
 - `_mkdir` and `_makedirs` check the preconditions, then call the subclass's `_create_directory`.
@@ -435,9 +436,10 @@ message.
 
 ### Volumes
 
-`VolumeFileSystem`, in `volume.py`, implements the primitives, such as `_ils`, `_info`, `_rm_file`, `_rmdir`,
-`_create_directory` and `_cp_file`. Its `io_concurrency` defaults to 24. Its `storage_profile` declares only
-`fs_type="tree"`, so the strategies take the way that is right on any storage.
+`VolumeFileSystem`, in `volume.py`, implements the primitives, such as `_list`, `_info`, `_rm_file`, `_rmdir`,
+`_create_directory` and `_cp_file`. Its `operation_concurrency` defaults to 32 and its `io_concurrency` to 16, the
+fastest measured on a live workspace. Its `storage_profile` declares what the Files API does: an upload creates the
+missing parents, directories are objects of their own, and nothing is renamed.
 
 The APIs called depend on the depth of the path. `include_browse` is passed to the Unity Catalog APIs.
 
@@ -477,10 +479,12 @@ Two `asyncio.Semaphore`s bound the requests. `operation_concurrency` bounds thos
 
 #### The HTTP session
 
-`http_client.py` holds what the Volume and DBFS files share. Its `AioHttpSessionSupport` mixin gives each of the two file
-systems one aiohttp `ClientSession`, with `connection_pool_size` connections:
+`http_client.py` holds what the Volume and DBFS files share. Its `AioHttpSessionSupport` mixin gives each of the two
+file systems one aiohttp `ClientSession`, with `connection_pool_size` connections:
 
-- it is created on the loop that first uses it, as `TCPConnector` needs a running loop, and is never pickled;
+- it is created on first use, as `TCPConnector` needs a running loop;
+- it is created once: a file system runs on one loop, as fsspec caches it;
+- it is never pickled;
 - `close()` closes it on its loop;
 - an aiohttp middleware authenticates requests with the SDK `Config`'s headers.
 
@@ -516,13 +520,13 @@ minutes.
 #### Reading
 
 `VolumeReadableFile` subclasses the library's `AdaptiveReadableFile`, and implements `_fetch_range` with a range `GET`.
-The base class sizes the blocks, from 256 KB to 4 MB, and fetches ahead on sequential reads.
+The base class sizes the blocks, from 64 KB to 8 MB, and fetches ahead on sequential reads.
 
-The defaults come from benchmarks on an Azure workspace:
+The defaults come from benchmarks on a live workspace:
 
-- Sequential reads fetch up to 32 blocks ahead, 128 MB. That read about 250 MB/s, against 160 MB/s for 8 blocks.
-- Splitting the read-ahead into 4 MB blocks beat 16 MB blocks.
-- Blocks from 256 KB cut random reads of 64 KB from about 50 ms to 40 ms, against 1 MB blocks.
+- Sequential reads fetch up to 32 blocks ahead, 256 MB. A sequential read took 1.4 s with 32, against 1.9 s with 8
+  and 1.5 s with 64.
+- Blocks from 64 KB cut random reads of small records from 11.5 s to 8.5 s, against 256 KB blocks.
 
 Each answer is checked, as the SDK checks it:
 
@@ -545,7 +549,8 @@ A request that is safe to send again is retried up to 3 times after a transient 
 
 `VolumeWritableFile` subclasses the library's `AdaptiveWritableFile`, which buffers the writes:
 
-1. Data is buffered until it reaches `min_multipart_size`, 5 MB. A file closed before then is uploaded by one `PUT`.
+1. Data is buffered until it reaches `min_multipart_size`, 5 MB. A file of one part, closed before any part was sent,
+   is uploaded by one `PUT`.
 2. Then the upload is initiated.
 3. Parts are uploaded as the buffer fills, from 5 MB to 16 MB.
 4. `close()` uploads the rest, waits for the parts, and completes the upload.
@@ -566,7 +571,7 @@ If a part fails, `close()` aborts the upload and raises an `OSError`:
 ### Workspace files
 
 `WorkspaceFileSystem`, in `workspace.py`, uses the SDK's `WorkspaceClient.workspace`. Its `storage_profile` declares
-`implicit_folders=False` and `renames_files=False`: directories are objects, and the API has no move.
+that a file needs its parent folder, that directories are objects, and that the API has no move.
 
 `WorkspaceFile` is a sync `io.BytesIO` calling the SDK directly, with no event loop:
 
@@ -574,7 +579,6 @@ If a part fails, `close()` aborts the upload and raises an `OSError`:
 - Closing uploads it whole, if changed. Leaving a `with` block by an exception uploads nothing.
 - `open_async()` opens it in a thread, and wraps it in the library's `SyncFileAdapter`.
 - Exclusive creation uploads without overwriting, so that the API refuses a file created meanwhile.
-- Files are at most 10 MB.
 
 Notebooks are objects of type `NOTEBOOK`, and `notebook_format` gives their export and import format, `SOURCE` by
 default. An existing notebook keeps its language, and a new one needs `language`. Other files use `AUTO` export and
@@ -589,8 +593,9 @@ default. An existing notebook keeps its language, and a new one needs `language`
 `DBFS`, in `dbfs.py`, uses the SDK's `WorkspaceClient.dbfs`.
 
 - `_mv_file` is the API's move, which moves a directory with all in it. So `storage_profile` declares
-  `renames_folders=True`, and a recursive `mv` moves each folder whole where it can.
-- `_rm_tree` is the API's recursive delete, one request per directory a recursive `rm` is given.
+  `renames_directories=True`, and a recursive `mv` moves each folder whole where it can.
+- `_rm_tree` is the API's recursive delete, one per directory a recursive `rm` is given. The delete succeeds on a
+  missing path, so `_rm_tree` asks its status first, to raise `FileNotFoundError` as the library's contract says.
 - `rmdir` refuses a directory that is not empty. It calls the API's non-recursive delete, which the SDK's
   `dbfs.delete` refuses for directories.
 - Files are the library's adaptive files, `DbfsReadableFile` and `DbfsWritableFile`. They call the API with the file
@@ -631,8 +636,8 @@ library's `TransactionFile`, with a `FileTransaction` of `files/fsspec_transacti
 The router's `_open` passes `autocommit` to the backend's `_open`. fsspec's `open` adds the file to the router's own
 transaction, which commits or discards the files of every backend. The backends' own transactions stay empty.
 
-The router's `_pipe_file` writes through `open_async`, which knows no transaction. So `DatabricksFileSystem.pipe_file`
-writes with `open` inside a transaction.
+A backend's own `pipe_file` and `put_file` write through `open_async`, which knows no transaction. So inside a
+transaction, the router's `pipe_file` and `put_file` write through `open`.
 
 ### Local file system
 
@@ -659,11 +664,16 @@ installed.
 
 ### The copy of fsspec-alt-strategies
 
-`src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl`, version 0.1.0, from
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies). It is copied whole, as its `wrapper.py`
-needs `flat/` too. Its modules keep their license headers and relative imports, and ruff skips them.
+`src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl` from
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.3.0. Its modules keep their
+license headers and relative imports, and ruff skips them.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.1,<0.2`, from PyPI.
+It keeps only what the backends use: `tree/`, `common/`, `files/`, `router.py`, and `wrapper/` with only its tree
+wrapper. The backends are all trees, so the router never imports `flat/`. `monitored()` is unused, so its `monitor.py`,
+and the `__init__.py` re-exporting it, are left out: the copy is a namespace package. `_version.py` stays, as the
+copy's command line recognises a previous copy by it.
+
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`, from PyPI.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.
@@ -676,6 +686,13 @@ To refresh the copy:
    uv run --with "fsspec-alt-strategies-impl[cli]==<version>" fsspec-alt-strategies-impl copy src/fsspec_databricks/_contrib/strategy
    ```
 
-2. Update the version above, and the interface's bounds in `pyproject.toml` to the copy's minor version, then run
+2. Delete again what the backends do not use:
+
+   ```bash
+   cd src/fsspec_databricks/_contrib/strategy
+   rm -r flat monitor.py __init__.py wrapper/adlfs.py wrapper/flat.py wrapper/gcsfs.py wrapper/s3fs.py
+   ```
+
+3. Update the version above, and the interface's bounds in `pyproject.toml` to the copy's minor version, then run
    `uv lock`.
-3. Run the tests.
+4. Run the tests.

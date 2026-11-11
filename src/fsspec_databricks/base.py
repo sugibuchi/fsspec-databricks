@@ -11,6 +11,7 @@ from databricks.sdk.config import Config
 
 from ._contrib.strategy.common.sync_client import SyncClientSupport
 from ._contrib.strategy.tree.filesystem import TreeFileSystem
+from ._contrib.strategy.tree.listing import _tree_ils
 from .error import file_exists_error, not_a_directory_error
 from .path import dbfs_root, scheme, strip_scheme, unstrip_scheme
 from .utils import write_mode
@@ -110,8 +111,8 @@ class BaseDatabricksFileSystem(
 ):
     """Base class of the backends whose API is the Databricks SDK: async, with the tree strategies.
 
-    A subclass implements the primitives of `TreeFileSystem` and `_create_directory`. The SDK's calls block, so
-    they run in threads with `_run_in_thread`, which logs each.
+    A subclass implements the primitives of `TreeFileSystem`, with `_list` for `_ils`, and `_create_directory`. The
+    SDK's calls block, so they run in threads with `_run_in_thread`, which logs each.
     """
 
     protocol = scheme
@@ -204,6 +205,34 @@ class BaseDatabricksFileSystem(
     def modified(self, path):
         return self.info(path)["modified"]
 
+    def _ils(self, path, recursive=False, **kwargs):
+        """List a directory a page at a time, or all below it with `recursive`, a listing per directory.
+
+        No Databricks API lists a tree in one request: the library's `_tree_ils` lists its directories, several at a
+        time, each by `_list`.
+        """
+        if recursive:
+            return _tree_ils(self, path, recursive=False, **kwargs)
+        else:
+            return self._list(path, **kwargs)
+
+    async def _list(self, path: str, **kwargs) -> AsyncIterator[dict[str, Any]]:
+        """List one directory, a page at a time, as the SDK's listing fetches them."""
+        raise NotImplementedError
+        yield {}  # An async generator, as a subclass's is.
+
+    async def _cp_file_entry(self, entry, path2, **kwargs):
+        # The copies need nothing of the entry but its path.
+        await self._cp_file(entry["name"], path2, **kwargs)
+
+    async def _mv_file_entry(self, entry, path2, **kwargs):
+        await self._mv_file(entry["name"], path2, **kwargs)
+
+    async def _mv_file(self, path1, path2, **kwargs):
+        """Move a file: a copy, then a delete, where the API has no move."""
+        await self._cp_file(path1, path2, **kwargs)
+        await self._rm_file(path1)
+
     async def _create_directory(self, path: str) -> None:
         """Create a directory and its parents with the API."""
         raise NotImplementedError
@@ -221,7 +250,7 @@ class BaseDatabricksFileSystem(
     async def _mkdir(self, path, create_parents=True, **kwargs):
         parent = self._parent(path)
         if not await self._isdir(parent):
-            # Tell a missing parent from a file
+            # Tell a missing parent from a file.
             try:
                 await self._info(parent)
             except FileNotFoundError:
@@ -233,7 +262,7 @@ class BaseDatabricksFileSystem(
         if await self._exists(path):
             raise file_exists_error(path)
 
-        # The APIs create the parents too
+        # The APIs create the parents too.
         await self._create_directory(path)
 
     async def _makedirs(self, path, exist_ok=False):

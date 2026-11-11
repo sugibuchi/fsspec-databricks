@@ -934,14 +934,14 @@ wheels = [
 
 [[package]]
 name = "fsspec-alt-strategies"
-version = "0.1.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fsspec" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f8/7b/92fe5e2c8443e4bff3db117ef347e15f2dd101a202b9fe46e6c59fa82ad9/fsspec_alt_strategies-0.1.0.tar.gz", hash = "sha256:bf658b2c293910ac9a2946d2dbdf4191668544b43bba424e942d2ac625660a73", size = 16084, upload-time = "2026-11-08T17:59:28.585Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/99/42744e8c49be454a276fb421055b74e5d05818a1621ad98ba9758f6ddb0d/fsspec_alt_strategies-0.3.0.tar.gz", hash = "sha256:223ed5485312eb088cecd6f0a8da06c9b94fe5b1996777db3589ab255e91638c", size = 17080, upload-time = "2026-11-11T16:10:11.615Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4b/ab/38e5c830fb494ababe93ad66c6f1a26cc95570894478f4ecf30bf033bbc3/fsspec_alt_strategies-0.1.0-py3-none-any.whl", hash = "sha256:73064fff6a58e17744720c30367854f95d941f9cbc279d7eac1a8517a638f5b6", size = 17476, upload-time = "2026-11-08T17:59:27.448Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/a5/d2dd02b07fc412ef6adee37f2c552fbc9a3476994c7ce87e0b5886a0335a/fsspec_alt_strategies-0.3.0-py3-none-any.whl", hash = "sha256:0dedd797b5832c765bd3d1012ce280ff1c71192c49b03abbd6d303999af46575", size = 18555, upload-time = "2026-11-11T16:10:09.6Z" },
 ]
 
 [[package]]
@@ -973,7 +973,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.12.0" },
     { name = "databricks-sdk", specifier = ">=0.80.0" },
     { name = "fsspec", specifier = ">=2024.6.0" },
-    { name = "fsspec-alt-strategies", specifier = ">=0.1,<0.2" },
+    { name = "fsspec-alt-strategies", specifier = ">=0.3,<0.4" },
 ]
 
 [package.metadata.requires-dev]

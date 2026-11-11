@@ -15,7 +15,7 @@ def to_datetime(timestamp: float | str | None, is_ms: bool = True) -> datetime |
         else:
             return datetime.fromtimestamp(timestamp, tz=UTC)
     elif isinstance(timestamp, str):
-        # An RFC 822 date, like "Wed, 02 Oct 2002 08:00:00 EST"
+        # An RFC 822 date, like "Wed, 02 Oct 2002 08:00:00 EST".
         return email.utils.parsedate_to_datetime(timestamp)
     else:
         raise ValueError(f"Cannot convert timestamp {timestamp} to datetime")
@@ -39,7 +39,7 @@ def value_of(value: Any, enum_class: type[ENUM]) -> ENUM | None:
         try:
             return enum_class(value)
         except ValueError:
-            # Case-insensitive match of the name
+            # Case-insensitive match of the name.
             value_of_name = {v.name.lower(): v for v in enum_class}
             if value.lower() in value_of_name:
                 return value_of_name[value.lower()]

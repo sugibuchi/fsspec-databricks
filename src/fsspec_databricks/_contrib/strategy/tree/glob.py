@@ -1,18 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Tsuyoshi SUGIBUCHI
 # SPDX-License-Identifier: Apache-2.0
-"""A glob that lists only the folders its pattern can match in.
+"""A glob that lists only the directories its pattern can match in.
 
-`tree_glob` is an alternative to fsspec's ``_glob``, with the same matches. fsspec's
-finds every path under the pattern's literal root, as deep as the pattern goes,
-then filters them with a regular expression. `tree_glob` walks the tree as `tree_walk`
-does, and lists a folder only if the pattern can match in it.
+`_tree_glob` is an alternative to fsspec's ``_glob``, with the same matches.
+fsspec's finds every path under the pattern's literal root, as deep as the
+pattern goes, then filters them with a regular expression. `_tree_glob` walks
+the tree as `_tree_walk` does, and lists a directory only if the pattern can
+match in it.
 
-To decide, a folder's path is matched with the pattern's segments, one by one.
-A ``**`` matches any number of segments, so only those before the first ``**``
-can rule a folder out. Without a ``**``, nor can a folder as deep as the
-pattern, as nothing below it can match.
+To decide, a directory's path is matched with the pattern's segments, one by
+one. A ``**`` matches any number of segments, so only those before the first
+``**`` can rule a directory out. Without a ``**``, a directory as deep as the
+pattern is ruled out too, as nothing below it can match.
 
-Several patterns are matched in one walk per tree: a folder is listed once if
+Below a ``**``, nothing is pruned. So a directory below which a pattern prunes
+nothing, e.g. ``data`` for ``data/**/*.csv``, is listed by one recursive
+``_ils``.
+
+Several patterns are matched in one walk per tree: a directory is listed once if
 any of them can match in it, and each path is matched with all of them.
 
 This module depends on `find`, and `operation`, `paths` and `patterns` of
@@ -33,109 +38,82 @@ from ..common.patterns import _infos, _inside, _Search
 from .find import _find_listings
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import AsyncGenerator, Sequence
 
-    from ..common.types import _Ils, _Info
     from .walk import _Listing
 
-__all__ = ["GlobState", "tree_glob"]
+__all__: list[str] = []
 
 
-def tree_glob(
+def _tree_glob(
+    fs: Any,
     path: str | Sequence[str],
     *,
-    ils: _Ils,
-    info: _Info,
     maxdepth: int | None = None,
     withdirs: bool = True,
-    concurrency_limit: asyncio.Semaphore,
+    ils_kwargs: dict[str, Any] | None = None,
 ) -> Operation[dict[str, Any], GlobState]:
-    """Find the paths matching glob patterns, listing only folders they can match in.
+    """Find the paths matching glob patterns, listing only directories they can match in.
 
     It matches what fsspec's ``_glob`` matches, with ``*``, ``?``, ``[...]`` and
     ``**``. The paths found are filtered with fsspec's own regular expression,
-    so the folders pruned change only the requests, never the matches. A folder
-    that fails to list yields its error, and the rest is still searched.
+    so the directories pruned change only the requests, never the matches. A
+    directory that fails to list yields its error, and the rest is still
+    searched.
 
-    It yields each match as its folder's listing arrives, so the matches are
+    It yields each match as its directory's listing arrives, so the matches are
     not in order. fsspec's ``_glob`` sorts them, by name. A storage listing a
-    folder twice, e.g. as a prefix and as its marker object, yields it twice.
+    directory twice, e.g. as a prefix and as its marker object, yields it twice.
 
     Several patterns match what fsspec's globs of each match together, each
     path once. They are matched in one walk per tree, rather than one per
-    pattern: a folder that several can match in is listed once. Their trees
+    pattern: a directory that several can match in is listed once. Their trees
     are walked one after another. A pattern under another's literal root is
-    walked from that root, which may list the folders between them.
+    walked from that root, which may list the directories between them.
 
-    It wins on storages that list one folder per request, when the pattern
-    leaves folders out after its first wildcard, e.g. ``data/*/2024/*.parquet``.
-    fsspec's ``_glob`` then lists every folder under ``data`` as deep as the
-    pattern goes. Several patterns win again where they share folders, e.g.
+    It wins on storages that list one directory per request, when the pattern
+    leaves directories out after its first wildcard, e.g.
+    ``data/*/2024/*.parquet``. fsspec's ``_glob`` then lists every directory
+    under ``data`` as deep as the pattern goes. Several patterns win again where they share directories, e.g.
     ``data/*/2024/*.csv`` and ``data/*/2024/*.json``. It loses on object
     stores, which list a whole tree in one paginated request, and gains nothing
-    over `tree_find` with patterns such as ``data/**/*.parquet``, which can
+    over `_tree_find` with patterns such as ``data/**/*.parquet``, which can
     match anywhere.
 
-    Once cancelled, it lists no new folder, and yields the matches of the
+    It prunes a level at a time, so it lists every directory a wildcard
+    matches, each by a request, at once. A pattern selective deep in a small
+    tree costs more requests than one recursive listing of that tree would,
+    though no more rounds: ``t007/year=2024/*/part-0.parquet`` lists
+    ``year=2024``, then each of its 12 months, where adlfs lists all below
+    ``year=2024`` once, then filters. Measured on Azure, that was 13 requests
+    against 2, and 0.09 s against 0.06 s. The tree's size is not known, so
+    it never lists a subtree whole by itself: listing all below the
+    directories of ``*/year=2024/month=03`` that way took 3.4 s against
+    0.16 s. A caller who knows the subtree is small writes ``**`` there, e.g.
+    ``t007/year=2024/**/part-0.parquet``, which lists it whole.
+
+    Once cancelled, it lists no new directory, and yields the matches of the
     listings in flight.
 
-    Requests: one ``ils`` per folder a pattern can match in, as
-    ``concurrency_limit`` allows. One ``info`` per pattern without wildcards,
-    and per literal root folder walked that a pattern matches, e.g. that of
-    ``data/**``.
+    Requests: one ``_ils`` per directory a pattern can match in, as the
+    filesystem's ``operation_limit`` allows. Without ``maxdepth``, a directory
+    at the pattern's first ``**`` is listed by one recursive ``_ils``, with all
+    below it: ``data/*/**/*.csv`` lists ``data``, then each directory in it.
+    One ``info`` per pattern without wildcards, and per literal root directory
+    walked that a pattern matches, e.g. that of ``data/**``.
 
-    Parameters
-    ----------
-    path : str or sequence of str
-        The pattern, or patterns, of paths as ``ils`` takes them. A trailing
-        "/" matches only folders.
-    ils : callable
-        Lists a folder, called as ``ils(path)``: an async iterator of its
-        entries, as fsspec's ``_ls`` gives them, e.g. the filesystem's
-        ``_ils``.
-    info : callable
-        Describes a path, called as ``info(path)``: e.g. the filesystem's
-        ``_info``.
-    maxdepth : int, optional
-        How deep a ``**`` goes, as with fsspec's ``_glob``. No limit by default.
-    withdirs : bool
-        Whether folders can match, as with fsspec's ``_glob``.
-    concurrency_limit : asyncio.Semaphore
-        Held by each request while it runs. Share one to limit several
-        operations, or files, together.
+    ``path`` is a pattern, or patterns, of paths on ``fs``, as its ``_ils``
+    takes them: a trailing "/" matches only directories. ``maxdepth`` is how
+    deep a ``**`` goes, and ``withdirs`` whether directories can match, as with
+    fsspec's ``_glob``. ``ils_kwargs`` go to each ``_ils``, as fsspec's
+    ``glob`` passes its own on.
 
-    Returns
-    -------
-    Operation
-        Yielding the ``ils`` entry of each path matched, or the error of a
-        folder that failed to list. Its state is a `GlobState`.
-
-    Raises
-    ------
-    ValueError
-        If ``maxdepth`` is less than 1, or a ``**`` is not a whole segment.
-
-    See Also
-    --------
-    tree_find : Every path in a tree.
-    tree_walk : The walk under it.
-
-    Examples
-    --------
-    >>> limit = asyncio.Semaphore(32)  # Shared, e.g. by a filesystem's operations.
-    >>> glob = tree_glob(
-    ...     "data/*/2024/*.parquet", ils=fs._ils, info=fs._info, concurrency_limit=limit
-    ... )
-    >>> async with glob as matches:
-    ...     async for match in matches:
-    ...         if isinstance(match, Exception):
-    ...             raise match
-    ...         print(match["name"])
-    data/sales/2024/part-0.parquet
+    The operation yields the ``_ils`` entry of each path matched, or the error
+    of a directory that failed to list, and its state is a `GlobState`. The call
+    raises ValueError if ``maxdepth`` is less than 1, or a ``**`` is not a
+    whole segment.
     """
     _check_maxdepth(maxdepth)
-
     literals: list[str] = []
     searches: list[_Search] = []
     for pattern in [path] if isinstance(path, str) else path:
@@ -149,17 +127,18 @@ def tree_glob(
         op: Operation[dict[str, Any], GlobState],
     ) -> AsyncGenerator[dict[str, Any] | Exception]:
         found: set[str] = set()
-        async for entry in _infos(info, literals, concurrency_limit, op, found):
+        infos = _infos(fs, literals, op, found)
+        async for entry in infos:
             yield entry
 
         for root, group in _walks(searches):
             if op.cancelling():
                 return
-            walk = _walk(ils, info, root, group, concurrency_limit, op, found)
+            walk = _walk(fs, root, group, op, found, ils_kwargs)
             async for match in walk:
                 yield match
 
-    return Operation(run, GlobState(folders_listed=0))
+    return Operation(run, GlobState(directories_listed=0))
 
 
 def _walks(searches: list[_Search]) -> list[tuple[str, list[_Search]]]:
@@ -177,29 +156,28 @@ def _walks(searches: list[_Search]) -> list[tuple[str, list[_Search]]]:
 
 
 async def _walk(
-    ils: _Ils,
-    info: _Info,
+    fs: Any,
     root: str,
     searches: list[_Search],
-    concurrency_limit: asyncio.Semaphore,
     op: Operation[dict[str, Any], GlobState],
     found: set[str],
+    ils_kwargs: dict[str, Any] | None,
 ) -> AsyncGenerator[dict[str, Any] | Exception]:
     """The matches of patterns in one tree, walked from ``root``."""
     depths = [s.depth_from(root) for s in searches]
 
-    # As fsspec's _glob: a pattern under a missing folder, or a file, matches
-    # nothing. Its find includes the root folder itself, which few patterns
+    # As fsspec's _glob: a pattern under a missing directory, or a file, matches
+    # nothing. Its find includes the root directory itself, which few patterns
     # match.
     steps = _find_listings(
-        ils,
-        info,
+        fs,
         root,
         maxdepth=None if None in depths else max(d for d in depths if d is not None),
         descend=lambda e: any(s.descend(e) for s in searches),
-        concurrency_limit=concurrency_limit,
+        whole=lambda e: any(s.whole(e) for s in searches),
+        ils_kwargs=ils_kwargs,
         stopping=op.cancelling,
-        folder_root=bool(root)
+        dir_root=bool(root)
         and any(s.matched({"name": root, "type": "directory"}) for s in searches),
     )
 
@@ -230,9 +208,10 @@ def _matches_in(
 
     op.state = GlobState(
         errors=state.errors + (listing.error is not None),
-        current=listing.folder,
-        # Depth 0 is the root's own entry: no folder listed.
-        folders_listed=state.folders_listed + (listing.depth > 0 and listing.last),
+        current=listing.directory,
+        # Depth 0 is the root's own entry: no directory listed.
+        directories_listed=state.directories_listed
+        + (listing.depth > 0 and listing.last),
         matched=state.matched + len(matches) - (listing.error is not None),
     )
 

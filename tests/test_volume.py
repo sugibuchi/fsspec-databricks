@@ -23,6 +23,7 @@ from aiohttp import (
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 from fsspec.asyn import sync
+from utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks._contrib.strategy.files.fsspec_transaction import (
@@ -40,7 +41,6 @@ from fsspec_databricks.volume import (
     _Endpoint,
     _parse_endpoint,
 )
-from tests.utils import bytes_sig, datetime_eq, init_volume_test_dir, volume_download
 
 pytestmark = pytest.mark.backend("volume")
 
@@ -1246,10 +1246,12 @@ def test_volume_open_w(
     )
 
     small_data = randbytes(512 * 1023)
-    large_data = randbytes(10 * 1024 * 1023)
+    one_part = randbytes(10 * 1024 * 1023)
+    large_data = randbytes(12 * 1024 * 1024)
 
-    # A file no bigger than the smallest part is uploaded whole, a larger one in parts.
-    for data, in_parts in [(small_data, False), (large_data, True)]:
+    # A file of one part is uploaded whole: just under 10 MiB is one, as its rest would
+    # be smaller than the smallest part, 5 MiB. A larger one goes in parts.
+    for data, in_parts in [(small_data, False), (one_part, False), (large_data, True)]:
         stream = BytesIO(data)
         with fs.open(dbfs_url(f"{test_dir}/1_data.bin"), mode="wb") as f:
             while chunk := stream.read(1234 * 1000):

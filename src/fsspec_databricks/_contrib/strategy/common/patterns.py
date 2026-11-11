@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Glob patterns, matched as fsspec's ``_glob`` matches them.
 
-Both globs, `tree_glob` and `flat_glob`, match with `_Search`, so the two never
-answer differently. A `_Search` also tells which folders the pattern can still
-match in, as `tree_glob` prunes by folder.
+Both globs, `_tree_glob` and `_flat_glob`, match with `_Search`, so the two never
+answer differently. A `_Search` also tells which directories the pattern can still
+match in, as `_tree_glob` prunes by directory.
 
-To decide, a folder's path is matched with the pattern's segments, one by one.
+To decide, a directory's path is matched with the pattern's segments, one by one.
 A ``**`` matches any number of segments, so only those before the first ``**``
-can rule a folder out. Without a ``**``, nor can a folder as deep as the
-pattern, as nothing below it can match.
+can rule a directory out. Without a ``**``, a directory as deep as the pattern
+is ruled out too, as nothing below it can match.
 
 This module depends on `jobs` and `paths`.
 """
@@ -31,30 +31,28 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     from .operation import Operation
-    from .types import _Info
 
 
 async def _infos(
-    info: _Info,
+    fs: Any,
     paths: list[str],
-    concurrency_limit: asyncio.Semaphore,
     op: Operation[dict[str, Any], GlobState],
     found: set[str],
 ) -> AsyncGenerator[dict[str, Any]]:
-    """The ``info`` of each pattern without wildcards that exists, noted in ``found``.
+    """The ``_info`` of each pattern without wildcards that exists, noted in ``found``.
 
-    They run at once, each holding a permit of ``concurrency_limit``: a list of
-    plain paths may give many. The entries come as the answers arrive. Once the
-    operation is cancelled, no new ``info`` starts, but those running are
-    yielded.
+    They run at once, each holding a permit of the filesystem's
+    ``operation_limit``: a list of plain paths may give many. The entries come
+    as the answers arrive. Once the operation is cancelled, no new ``_info``
+    starts, but those running are yielded.
     """
-    requests: _Queue[str] = _Queue(concurrency_limit)
+    requests: _Queue[str] = _Queue(fs.operation_limit)
     requests.waiting.extend(dict.fromkeys(paths))
 
     async def start() -> None:
         if op.cancelling():
             requests.waiting.clear()
-        await requests.start(info)
+        await requests.start(fs._info)
 
     try:
         await start()
@@ -79,7 +77,7 @@ async def _infos(
                 op.state = GlobState(
                     errors=state.errors,
                     current=path,
-                    folders_listed=state.folders_listed,
+                    directories_listed=state.directories_listed,
                     matched=state.matched + 1,
                 )
                 yield entry
@@ -87,24 +85,32 @@ async def _infos(
         await requests.close()
 
 
-def _inside(path: str, folder: str) -> bool:
-    """Whether ``path`` is below ``folder``, "" being the top of the storage."""
-    return folder == "" or path.startswith(folder + "/")
+def _inside(path: str, directory: str) -> bool:
+    """Whether ``path`` is below ``directory``, "" being the top of the storage."""
+    return directory == "" or path.startswith(directory + "/")
 
 
 class _Prefix:
-    """A pattern's segments before its first ``**``, which decide the folders to list."""
+    """A pattern's segments before its first ``**``, which decide the directories to list."""
 
     def __init__(self, segments: list[str]) -> None:
         # Without a **, the pattern is as deep as its segments. With one, it can
-        # match at any depth: only the segments before it can rule a folder out.
+        # match at any depth: only the segments before it can rule a directory out.
         self.bounded = "**" not in segments
         if not self.bounded:
             segments = segments[: segments.index("**")]
         self.segments = [re.compile(glob_translate(s)) for s in segments]
 
+    def everything(self, relative: list[str]) -> bool:
+        """Whether the pattern prunes nothing below a directory, at that path."""
+        return (
+            not self.bounded
+            and len(relative) >= len(self.segments)
+            and self.alive(relative)
+        )
+
     def alive(self, relative: list[str]) -> bool:
-        """Whether the pattern can still match below a folder, at that path."""
+        """Whether the pattern can still match below a directory, at that path."""
         if self.bounded and len(relative) >= len(self.segments):
             return False
         return all(s.match(n) for s, n in zip(self.segments, relative, strict=False))
@@ -115,7 +121,7 @@ class _Search:
 
     It answers as a walk from its own literal root would: it matches only
     below that root, or the root itself, as deep as the pattern goes. So a walk
-    from a folder above serves it too.
+    from a directory above serves it too.
     """
 
     def __init__(
@@ -127,7 +133,7 @@ class _Search:
     ) -> None:
         self.withdirs = withdirs
 
-        # Split as fsspec does: the literal folder before the first wildcard,
+        # Split as fsspec does: the literal directory before the first wildcard,
         # and the pattern below it.
         first_magic = min(i for i in (path.find(c) for c in "*?[") if i >= 0)
         slash = path.rfind("/", 0, first_magic)
@@ -143,12 +149,12 @@ class _Search:
         self.matches = re.compile(regex).match
         self.slash_dirs = ends_with_sep or path.endswith("/**")
 
-    def depth_from(self, folder: str) -> int | None:
-        """How deep to walk from ``folder``, at or above the root, for this pattern."""
+    def depth_from(self, directory: str) -> int | None:
+        """How deep to walk from ``directory``, at or above the root, for this pattern."""
         if self.depth is None:
             return None
         between = self.root.count("/") + 1 if self.root else 0
-        above = folder.count("/") + 1 if folder else 0
+        above = directory.count("/") + 1 if directory else 0
         return self.depth + between - above
 
     def _level(self, name: str) -> int | None:
@@ -186,6 +192,18 @@ class _Search:
         if level is None or (self.depth is not None and level >= self.depth):
             return False
         return level == 0 or self.prefix.alive(name[self.start :].split("/"))
+
+    def whole(self, entry: dict[str, Any]) -> bool:
+        """Whether every directory below a directory's entry is one to descend into.
+
+        So it is at or below the pattern's first ``**``, when no depth limits
+        it: a recursive listing of the directory lists what a walk would.
+        """
+        name = entry["name"].rstrip("/")
+        level = self._level(name)
+        if level is None or self.depth is not None:
+            return False
+        return self.prefix.everything(name[self.start :].split("/") if level else [])
 
 
 def _depth(path: str, relative: str, maxdepth: int | None) -> int | None:

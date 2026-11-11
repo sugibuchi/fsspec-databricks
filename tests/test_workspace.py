@@ -17,10 +17,10 @@ from databricks.sdk.service.workspace import (
 )
 from fsspec.asyn import sync
 from fsspec_alt_strategies.monitor import Monitor, monitoring
+from utils import bytes_sig, init_workspace_test_dir, workspace_download
 
 from fsspec_databricks import DatabricksFileSystem
 from fsspec_databricks.workspace import WorkspaceFileSystem
-from tests.utils import bytes_sig, init_workspace_test_dir, workspace_download
 
 pytestmark = pytest.mark.backend("workspace")
 
