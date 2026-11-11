@@ -42,18 +42,18 @@ async def _tree_ils(
 ) -> AsyncGenerator[dict[str, Any]]:
     """List all below a directory depth first, by one ``_ils`` per directory.
 
-    It yields what a recursive ``_ils`` yields: each entry below ``path``, at any
-    depth, depth first. A directory's entries come in the order its ``_ils``
-    gives them, each subdirectory's followed by all below it. A
-    file lists itself, as ``_ils`` lists it. A directory listed twice, e.g. as a
+    It yields what a recursive ``_ils`` yields: each entry below ``path``, at
+    any depth, depth first. A directory's entries come in the order its
+    ``_ils`` gives them, each subdirectory's followed by all below it. A file
+    lists itself, as ``_ils`` lists it. A directory listed twice, e.g. as a
     prefix and as its marker object, is yielded twice, but listed once.
 
-    It lists the directories that come next while it yields, up to
-    `_AHEAD` of them, the nearest first. Each such listing holds a permit of the
-    filesystem's ``operation_limit`` while it reads a batch of entries, a page's
-    worth: what it read waits for its turn, holding no permit. The directory
-    being yielded is listed under the permit its caller holds, as for any
-    ``_ils``. So it needs no permit more to go on.
+    It lists the directories that come next while it yields, up to `_AHEAD` of
+    them, the nearest first. Each such listing holds a permit of the
+    filesystem's ``operation_limit`` while it reads a batch of entries, a
+    page's worth: what it read waits for its turn, holding no permit. The
+    directory being yielded is listed under the permit its caller holds, as for
+    any ``_ils``. So it needs no permit more to go on.
 
     A directory below ``path`` that fails to list raises its error, noted with
     its path, and ends the listing: a recursive listing cannot go on past a

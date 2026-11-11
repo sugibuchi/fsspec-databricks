@@ -41,7 +41,7 @@ from .walk import _flat_walk
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import AsyncGenerator, AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 
     from fsspec_alt_strategies.profile import StorageProfile
 
@@ -56,9 +56,9 @@ class FlatFileSystem(_BaseFileSystem):
     prefix in one paginated request. It overrides fsspec's ``_walk``,
     ``_find``, ``_du``, ``_glob``, and ``_rm``, ``_copy`` and ``_mv`` when
     recursive, with the flat strategies. These list every key under a prefix
-    with a recursive ``_ils``, and act on each key as it arrives. Their answers are
-    fsspec's, and their failures are raised, a single one as it is, several in
-    an ExceptionGroup.
+    with a recursive ``_ils``, and act on each key as it arrives. Their answers
+    are fsspec's, and their failures are raised, a single one as it is, several
+    in an ExceptionGroup.
 
     A subclass implements the storage's primitives:
 
@@ -68,9 +68,11 @@ class FlatFileSystem(_BaseFileSystem):
     - ``_rm_files``, a deletion of several files in one request, with
       ``rm_batch_size``;
     - ``_info`` and ``_rm_file``;
-    - ``_cp_file_entry`` and ``_mv_file_entry``, a copy and a move of a key by its entry,
-      as its listing gave it, e.g. with its size. fsspec's ``_cp_file`` and
-      ``_mv_file`` ask the entry, then call them;
+    - ``_rmdir`` and ``_makedirs``, for fsspec's own methods only, e.g. making
+      or deleting a bucket: fsspec's defaults do nothing;
+    - ``_cp_file_entry`` and ``_mv_file_entry``, a copy and a move of a key by
+      its entry, as its listing gave it, e.g. with its size. fsspec's
+      ``_cp_file`` and ``_mv_file`` ask the entry, then call them;
     - ``open_async``, giving its files ``io_limit`` as their concurrency
       limit, and ``_open``.
 
@@ -104,7 +106,7 @@ class FlatFileSystem(_BaseFileSystem):
     Raises
     ------
     ValueError
-        If a concurrency is less than 1, or ``rm_batch_size`` is not set. Also
+        If a concurrency or ``rm_batch_size`` is less than 1, or not set. Also
         if ``storage_profile`` is not set while ``_load_storage_profile`` is
         not overridden.
 
@@ -123,6 +125,8 @@ class FlatFileSystem(_BaseFileSystem):
     ...     async def _rm_files(self, paths): ...
     ...     async def _info(self, path, **kwargs): ...
     ...     async def _rm_file(self, path, **kwargs): ...
+    ...     async def _rmdir(self, path): ...
+    ...     async def _makedirs(self, path, exist_ok=False): ...
     ...     async def _cp_file_entry(self, entry, path2, **kwargs): ...
     ...     async def _mv_file_entry(self, entry, path2, **kwargs): ...
     ...
@@ -193,13 +197,45 @@ class FlatFileSystem(_BaseFileSystem):
         """
 
     @abstractmethod
-    async def _rm_files(self, paths: list[str]) -> None:
+    async def _rm_files(self, paths: list[str]) -> Mapping[str, Exception] | None:
         """Delete several files in one request, e.g. with S3's DeleteObjects.
 
-        A key missing is no error. It raises if any is not deleted. The
-        strategies give it only keys they listed, or found by an ``info``: it
-        need not check them again.
+        A key missing is no error. It returns the keys it could not delete,
+        each with an error of its own, e.g. from DeleteObjects' ``Errors``:
+        the strategies count the others deleted. None, or nothing, says all
+        were. It raises only if the request failed whole, which fails every
+        key.
+
+        The strategies give it only keys they listed, or found by an
+        ``info``: it need not check them again. A batch may hold keys of
+        several buckets, as a root at the storage's root or several roots list
+        across them. A storage whose request takes one bucket sends one per
+        bucket of the batch.
         """
+
+    @abstractmethod
+    async def _rmdir(self, path: str) -> None:
+        """Delete an empty directory: on an object store, a bucket.
+
+        The strategies never call it: keys are their only directories. fsspec's
+        own methods do, e.g. the sync ``rmdir``. fsspec's default does nothing,
+        so a storage with buckets implements it, and one without may too.
+        """
+
+    @abstractmethod
+    async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
+        """Create a directory and its parents: on an object store, a bucket, if missing.
+
+        The strategies never call it. fsspec's own methods do, e.g. ``mkdir``
+        and ``makedirs``. fsspec's default does nothing, so a storage with
+        buckets implements it. One with keys only may do nothing on purpose.
+        """
+
+    async def _mkdir(
+        self, path: str, create_parents: bool = True, **kwargs: Any
+    ) -> None:
+        """Create a directory, as fsspec's ``_mkdir`` does: by ``_makedirs``."""
+        await self._makedirs(path, exist_ok=False)
 
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
         """List a directory, as fsspec's ``_ls`` does: all of ``_ils``'s entries, or their names."""
@@ -237,10 +273,10 @@ class FlatFileSystem(_BaseFileSystem):
     ) -> None:
         """Move a key within the storage, by its entry, to ``path2``.
 
-        ``entry`` is as `_cp_file_entry` takes it. The flat strategies call it only
-        where the profile's ``renames_files=True`` says the storage renames: a
-        directory's marker too, its name ending with "/". One with no rename
-        copies, then deletes the source, for fsspec's ``_mv_file``.
+        ``entry`` is as `_cp_file_entry` takes it. The flat strategies call it
+        only where the profile's ``renames_files=True`` says the storage
+        renames: a directory's marker too, its name ending with "/". One with no
+        rename copies, then deletes the source, for fsspec's ``_mv_file``.
         """
 
     @abstractmethod
@@ -418,8 +454,11 @@ class FlatFileSystem(_BaseFileSystem):
         )
         _raise(errors, "Moving")
 
-    # fsspec makes sync methods only from the async ones it knows: _mv is not. It awaits
-    # the instance's own, so that a subclass's override is the one run.
+    # fsspec makes sync methods only from the async ones it knows: _mv and _rmdir are
+    # not. Each awaits the instance's own, so that a subclass's override is the one run.
 
     def mv(self, path1: str | list[str], path2: str, **kwargs: Any) -> None:
         return sync(self.loop, self._mv, path1, path2, **kwargs)
+
+    def rmdir(self, path: str) -> None:
+        return sync(self.loop, self._rmdir, path)

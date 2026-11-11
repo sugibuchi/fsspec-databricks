@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Tsuyoshi SUGIBUCHI
 # SPDX-License-Identifier: Apache-2.0
-"""The engine under the strategies that change a storage, such as _tree_rm.
+"""The engine under the strategies that change a storage, such as ``_tree_rm``.
 
 They find what to change, e.g. by walking a tree or listing a prefix, and start
 their jobs, e.g. deleting a file, as each item found arrives. `_Jobs` runs both
@@ -48,9 +48,10 @@ if TYPE_CHECKING:
     _Transfer: TypeAlias = Callable[[dict[str, Any], str], Awaitable[None]]
     """How one file goes from its source entry to a destination path.
 
-    It is the source's ``_cp_file_entry`` or ``_mv_file_entry`` within one storage, or a
-    router's copy or move of a file between two. The entry is the source's, as
-    its listing or ``_info`` gave it, its ``"name"`` the source path.
+    It is the source's ``_cp_file_entry`` or ``_mv_file_entry`` within one
+    storage, or a router's copy or move of a file between two. The entry is the
+    source's, as its listing or ``_info`` gave it, its ``"name"`` the source
+    path.
     """
 
 _T = TypeVar("_T")
@@ -124,8 +125,8 @@ def _roots_of(
 ) -> _Roots:
     """The roots of a glob's matches, as fsspec's ``_expand_path`` finds them.
 
-    A match inside a directory that matches is left out: walking the directory finds
-    it. Matching nothing raises FileNotFoundError, as fsspec does.
+    A match inside a directory that matches is left out: walking the directory
+    finds it. Matching nothing raises FileNotFoundError, as fsspec does.
     """
     if not matches and not errors:
         raise FileNotFoundError(pattern)
@@ -477,10 +478,9 @@ class _CopyJobs(_Jobs):
     a path under a root of ``places`` goes there instead. `prepare` sets them,
     before `target` is used.
 
-    The destination is described by ``dst_fs``, the filesystem copied
-    to, and its profile, unknown if it has none. Within one storage, it is the
-    source, and ``same_storage`` is True: a path copied onto itself, or under
-    itself, is refused. Between two, a path may go to the same path, or under
+    ``dst_fs`` is the filesystem copied to, described by its profile, unknown
+    if it has none. Within one storage, it is the source, and ``same_storage``
+    is True: a path copied onto itself, or under itself, is refused. Between two, a path may go to the same path, or under
     it, as that is another storage's.
     """
 

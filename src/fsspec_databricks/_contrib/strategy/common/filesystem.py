@@ -9,6 +9,7 @@ Its ``_cp_file`` and ``_mv_file`` ask a path's ``_info``, then copy or move by
 the families' ``_cp_file_entry`` and ``_mv_file_entry``. fsspec's methods on
 many paths, such as ``_cat``, call those on one path ``io_concurrency`` at a
 time.
+
 The functions below it shape the answers and errors of fsspec's methods, as
 the families' classes give them.
 
@@ -127,8 +128,8 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         A subclass overrides it where the profile is found by a request, e.g.
         whether an account has a hierarchical namespace. It is awaited once,
         by `_get_storage_profile`, which keeps what it returns. One that cannot
-        tell yet raises, and is awaited again next time, or returns
-        ``StorageProfile()``, right on any storage, kept as any profile is.
+        tell yet either raises, to be awaited again on the next call, or
+        returns ``StorageProfile()``, right on any storage and then kept.
         """
         return self.storage_profile  # type: ignore[attr-defined, no-any-return]
 
@@ -212,8 +213,8 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
 
         The file's requests each hold a permit of ``io_limit``. A subclass
         overriding this, or ``_pipe_file``, ``_get_file`` or ``_put_file``, e.g.
-        with one download, holds a permit for each request it sends itself,
-        and none while it calls the filesystem's files, which take their own:
+        with one download, holds a permit for each request it sends itself. It
+        holds none while it calls the filesystem's files, which take their own:
         held around them, it would wait for itself. fsspec's methods on many
         paths call it at most ``io_concurrency`` at a time, whatever it does.
         """
@@ -282,11 +283,10 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
                     callback.relative_update(len(chunk))
 
     # fsspec's methods on many paths call the method on one path for each, up to
-    # batch_size at a time: by default, io_concurrency. So a subclass's
-    # _cat_file holding no permit of io_limit, e.g. one download, is still
-    # bounded when cat gives it many paths, and needs no permit taken for it:
-    # a permit held around a call reading through files would deadlock, as
-    # each of their requests takes one more.
+    # batch_size at a time: here by default, io_concurrency. So they bound a
+    # subclass's _cat_file holding no permit, e.g. one download, without
+    # taking a permit around each call, which would wait for itself as
+    # _cat_file says.
 
     def _io_batch_size(self, batch_size: int | None) -> int | None:
         """The paths handled at a time: the call's, else the instance's, else ``io_concurrency``.
@@ -331,8 +331,9 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         """Read byte ranges of files, as fsspec's ``cat_ranges`` does, in fewer requests.
 
         fsspec's sends one ``_cat_file`` per range. This merges the ranges of a
-        file whose gaps are at most ``max_gap``, or ``ranges_max_gap``, into one
-        range of at most ``ranges_max_block``, overlaps and repeats included.
+        file whose gaps are at most ``max_gap``, or else ``ranges_max_gap``,
+        fetching the gaps too. A merged range, overlaps and repeats included,
+        is at most ``ranges_max_block``.
         A merged range from twice ``ranges_split_size`` is fetched in parts of
         at least that, up to ``ranges_spread`` of them, at once. Each range is
         then cut from what was fetched, in the order asked. A range counted
@@ -341,8 +342,7 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
 
         It answers as fsspec's: the same bytes, a range beyond the end short or
         empty, and a failure in place of each range it covers with
-        ``on_error="return"``, or raised otherwise. It fetches the gaps too, at
-        most ``max_gap`` bytes each, for fewer requests.
+        ``on_error="return"``, or raised otherwise.
         """
         starts, ends = _range_bounds(paths, starts, ends)
         gap = self.ranges_max_gap if max_gap is None else max_gap
@@ -362,7 +362,11 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         batch_size: int | None,
         kwargs: dict[str, Any],
     ) -> list[bytearray | BaseException]:
-        """Each range's bytes, or its first part's failure: its parts all sent at once, io_concurrency at a time."""
+        """Each range's bytes, or its first failed part's error.
+
+        The parts of all the ranges run together, as many at a time as
+        `_io_batch_size` says.
+        """
         parts = [
             (index, part)
             for index, (_, start, end) in enumerate(fetches)

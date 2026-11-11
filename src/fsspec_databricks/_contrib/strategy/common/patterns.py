@@ -8,8 +8,8 @@ match in, as `_tree_glob` prunes by directory.
 
 To decide, a directory's path is matched with the pattern's segments, one by one.
 A ``**`` matches any number of segments, so only those before the first ``**``
-can rule a directory out. Without a ``**``, nor can a directory as deep as the
-pattern, as nothing below it can match.
+can rule a directory out. Without a ``**``, a directory as deep as the pattern
+is ruled out too, as nothing below it can match.
 
 This module depends on `jobs` and `paths`.
 """

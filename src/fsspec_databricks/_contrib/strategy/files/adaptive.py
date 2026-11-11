@@ -107,10 +107,9 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     - A seek within the blocks fetched keeps them and the run. So does a seek
       forward past them by at most ``max_gap``, and by less than the run has
       read: the bytes skipped are not fetched, and the run goes on fetching
-      ahead. A seek
-      elsewhere cancels the blocks in flight and ends the run, so that
-      scattered reads, such as a Parquet file's column chunks, fetch nothing
-      ahead.
+      ahead. A seek elsewhere cancels the blocks in flight and ends the run,
+      so that scattered reads, such as a Parquet file's column chunks, fetch
+      nothing ahead.
     - Fetched blocks are kept, up to ``kept_size`` bytes, for later reads that
       come back to them.
 
@@ -140,9 +139,8 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     by the modification time and size its status gives:
 
     - ``version`` is then that token, from the info the file was opened with.
-    - `_current_version` returns the token as the storage has it now. Each
-      fetch awaits it once its bytes arrive, and passes it to
-      `_check_version`. It returns None by default, which checks nothing.
+    - `_current_version` returns the token as the storage has it now, which
+      each fetch checks once its bytes arrive.
     - Checked after the bytes arrive, a token unchanged shows they came from
       that version. This detects a file replaced while read, without
       preventing it: the storage cannot refuse another version's bytes. It
@@ -170,8 +168,8 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
         The smallest part a read is split into. The class attribute if None.
     max_gap : int, optional
         The longest forward seek past the blocks fetched that keeps the run,
-        if shorter than what the run has read.
-        The class attribute if None, ``min_block_size`` if that is None too.
+        if shorter than what the run has read. The class attribute if None,
+        ``min_block_size`` if that is None too.
     kept_size : int, optional
         The most bytes of fetched blocks kept. The class attribute if None.
     version : str, optional
@@ -227,7 +225,10 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
     """
 
     max_gap: int | None = None
-    """The longest forward seek past the blocks fetched that keeps the run: ``min_block_size`` if None."""
+    """The longest forward seek past the blocks fetched that keeps the run.
+
+    None, the default, makes it ``min_block_size``.
+    """
 
     kept_size: int = 8 * _MiB
     """The most bytes of fetched blocks kept for reads that come back to them."""
@@ -457,9 +458,8 @@ class AdaptiveReadableFile(_AdaptiveFile, ABC):
             return
 
         # A run that has read n bytes is assumed to read n more. Topping them up
-        # only once half are read keeps the requests few and large.
-        # At most a batch of the largest blocks, which keeps the memory of the
-        # blocks fetched but not yet read bounded.
+        # only once half are read keeps the requests few and large. Fetching at
+        # most a batch of the largest blocks bounds the memory of those unread.
         ahead = min(self._run + end - pos, self.spread * self.max_block_size)
         start = queue[-1].end
         if start - end < ahead // 2:
@@ -542,35 +542,31 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
     A subclass implements the storage's requests: one upload for small files,
     and a multipart upload's start, parts, completion and abort.
 
-    - Until ``min_multipart_size`` bytes are written, they are buffered. A file
-      closed by then is uploaded in one request, and so is one no bigger than
-      ``min_block_size`` when closed.
-    - Beyond, parts are uploaded as soon as they fill, as the concurrency
-      limit allows, while writing goes on. A file that has had n bytes
-      written is assumed to get n more: its parts grow, so as to split that
-      into ``spread`` parts, from ``min_block_size`` up to ``max_block_size``.
-    - A write waits while the concurrency limit allows no upload. So the
-      memory a file holds is its parts in flight, at most one per permit, and
-      one part being filled. A limit shared by files bounds their parts in
-      flight together: a filesystem's ``io_limit``, shared by all its files,
-      bounds the bytes all its writes have in flight to its permits times
-      ``max_block_size``, e.g. 16 times 16 MiB. That is the memory to plan for,
-      however many files are written at once, with one part being filled per
-      file. A smaller limit, or ``max_block_size``, lowers it.
-    - Every part but the last has at least ``min_block_size`` bytes, as storages
-      such as S3 require. So ``flush`` uploads nothing.
+    - Writes are buffered up to ``min_multipart_size``. A file closed before
+      any part was sent goes in one request if it is below that, no bigger
+      than ``min_block_size``, or would go as one part, e.g. with ``spread`` 1.
+    - Beyond, parts are uploaded as they fill, while writing goes on. A file
+      with n bytes written is assumed to get n more: its parts grow to split
+      that into ``spread``, from ``min_block_size`` up to ``max_block_size``.
+    - Every part but the last has at least ``min_block_size`` bytes, as
+      storages such as S3 require. So ``flush`` uploads nothing.
+    - A write waits while the concurrency limit allows no upload. So a file
+      holds at most one part in flight per permit, and one part being filled.
+    - Files sharing a limit share that bound. A filesystem's ``io_limit``
+      bounds all its writes in flight to its permits times ``max_block_size``,
+      e.g. 16 times 16 MiB, plus a part being filled per file. A smaller limit
+      or ``max_block_size`` lowers it.
     - ``flush(force=True)`` finishes the file as closing does, as fsspec's
-      files do: the rest is uploaded, and the upload completed. Closing then
-      sends nothing more, and writing raises ValueError.
+      files do. Closing then sends nothing more, and writing raises ValueError.
     - A part that fails stops the writes, and closing aborts the upload. Either
       raises OSError, its cause the part's error. Any failure or cancellation
       while closing or force-flushing aborts too, as does a failed start.
     - Leaving a ``with`` block by an exception sends no more data: a small
-      file is never sent, and a multipart upload is aborted. So does a file the
-      garbage collector finds open.
+      file is never sent, and a multipart upload is aborted. The garbage
+      collector does the same with a file it finds open.
     - An abort failing too adds a note to the error raised, never replacing it.
 
-    What a failed write leaves at the path is the storage's. The file only
+    What a failed write leaves at the path is the storage's: the file only
     decides which requests to send, and when. On a storage where an upload is
     invisible until the request completing it, such as S3, Google Cloud
     Storage or Azure, the file is written whole, or not at all, and a failed
@@ -875,15 +871,18 @@ class AdaptiveWritableFile(_AdaptiveFile, ABC):
         if not self._multipart and small and not closing:
             return
 
-        # Below min_multipart_size, or no bigger than the smallest part, one
-        # request uploads it, where a multipart upload would add its start and
-        # completion. A bigger file goes in parts, sent at once, which a storage
-        # may take faster than one request. Beyond the cap, even a small file
-        # goes in parts.
+        # Closed with nothing sent, a file that is small, or would go as one
+        # part, goes in one request: a multipart upload would add its start
+        # and completion. A file of several parts goes in parts, sent at once,
+        # which a storage may take faster than one request. Beyond the cap,
+        # even a small file goes in parts.
+        one_part = len(buffer) - min(self._block_size(len(buffer)), cap) < (
+            self.min_block_size
+        )
         if (
             closing
             and not self._multipart
-            and (small or len(buffer) <= self.min_block_size)
+            and (small or len(buffer) <= self.min_block_size or one_part)
             and len(buffer) <= cap
         ):
             # Even an empty file is created.

@@ -34,13 +34,13 @@ A storage with a way of its own gets a subclass of `FileTransaction`.
 ...     return TransactionFile(LocalBufferTransaction(path, opener))
 
 A `TransactionFile` is a file: text and compression wrappers work on it. Its
-methods are sync, as fsspec's transactions are: call them from a thread other
-than the filesystem's loop, as fsspec's sync API. fsspec commits a
+methods are sync, as fsspec's transactions are: as with fsspec's sync API, call
+them from a thread other than the filesystem's loop. fsspec commits a
 transaction's files one after another: a transaction is not atomic across
 files.
 
-This module depends on nothing but the standard library: it imports the file
-classes only for type checking.
+This module depends on nothing else in the package: it imports `adaptive` only
+for type checking.
 """
 
 from __future__ import annotations

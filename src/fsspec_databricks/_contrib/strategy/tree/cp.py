@@ -66,10 +66,10 @@ def _tree_cp(
     with the other. A path inside another one in the list is copied with that
     one only.
 
-    The tree is walked as `_tree_walk` walks it. Each directory's files are copied
-    as soon as the directory is listed, each by a ``cp_entry``. A directory is
-    created at the destination before files are copied into it, and for each
-    empty directory.
+    The tree is walked as `_tree_walk` walks it. Each directory's files are
+    copied as soon as the directory is listed, each by a ``cp_entry``. A
+    directory is created at the destination before files are copied into it,
+    and for each empty directory.
 
     With ``maxdepth``, it copies the files fsspec's ``copy`` copies with it:
     those at most ``maxdepth`` levels below ``path1``, or below a pattern's
@@ -104,8 +104,9 @@ def _tree_cp(
 
     Requests: one ``dst_info`` for ``path2``, unless it ends with "/" or
     ``path1`` is a pattern or a list. Patterns, or a list, add the requests of
-    their `_tree_glob`. One recursive ``_ils`` per root, or one ``_ils`` per
-    directory with ``maxdepth``, one ``cp_entry`` per file, and
+    their `_tree_glob`. One recursive ``_ils`` per root, which a storage
+    without a recursive listing answers with one per directory, or one
+    ``_ils`` per directory with ``maxdepth``. One ``cp_entry`` per file, and
     one ``dst_makedirs`` per destination directory with files or empty. A
     destination refusing to overwrite costs a ``dst_info``, a ``dst_rm_file``
     and a ``cp_entry`` more per file it refused. The ``dst_info`` checks it is
@@ -114,21 +115,20 @@ def _tree_cp(
     a ``cp_entry`` between two storages too.
 
     The destination's profile's ``parents_required=False``, or
-    ``implicit_directories=True``, saves the ``dst_makedirs`` of each directory with
-    files, as their copies create it.
+    ``implicit_directories=True``, saves the ``dst_makedirs`` of each directory
+    with files, as their copies create it.
 
-    The primitives are called above by what they do: ``_ils`` and ``info`` are
-    the source's ``_ils`` and ``_info``, ``dst_info``, ``dst_makedirs`` and
-    ``dst_rm_file`` the destination's ``_info``, ``_makedirs`` and
-    ``_rm_file``.
+    The primitives are called above by what they do: ``_ils`` is the source's
+    ``_ils``, and ``dst_info``, ``dst_makedirs`` and ``dst_rm_file`` the
+    destination's ``_info``, ``_makedirs`` and ``_rm_file``.
 
     ``src_fs`` is the filesystem copied from, and ``dst_fs`` the one copied
-    to, ``src_fs`` again within one storage. ``path1`` is a directory, a file, a
-    glob pattern, or a list of them, as the source's ``_ils`` takes paths.
-    ``cp_entry(entry, destination)`` copies a file: the source's ``_cp_file_entry``
-    by default, within one storage. ``same_storage`` is whether ``dst_fs`` is
-    ``src_fs``, unless given. ``maxdepth`` of 1 copies only the files in
-    ``path1``.
+    to, ``src_fs`` again within one storage. ``path1`` is a directory, a file,
+    a glob pattern, or a list of them, as the source's ``_ils`` takes paths.
+    ``cp_entry(entry, destination)`` copies a file: the source's
+    ``_cp_file_entry`` by default, within one storage. ``same_storage`` is
+    whether ``dst_fs`` is ``src_fs``, unless given. ``maxdepth`` of 1 copies
+    only the files in ``path1``.
 
     The operation yields ``(source, destination)`` for each file copied, or an
     error, and its state is a `CpState`. The call raises ValueError if

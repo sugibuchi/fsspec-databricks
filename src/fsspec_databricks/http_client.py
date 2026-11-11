@@ -41,7 +41,8 @@ class AioHttpSessionSupport:
     def _init_session(self, connection_pool_size: int | None = None) -> None:
         if connection_pool_size is not None:
             self.connection_pool_size = connection_pool_size
-        # Made on the loop that uses it, as TCPConnector needs a running loop.
+        # Made on first use, as TCPConnector needs a running loop. A file system
+        # runs on one loop, as fsspec caches it: its loop is kept to close it there.
         self._session: ClientSession | None = None
         self._session_loop: asyncio.AbstractEventLoop | None = None
 
@@ -68,19 +69,14 @@ class AioHttpSessionSupport:
             sync(loop, session.close, timeout=5.0)
 
     async def _get_session(self) -> ClientSession:
-        """The aiohttp session of the running loop, made on first use."""
+        """The aiohttp session of the file system, made on first use."""
         if self.closed:
             raise RuntimeError("The file system is already closed")
-        loop = asyncio.get_running_loop()
-        if (
-            self._session is None
-            or self._session.closed
-            or self._session_loop is not loop
-        ):
+        if self._session is None:
             self._session = ClientSession(
                 connector=TCPConnector(limit=self.connection_pool_size)
             )
-            self._session_loop = loop
+            self._session_loop = asyncio.get_running_loop()
         return self._session
 
 

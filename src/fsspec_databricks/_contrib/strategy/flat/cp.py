@@ -43,8 +43,8 @@ def _flat_cp(
     """Copy the keys under a prefix, copying as the listing goes on.
 
     It places the paths as fsspec's ``copy`` with ``recursive=True`` does, as
-    `_tree_cp` places them: into ``path2`` if it is an existing directory or ends
-    with "/", and ``path1`` does not end with "/", otherwise onto it. A glob
+    `_tree_cp` places them: into ``path2`` if it is an existing directory or
+    ends with "/", and ``path1`` does not end with "/", otherwise onto it. A glob
     pattern copies each path it matches, relative to the matches' common
     prefix. A list copies each path it names or matches into ``path2``, under
     its name, as ``cp -r`` does. Existing files are overwritten.
@@ -52,19 +52,19 @@ def _flat_cp(
     The keys are listed as `_flat_find` lists them, and each is copied by one
     ``cp_entry`` as soon as the listing gives it.
 
-    The destination is described by ``dst_fs`` and its
-    ``storage_profile``, unknown if it has none, and may be flat or a tree.
-    Within one storage, ``dst_fs`` is ``src_fs``, and ``same_storage`` is
-    True: a path copied onto itself, or under itself, is refused. Between two,
-    ``cp_entry`` copies from one to the other, e.g. the router's
-    ``_cross_fs_cp_entry``, and every byte may go through the caller. A path
-    may then go to the same path, or under it.
+    The destination is described by ``dst_fs`` and its ``storage_profile``,
+    unknown if it has none, and may be flat or a tree. Within one storage,
+    ``dst_fs`` is ``src_fs``, and ``same_storage`` is True: a path copied onto
+    itself, or under itself, is refused. Between two, ``cp_entry`` copies from
+    one to the other, e.g. the router's ``_cross_fs_cp_entry``, and every byte
+    may go through the caller. A path may then go to the same path, or under
+    it.
 
-    Unless the profile says it needs none, a directory is made at the destination
-    before the first key copied into it, by one ``dst_makedirs``. A directory's
-    marker, a key ending with "/", is no file to copy: its directory is made at
-    the destination instead, so that a tree keeps it even when empty, unless
-    the destination's directories are implicit.
+    Unless the profile says it needs none, a directory is made at the
+    destination before the first key copied into it, by one ``dst_makedirs``.
+    A directory's marker, a key ending with "/", is no file to copy: its
+    directory is made at the destination instead, so that a tree keeps it even
+    when empty, unless the destination's directories are implicit.
 
     With ``maxdepth``, it copies the keys fsspec's ``copy`` copies with it:
     those at most ``maxdepth`` levels below ``path1``, or below a pattern's
@@ -85,8 +85,8 @@ def _flat_cp(
     copies start after the first page of the listing, not after the last.
     Between two storages, it wins over fsspec's way too, a ``get`` to local
     files then a ``put``: the data needs no local disk. It loses on sources
-    with a hierarchical namespace, whose directories a listing by prefix does not
-    see: `_tree_cp` suits those.
+    with a hierarchical namespace, whose directories a listing by prefix does
+    not see: `_tree_cp` suits those.
 
     Once cancelled, it takes nothing more from the listing, and starts no new
     copy, but yields the outcomes of those sent. Closed, it waits for those
@@ -96,8 +96,8 @@ def _flat_cp(
 
     Requests: one ``dst_info`` for ``path2``, unless it ends with "/" or
     ``path1`` is a pattern or a list. Patterns, or a list, add the requests
-    of their `_flat_glob`. The pages of one recursive ``ils`` per directory copied,
-    one after another, one ``cp_entry`` per key, and one ``dst_makedirs`` per
+    of their `_flat_glob`. The pages of one recursive ``_ils`` per root, one
+    after another, one ``cp_entry`` per key, and one ``dst_makedirs`` per
     destination directory with keys or a marker. A destination refusing to
     overwrite costs a ``dst_info``, a ``dst_rm_file`` and a ``cp_entry`` more
     per file it refused. Each request but the listing holds a permit of the
@@ -105,22 +105,21 @@ def _flat_cp(
     storages too.
 
     The destination's profile's ``parents_required=False``, or
-    ``implicit_directories=True``, saves the ``dst_makedirs`` of each directory with
-    keys, as their copies create it. ``implicit_directories=True`` saves those of
-    the markers too.
+    ``implicit_directories=True``, saves the ``dst_makedirs`` of each directory
+    with keys, as their copies create it. ``implicit_directories=True`` saves
+    those of the markers too.
 
-    The primitives are called above by what they do: ``ils`` and
-    ``info`` are the source's ``_ils`` and ``_info``, ``dst_info``,
-    ``dst_makedirs`` and ``dst_rm_file`` the destination's ``_info``,
-    ``_makedirs`` and ``_rm_file``.
+    The primitives are called above by what they do: ``_ils`` is the source's
+    ``_ils``, and ``dst_info``, ``dst_makedirs`` and ``dst_rm_file`` the
+    destination's ``_info``, ``_makedirs`` and ``_rm_file``.
 
     ``src_fs`` is the filesystem copied from, and ``dst_fs`` the one copied
-    to, ``src_fs`` again within one storage. ``path1`` is a directory, a file, a
-    glob pattern, or a list of them, as the source's ``_ils`` takes paths.
-    ``cp_entry(entry, destination)`` copies a file: the source's ``_cp_file_entry``
-    by default, within one storage. ``same_storage`` is whether ``dst_fs`` is
-    ``src_fs``, unless given. ``maxdepth`` of 1 copies only the keys right in
-    ``path1``.
+    to, ``src_fs`` again within one storage. ``path1`` is a directory, a file,
+    a glob pattern, or a list of them, as the source's ``_ils`` takes paths.
+    ``cp_entry(entry, destination)`` copies a file: the source's
+    ``_cp_file_entry`` by default, within one storage. ``same_storage`` is
+    whether ``dst_fs`` is ``src_fs``, unless given. ``maxdepth`` of 1 copies
+    only the keys right in ``path1``.
 
     The operation yields ``(source, destination)`` for each key copied, or an
     error, and its state is a `CpState`. The call raises ValueError if
@@ -146,9 +145,9 @@ class _CopyOrMove(_CopyJobs, _FlatJobs):
     """The jobs of a copy or a move: a directory made where needed, and one per key.
 
     The keys listed are the source's, ``fs``. A key's job waits for its
-    destination directory, when the destination needs it. The keys of one directory
-    come apart in the listing, so the directories made are remembered, and each
-    is made once. A subclass says how a key goes, in `transfer_file`.
+    destination directory, when the destination needs it. The keys of one
+    directory come apart in the listing, so the directories made are
+    remembered, and each is made once. A subclass says how a key goes, in `transfer_file`.
     """
 
     def __init__(self, **kwargs: Any) -> None:

@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """A recursive find that lists several directories at a time.
 
-`_tree_find` is an alternative to fsspec's ``_find``, with the same paths. fsspec's
-walks a tree one directory at a time, unless the filesystem lists whole trees.
-`_tree_find` lists several directories at a time, as `_tree_walk` does.
+`_tree_find` is an alternative to fsspec's ``_find``, with the same paths.
+fsspec's walks a tree one directory at a time, unless the filesystem lists
+whole trees. `_tree_find` lists the tree as `_tree_walk` does: by one recursive
+``_ils``, or a directory per request, several at a time.
 
 This module depends on `walk`, and `operation` and `paths` of `common`.
 """
@@ -45,9 +46,10 @@ def _tree_find(
     in order. fsspec's ``_find`` sorts them, by name. A storage listing a
     directory twice, e.g. as a prefix and as its marker object, yields it twice.
 
-    It wins over fsspec's ``_find`` on storages that list one directory per request,
-    with many directories: their listings overlap. It loses on object stores, which
-    list a whole tree in one paginated request.
+    It wins over fsspec's ``_find`` on storages that list one directory per
+    request, with many directories: their listings overlap. It gains nothing on
+    object stores, which list a whole tree in one paginated request: it sends
+    that same listing.
 
     Once cancelled, it lists no new directory, and yields the paths of the
     listings in flight.
@@ -121,14 +123,14 @@ async def _find_listings(
 ) -> AsyncGenerator[_Listing]:
     """Walk as the strategies that only read do, such as find, du and glob.
 
-    It yields each directory's listing in parts, as ``_chunks`` does, but treats ``path``
-    itself as fsspec's ``_find`` and ``_glob`` do:
+    It yields each directory's listing in parts, as ``_chunks`` does, but
+    treats ``path`` itself as fsspec's ``_find`` and ``_glob`` do:
 
     - missing, it yields nothing;
     - a file, it yields the file's ``info`` entry if ``file_root``, else
       nothing;
-    - a directory, it yields the directory's own ``info`` entry after its listing's
-      last part, if ``dir_root`` and the walk is not stopping.
+    - a directory, it yields the directory's own ``info`` entry after its
+      listing's last part, if ``dir_root`` and the walk is not stopping.
 
     The root's own entry comes as a `_Listing` of depth 0, which is no listing.
     So the strategies filter and count it as any entry, but count no directory

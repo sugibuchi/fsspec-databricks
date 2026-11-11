@@ -45,8 +45,8 @@ def _flat_glob(
     It matches what fsspec's ``_glob`` matches, with ``*``, ``?``, ``[...]`` and
     ``**``, filtered with fsspec's own regular expression. The directories are
     derived from the keys, as fsspec's filesystems derive them for object
-    stores, and a key ending with "/" is a directory's marker. A derived directory's
-    entry has only its ``name``, ``size`` 0 and ``type``.
+    stores, and a key ending with "/" is a directory's marker. A derived
+    directory's entry has only its ``name``, ``size`` 0 and ``type``.
 
     Each pattern lists the keys starting with its text before the first
     wildcard. It yields each match as its page of the listing arrives, so the
@@ -60,8 +60,8 @@ def _flat_glob(
     first wildcard ends within a name, e.g. ``data/2024-*``: fsspec's lists all
     of ``data``. It wins too when the caller starts on the first matches, or
     the listing is large. It loses on storages with a hierarchical namespace,
-    whose empty directories a listing by prefix does not see, and which `_tree_glob`
-    prunes by directory.
+    whose empty directories a listing by prefix does not see, and which
+    `_tree_glob` prunes by directory.
 
     Once cancelled, it takes nothing more from the listings. An error from a
     listing ends the operation, raised by its iteration.
@@ -72,10 +72,9 @@ def _flat_glob(
     filesystem's ``operation_limit``. The listings hold none.
 
     ``path`` is a pattern, or patterns, of paths on ``fs``, as its ``_ils``
-    takes them: a trailing "/" matches only directories. ``maxdepth``
-    is how deep a ``**`` goes, and ``withdirs`` whether directories can match, as
-    with fsspec's ``_glob``. The listing still lists every key under the
-    prefix.
+    takes them: a trailing "/" matches only directories. ``maxdepth`` is how
+    deep a ``**`` goes, and ``withdirs`` whether directories can match, as with
+    fsspec's ``_glob``. The listing still lists every key under the prefix.
 
     The operation yields the entry of each path matched, and its state is a
     `GlobState`. The call raises ValueError if ``maxdepth`` is less than 1,

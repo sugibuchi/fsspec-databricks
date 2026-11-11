@@ -11,7 +11,7 @@ from fsspec.asyn import AsyncFileSystem
 from fsspec_alt_strategies.profile import StorageProfile
 
 from ._contrib.strategy.router import AsyncRoutingFileSystem
-from ._contrib.strategy.wrapper import SyncTreeWrapper
+from ._contrib.strategy.wrapper.tree import SyncTreeWrapper
 from .base import DatabricksClientSupport, _register_cleanup, root_dir_info
 from .dbfs import DBFS
 from .local import DatabricksLocalFileSystem

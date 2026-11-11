@@ -5,12 +5,7 @@
 ``AsyncFileSystem.open_async`` returns a file whose methods are awaited, with
 the API of fsspec's ``AbstractAsyncStreamedFile``. An `AsyncFileAdapter`
 gives that API to the file objects of `files.adaptive`, so that a filesystem
-implements its requests once, for both ``open`` and ``open_async``:
-
->>> async def open_async(self, path, mode="rb", **kwargs):
-...     return AsyncFileAdapter(MyFile(self, path, mode))
-
-The adapter only awaits what the file implements already: the file objects
+implements its requests once, for both ``open`` and ``open_async``. The adapter only awaits what the file implements already: the file objects
 stay files, with Python's sync API.
 
 A `SyncFileAdapter` gives the same API to any other file object with Python's
@@ -44,15 +39,12 @@ class AsyncFileAdapter:
     - ``read``, ``write``, ``flush`` and ``close`` are awaited. Each awaits the
       file's async counterpart of the sync method, e.g. ``_read``.
     - ``seek``, ``tell``, ``readable``, ``writable`` and ``seekable`` are not:
-      they send no request.
+      they run the file's own, which send no request.
     - ``path``, ``mode``, ``size``, ``loc`` and ``closed`` describe the file.
 
-    ``seek`` and ``tell`` run the file's own: they must need no request.
-
     Unlike fsspec's, leaving an ``async with`` block by an exception uploads
-    nothing of a written file, as leaving a ``with`` block does. Close
-    it: the garbage collector aborts a file left open, keeping nothing
-    written.
+    nothing of a written file, as leaving a ``with`` block does. Close it: the
+    garbage collector aborts a file left open, keeping nothing written.
 
     Parameters
     ----------

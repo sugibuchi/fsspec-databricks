@@ -480,7 +480,8 @@ Two `asyncio.Semaphore`s bound the requests. `operation_concurrency` bounds thos
 `http_client.py` holds what the Volume and DBFS files share. Its `AioHttpSessionSupport` mixin gives each of the two file
 systems one aiohttp `ClientSession`, with `connection_pool_size` connections:
 
-- it is created on the loop that first uses it, as `TCPConnector` needs a running loop, and is never pickled;
+- it is created on first use, as `TCPConnector` needs a running loop, and is never pickled. A file system runs on one
+  loop, as fsspec caches it, so the session is never made again for another;
 - `close()` closes it on its loop;
 - an aiohttp middleware authenticates requests with the SDK `Config`'s headers.
 
@@ -660,13 +661,11 @@ installed.
 ### The copy of fsspec-alt-strategies
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl` from
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), its unreleased 0.3 on the `wip` branch.
-It is copied whole, as its `wrapper.py` needs `flat/` too. Its modules keep their license headers and relative imports,
-and ruff skips them.
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.3.0. It is copied whole, as its
+`monitor.py` needs both families' wrappers. Its modules keep their license headers and relative imports, and ruff skips
+them.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.2,<0.4`. Until 0.3.0 is on PyPI,
-`[tool.uv.sources]` takes it from a checkout of the library's `wip` branch beside this repository, at
-`../fsspec-alt-strategies`.
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`, from PyPI.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.

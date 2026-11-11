@@ -72,7 +72,8 @@ DEVELOPMENT.md's Architecture section describes each part: read it before changi
 - Parse paths with the helpers of `path.py`. Every method takes `dbfs:/` URLs and POSIX paths alike.
 - `VolumeFileSystem` and `DBFS` are async fsspec file systems on fsspec's loop. Their files call the REST APIs with
   aiohttp, through the helpers of `http_client.py`.
-- Their aiohttp session is created on the loop using it, as `TCPConnector` needs a running loop.
+- Their aiohttp session is created on first use, as `TCPConnector` needs a running loop. A file system runs on one
+  loop, as fsspec caches it: never check the running loop, nor make a client again for another.
 - Never block on the loop from code running in it. File objects' synchronous methods raise there.
 - `src/fsspec_databricks/_contrib/strategy/` is a copy of fsspec-alt-strategies. Never edit it: DEVELOPMENT.md says how
   to refresh it.

@@ -9,9 +9,9 @@ across two storages runs the source's family's strategy, as its profile's
 ``fs_type`` says, each file by ``_cross_fs_cp_entry`` or ``_cross_fs_mv_entry``,
 which stream the data through the two storages' files unless overridden.
 
-This module depends on `filesystem`, `operation` and `paths` of `common`.
-It imports `cp` and `mv` of a family only to copy or move from a
-storage of it, so a copy may leave out the other family.
+This module depends on `filesystem`, `operation` and `paths` of `common`. It
+imports `cp` and `mv` of a family only to copy or move from a storage of it,
+so a copy may leave out the other family.
 """
 
 from __future__ import annotations
@@ -99,9 +99,9 @@ class AsyncRoutingFileSystem(
     own: both paths route to the same inner filesystem. Between two storages,
     it is the copy or move of the source's family, as its profile's ``fs_type``
     says: that of `TreeFileSystem` or `FlatFileSystem`, walking or listing the
-    source as they do. Each file goes by ``_cross_fs_cp_entry`` or
-    ``_cross_fs_mv_entry``, which stream the data unless a subclass overrides
-    them, e.g. with a server-side copy, with ``maxdepth`` too. A source of
+    source as they do, with ``maxdepth`` too. Each file goes by
+    ``_cross_fs_cp_entry`` or ``_cross_fs_mv_entry``, which stream the data
+    unless a subclass overrides them, e.g. with a server-side copy. A source of
     unknown ``fs_type`` is copied by fsspec's own copy, a file at a time. A
     move between two storages deletes each source file once its copy succeeds,
     and the source directories left empty.
@@ -188,9 +188,9 @@ class AsyncRoutingFileSystem(
 
         ``path`` is the router's, without the protocol. A trailing "/" is kept,
         as it means a directory to a copy or a glob: the router puts it back on
-        the inner path if ``_route`` drops it. So may glob patterns: where
-        the literal part routes, the pattern's must route to the same
-        filesystem.
+        the inner path if ``_route`` drops it. ``path`` may be a glob pattern
+        too: where its literal part routes, the whole pattern must route to the
+        same filesystem.
 
         It raises FileNotFoundError for a path no storage has, e.g. a missing
         volume. It may make the inner filesystem, with `_backend`.
@@ -239,7 +239,7 @@ class AsyncRoutingFileSystem(
 
         ``src_entry`` is the source's, as its listing or ``_info`` gave it, its
         ``"name"`` the source path. Its size, e.g., may choose how the data
-        goes, but may be stale, as `TreeFileSystem._cp_file_entry` takes it.
+        goes. It may be stale, as for `TreeFileSystem._cp_file_entry`.
 
         Here, the data is streamed through the router, by both storages'
         ``open_async``. A block, the source's ``transfer_size``, is read, then
@@ -283,7 +283,7 @@ class AsyncRoutingFileSystem(
         """The inner filesystem of ``key``, made by ``make`` the first time.
 
         A subclass's ``_route`` makes its inner filesystems with it, e.g. one
-        per volume, or per account and container. They are made with
+        per volume, or per account and container. ``make`` gives them
         ``asynchronous=True`` and the router's ``loop``, so that their
         coroutines run where the router's do. ``close()`` closes them.
         """
@@ -951,8 +951,8 @@ class AsyncRoutingFileSystem(
         """Move, as fsspec's ``mv`` does: within a storage, or between two.
 
         Between two storages, each source file is deleted once copied, and the
-        source directories left empty once all are. A source whose copy failed is
-        kept.
+        source directories left empty once all are. A source whose copy failed
+        is kept.
         """
         if path1 == path2:
             return
@@ -1083,7 +1083,7 @@ class AsyncRoutingFileSystem(
         """
         get = getattr(fs1, "_get_storage_profile", None)
         if get is None:
-            return None  # A plain fsspec filesystem: fsspec's own copy.
+            return None  # A plain fsspec filesystem: fsspec's own copy, then rm.
         fs_type = (await get()).fs_type
         if fs_type is None:
             return None
@@ -1143,7 +1143,7 @@ class AsyncRoutingFileSystem(
         callback: Any,
         delete: bool = False,
     ) -> list[Exception]:
-        """Run a copy or move between two storages: the errors.
+        """Run a copy or move between two storages, returning its paths' errors.
 
         The call is the router's own, watched by the monitors as such.
         """

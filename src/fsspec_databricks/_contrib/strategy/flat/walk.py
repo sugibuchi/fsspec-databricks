@@ -39,12 +39,12 @@ def _flat_walk(
     """Walk the keys under a prefix, from one listing streamed as it comes.
 
     It yields each directory as ``(path, dirs, files)``, as `_tree_walk` does:
-    ``path`` itself, then each directory below it. ``dirs`` and ``files`` map the
-    names in the directory to their entries. The files are the keys, as the
-    recursive ``_ils`` gives them. The directories are derived from the keys, as fsspec's
-    filesystems derive them for object stores, and a key ending with "/" is a
-    directory's marker. A derived directory's entry has only its ``name``, ``size`` 0
-    and ``type``.
+    ``path`` itself, then each directory below it. ``dirs`` and ``files`` map
+    the names in the directory to their entries. The files are the keys, as the
+    recursive ``_ils`` gives them. The directories are derived from the keys,
+    as fsspec's filesystems derive them for object stores, and a key ending
+    with "/" is a directory's marker. A derived directory's entry has only its
+    ``name``, ``size`` 0 and ``type``.
 
     A directory is done once the listing has passed its keys. Without
     ``topdown``, each directory comes as soon as it is done, after all those
@@ -128,8 +128,8 @@ async def _dirs_done(
 ) -> AsyncGenerator[tuple[str, list[dict[str, Any]]]]:
     """Each directory walked with its entries, as soon as it is done: bottom up.
 
-    The directories open, those the listing is in, are ``path`` and its subdirectories
-    down to the key listed last. A key not under the deepest one closes it: the
+    The directories open, those the listing is in, are ``path`` and its
+    subdirectories down to the key listed last. A key not under the deepest one closes it: the
     keys come in order, so none under it comes later. A walk stopped leaves
     out the directories still open.
     """

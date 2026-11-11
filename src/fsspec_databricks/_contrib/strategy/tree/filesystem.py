@@ -54,29 +54,31 @@ class TreeFileSystem(_BaseFileSystem):
     It suits storages with a hierarchical namespace, such as Azure Data Lake
     Storage Gen2. It overrides fsspec's ``_walk``, ``_find``, ``_du``,
     ``_glob``, and ``_rm``, ``_copy`` and ``_mv`` when recursive, with the tree
-    strategies. These list a whole tree by a recursive listing, and the trees
-    they prune many directories at once. They act on each part of a listing as
-    it arrives. Their answers are
-    fsspec's, and their failures are raised, a single one as it is, several in
-    an ExceptionGroup.
+    strategies. These list a whole tree by one recursive listing, and a tree
+    they prune a directory per request, several at a time. They act on each
+    part of a listing as it arrives. Their answers are fsspec's, and their
+    failures are raised, a single one as it is, several in an ExceptionGroup.
+
     A directory that fails to list is yielded empty by ``_walk``, as fsspec's
     ``walk`` yields it. ``on_error`` handles every directory's failure, where
     fsspec's applies it to the root only, as its walk recurses without it.
 
-    A subclass implements the storage's primitives, which fsspec leaves
-    abstract: ``_info``, ``_rm_file``, ``_rmdir`` and ``_makedirs``, and
-    ``_ils``, a directory's listing as an async iterator, which ``_ls`` lists
-    with. ``_ils`` lists a whole tree too, with ``recursive=True``, depth first
-    or in name order: by the storage's recursive listing, or by
-    ``tree.listing._tree_ils`` where it has none. It copies and moves a file by
-    ``_cp_file_entry`` and ``_mv_file_entry``, which
-    take the source's entry, as its listing gave it, e.g. with its size.
-    fsspec's ``_cp_file`` and ``_mv_file`` ask the entry, then call them. It
-    implements ``open_async`` too, giving its files ``io_limit`` as their
-    concurrency limit, and ``_open``. ``_cat_file``,
-    ``_pipe_file``, ``_get_file`` and ``_put_file`` read and write through
-    ``open_async``'s files. It may implement two requests on a directory whole,
-    used where the profile declares them:
+    A subclass implements the storage's primitives:
+
+    - ``_ils``, a directory's listing, which ``_ls`` and so fsspec's own
+      methods list with, and with ``recursive=True`` all below it, which the
+      strategies list with;
+    - ``_info``, ``_rm_file``, ``_rmdir`` and ``_makedirs``;
+    - ``_cp_file_entry`` and ``_mv_file_entry``, a copy and a move of a file
+      by its entry, as its listing gave it, e.g. with its size. fsspec's
+      ``_cp_file`` and ``_mv_file`` ask the entry, then call them;
+    - ``open_async``, giving its files ``io_limit`` as their concurrency
+      limit, and ``_open``.
+
+    The data methods, ``_cat_file``, ``_pipe_file``, ``_get_file`` and
+    ``_put_file``, read and write through ``open_async``'s files. A subclass
+    may implement two requests on a directory whole, used where the profile
+    declares them:
 
     - ``_rm_tree``, a storage's recursive delete, which a recursive ``rm``
       uses where ``deletes_directories=True``;
@@ -96,10 +98,9 @@ class TreeFileSystem(_BaseFileSystem):
 
     A recursive ``mv``, or one of a single file, moves each file with
     ``_mv_file_entry``: the storage's rename, or a copy then a delete where it
-    has none. With ``renames_directories=True``, a recursive ``mv`` moves each
-    root whole by ``_mv_tree`` where it can. The strategies call both only
-    where the destination's parent exists, having made it: a rename need not
-    make it. A caller outside the strategies makes it too.
+    has none. The strategies call it and ``_mv_tree`` only where the
+    destination's parent exists, having made it, as a rename need not make it.
+    A caller outside the strategies makes it too.
 
     Parameters
     ----------
@@ -167,13 +168,13 @@ class TreeFileSystem(_BaseFileSystem):
             **kwargs,
         )
 
-    # What a subclass implements: the storage's primitives, as fsspec names them.
+    # What a subclass implements: the storage's primitives.
 
     @abstractmethod
     def _ils(
         self, path: str, recursive: bool = False, **kwargs: Any
     ) -> AsyncIterator[dict[str, Any]]:
-        """List a directory, as an async iterator of its entries, as the strategies list.
+        """List a directory, or all below it, as an async iterator of entries.
 
         The entries are as fsspec's ``_ls`` gives them with ``detail``: a
         storage listing a directory in pages yields each page's as it comes. A
@@ -215,9 +216,9 @@ class TreeFileSystem(_BaseFileSystem):
                 else:
                     ...  # List the entries in path, e.g. a page at a time.
 
-        Its listings hold permits of ``operation_limit``, beside the one held
-        by the caller of ``_ils``. A directory that fails to list ends the
-        whole listing, with its error.
+        ``_tree_ils``'s listings ahead hold permits of ``operation_limit`` of
+        their own, beside the one held by the caller of ``_ils``. A directory
+        that fails to list ends the whole listing, with its error.
         """
 
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
@@ -336,6 +337,8 @@ class TreeFileSystem(_BaseFileSystem):
     @abstractmethod
     def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
         """Open a file, as fsspec's ``_open`` does, for the sync ``open``."""
+
+    # fsspec's recursive methods, answered by the tree strategies.
 
     async def _walk(
         self,

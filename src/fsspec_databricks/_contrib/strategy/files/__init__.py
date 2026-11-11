@@ -11,11 +11,12 @@ And a file is opened long before its reads show which kind it gets.
   files adapt their requests to the reads and writes so far.
 - `fsspec_transaction` writes a file in fsspec's transactions, in one of several
   strategies: a temporary path, a local buffer, or the storage's own.
-- `fsspec_async` gives the files the API of those fsspec's ``open_async``
+- `fsspec_async` gives these files the API of those fsspec's ``open_async``
   returns, so that ``open`` and ``open_async`` share their requests.
 
-All run their requests on an asyncio event loop, such as a filesystem's
-``loop``, as their ``concurrency_limit``, an `asyncio.Semaphore`, allows.
+The files of `adaptive` run their requests on an asyncio event loop, such as a
+filesystem's ``loop``, as their ``concurrency_limit``, an `asyncio.Semaphore`,
+allows.
 Given a shared one, files share its limit: the caller chooses its scope, e.g.
 a file, a filesystem, or the process. A filesystem subclasses them, implements
 their requests, and returns them from ``_open``. The requests are the

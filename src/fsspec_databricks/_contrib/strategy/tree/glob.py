@@ -5,13 +5,13 @@
 `_tree_glob` is an alternative to fsspec's ``_glob``, with the same matches.
 fsspec's finds every path under the pattern's literal root, as deep as the
 pattern goes, then filters them with a regular expression. `_tree_glob` walks
-the tree as `_tree_walk` does, and lists a directory only if the pattern can match
-in it.
+the tree as `_tree_walk` does, and lists a directory only if the pattern can
+match in it.
 
-To decide, a directory's path is matched with the pattern's segments, one by one.
-A ``**`` matches any number of segments, so only those before the first ``**``
-can rule a directory out. Without a ``**``, nor can a directory as deep as the
-pattern, as nothing below it can match.
+To decide, a directory's path is matched with the pattern's segments, one by
+one. A ``**`` matches any number of segments, so only those before the first
+``**`` can rule a directory out. Without a ``**``, a directory as deep as the
+pattern is ruled out too, as nothing below it can match.
 
 Below a ``**``, nothing is pruned. So a directory below which a pattern prunes
 nothing, e.g. ``data`` for ``data/**/*.csv``, is listed by one recursive
@@ -57,8 +57,9 @@ def _tree_glob(
 
     It matches what fsspec's ``_glob`` matches, with ``*``, ``?``, ``[...]`` and
     ``**``. The paths found are filtered with fsspec's own regular expression,
-    so the directories pruned change only the requests, never the matches. A directory
-    that fails to list yields its error, and the rest is still searched.
+    so the directories pruned change only the requests, never the matches. A
+    directory that fails to list yields its error, and the rest is still
+    searched.
 
     It yields each match as its directory's listing arrives, so the matches are
     not in order. fsspec's ``_glob`` sorts them, by name. A storage listing a
@@ -71,9 +72,9 @@ def _tree_glob(
     walked from that root, which may list the directories between them.
 
     It wins on storages that list one directory per request, when the pattern
-    leaves directories out after its first wildcard, e.g. ``data/*/2024/*.parquet``.
-    fsspec's ``_glob`` then lists every directory under ``data`` as deep as the
-    pattern goes. Several patterns win again where they share directories, e.g.
+    leaves directories out after its first wildcard, e.g.
+    ``data/*/2024/*.parquet``. fsspec's ``_glob`` then lists every directory
+    under ``data`` as deep as the pattern goes. Several patterns win again where they share directories, e.g.
     ``data/*/2024/*.csv`` and ``data/*/2024/*.json``. It loses on object
     stores, which list a whole tree in one paginated request, and gains nothing
     over `_tree_find` with patterns such as ``data/**/*.parquet``, which can
@@ -102,8 +103,8 @@ def _tree_glob(
     walked that a pattern matches, e.g. that of ``data/**``.
 
     ``path`` is a pattern, or patterns, of paths on ``fs``, as its ``_ils``
-    takes them: a trailing "/" matches only directories. ``maxdepth`` is how deep
-    a ``**`` goes, and ``withdirs`` whether directories can match, as with
+    takes them: a trailing "/" matches only directories. ``maxdepth`` is how
+    deep a ``**`` goes, and ``withdirs`` whether directories can match, as with
     fsspec's ``_glob``. ``ils_kwargs`` go to each ``_ils``, as fsspec's
     ``glob`` passes its own on.
 

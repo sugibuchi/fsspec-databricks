@@ -37,25 +37,24 @@ def _tree_rm(
 ) -> Operation[str, RmState]:
     """Delete a directory and everything in it, deleting while the tree is walked.
 
-    The tree is walked as `_tree_walk` walks it. Each directory's files are deleted
-    as soon as the directory is listed, while other directories are still being
-    listed. A directory is deleted once everything in it is, so the deepest go
-    first. A directory with anything in it that failed is kept.
+    The tree is walked as `_tree_walk` walks it. Each directory's files are
+    deleted as soon as the directory is listed, while other directories are
+    still being listed. A directory is deleted once everything in it is, so the
+    deepest go first. A directory with anything in it that failed is kept.
 
-    It yields each file and directory once deleted, and the error of each directory
-    that failed to list or path that failed to be deleted. A path found already
-    gone is not yielded.
+    It yields each file and directory once deleted, and the error of each
+    directory that failed to list or path that failed to be deleted. A path
+    found already gone is not yielded.
 
-    It wins over fsspec's ``_rm`` on storages that list one directory per request
-    and have no recursive delete of their own, such as Databricks volumes. The
-    deletions then start after the first listing, not after the last. It also
-    keeps going past a failure, and reports each.
+    It wins over fsspec's ``_rm`` on storages that list one directory per
+    request and have no recursive delete of their own, such as Databricks
+    volumes. The deletions then start after the first listing, not after the
+    last. It also keeps going past a failure, and reports each.
 
-    It loses on object stores, which list a whole tree in one paginated request:
-    fsspec's ``_rm`` makes fewer requests there. On a storage deleting a directory
-    with everything in it in one request, that request wins: the profile's
-    ``deletes_directories=True`` says the filesystem's ``_rm_tree``, called
-    ``rm_tree`` below, sends it.
+    It loses on object stores, which delete keys in batches: their own
+    ``_rm``, or `_flat_rm`, makes fewer requests there. On a storage deleting a
+    directory with everything in it in one request, that request wins: the
+    profile's ``deletes_directories=True`` says ``rm_tree`` sends it.
 
     With ``deletes_directories``, each root is deleted whole by one ``rm_tree``,
     with no walk, as each file is deleted: concurrently, under the same limit
@@ -83,21 +82,22 @@ def _tree_rm(
     unknown. Iterating it raises FileNotFoundError if ``path`` does not exist,
     or matches nothing.
 
-    Requests: one recursive ``_ils`` per root, or one ``_ils`` per directory with
-    ``maxdepth``, one ``rm_file`` per file, and one
-    ``rm_dir`` per directory. Patterns, or a list, add the requests of their
-    `_tree_glob`. With ``deletes_directories``, a root costs one ``rm_tree``
-    instead. Each request holds a permit of the filesystem's
-    ``operation_limit`` while it runs.
+    Requests: one recursive ``_ils`` per root, which a storage without a
+    recursive listing answers with one per directory, or one ``_ils`` per
+    directory with ``maxdepth``. One ``rm_file`` per file, and one ``rm_dir``
+    per directory. Patterns, or a list, add the requests of their `_tree_glob`.
+    With ``deletes_directories``, a root costs one ``rm_tree`` instead. Each
+    request holds a permit of the filesystem's ``operation_limit`` while it
+    runs.
 
     The filesystem's profile's ``implicit_directories=True`` saves the
-    ``rm_dir`` of each directory, as a directory goes with its last file. Such a
-    directory is not yielded, as one found already gone is not.
+    ``rm_dir`` of each directory, as a directory goes with its last file. Such
+    a directory is not yielded, as one found already gone is not.
 
-    The filesystem's primitives are called below by what they do: ``_ils`` is
-    its ``_ils``, ``info`` its ``_info``, ``rm_file`` its ``_rm_file``, and
-    ``rm_dir`` its ``_rmdir``. A FileNotFoundError from ``rm_dir``
-    counts as deleted, as object stores have no directories to delete.
+    The filesystem's primitives are called above by what they do: ``_ils`` is
+    its ``_ils``, ``rm_file`` its ``_rm_file``, ``rm_dir`` its ``_rmdir``, and
+    ``rm_tree`` its ``_rm_tree``. A FileNotFoundError from ``rm_dir`` counts as
+    deleted, as object stores have no directories to delete.
 
     ``path`` is the directory deleted from ``fs``, as its ``_ils`` takes it. A
     file is deleted alone. A glob pattern, or a list of paths and patterns,
