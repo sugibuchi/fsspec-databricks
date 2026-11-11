@@ -91,7 +91,8 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
     - Writing a file creates its missing parent directories, as `mkdirs` does.
     - Directories are objects of their own: an empty one exists.
     - Its move renames a file, or a directory with all in it, in one request: `_mv_file` and `_mv_tree`.
-    - Its delete deletes a directory with all in it, in one request: `_rm_tree`.
+    - Its delete deletes a directory with all in it, in one request: `_rm_tree`, which asks the path first, as the
+      delete succeeds on a missing one.
     """
 
     def __init__(
@@ -198,7 +199,12 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
         await self._delete(path, recursive=False)
 
     async def _rm_tree(self, path):
-        """Delete a directory with all in it, by the API's recursive delete: one request."""
+        """Delete a directory with all in it, by the API's recursive delete.
+
+        The API's delete succeeds on a missing path, so the path is asked for first: a missing one raises
+        FileNotFoundError, as `_rm_tree`'s contract says.
+        """
+        await self._info(path)
         await self._delete(path, recursive=True)
 
     async def _rmdir(self, path):

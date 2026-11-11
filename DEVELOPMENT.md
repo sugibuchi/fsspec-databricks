@@ -594,7 +594,8 @@ default. An existing notebook keeps its language, and a new one needs `language`
 
 - `_mv_file` is the API's move, which moves a directory with all in it. So `storage_profile` declares
   `renames_directories=True`, and a recursive `mv` moves each folder whole where it can.
-- `_rm_tree` is the API's recursive delete, one request per directory a recursive `rm` is given.
+- `_rm_tree` is the API's recursive delete, one per directory a recursive `rm` is given. The delete succeeds on a
+  missing path, so `_rm_tree` asks its status first, to raise `FileNotFoundError` as the library's contract says.
 - `rmdir` refuses a directory that is not empty. It calls the API's non-recursive delete, which the SDK's
   `dbfs.delete` refuses for directories.
 - Files are the library's adaptive files, `DbfsReadableFile` and `DbfsWritableFile`. They call the API with the file
