@@ -1,7 +1,8 @@
 # Lint the code and the workflows, and test, on every push to main and pull
 # request, and by hand. The offline tests run on the dummy server, with no
-# credentials, on every supported Python version. The coverage is uploaded to Codecov from one
-# Python version: uploading needs the repository secret CODECOV_TOKEN.
+# credentials, on every supported Python version. The coverage and the test
+# results are uploaded to Codecov from one Python version: uploading needs the
+# repository secret CODECOV_TOKEN.
 #
 # The live tests then run on a Databricks workspace per cloud, each in the
 # GitHub environment of its name: aws, azure or gcp. DEVELOPMENT.md lists what
@@ -67,7 +68,10 @@ jobs:
 
       # The dummy server only, whatever a variable says: this job has no credentials.
       - name: Test with coverage
-        run: uv run --no-sync pytest --api=dummy --cov --cov-report=term --cov-report=xml:coverage.xml
+        # junit.xml in the legacy JUnit form, which Codecov's test analytics reads.
+        run: >-
+          uv run --no-sync pytest --api=dummy --cov --cov-report=term --cov-report=xml:coverage.xml
+          --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() && matrix.python-version == '3.14' }}
@@ -75,6 +79,15 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && matrix.python-version == '3.14' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: junit.xml
+          flags: dummy
 
   live:
     needs: test
@@ -147,6 +160,8 @@ jobs:
         run: uv sync --locked  # fails if uv.lock is out of date
 
       # Each ref works in its own directories, so that branches do not collide.
+      # Each test's line with its duration, and the slowest at the end. junit.xml,
+      # in the legacy JUnit form, which Codecov's test analytics reads.
       - name: Test on the live workspace
         if: ${{ steps.configured.outputs.ok == 'true' }}
         env:
@@ -154,4 +169,16 @@ jobs:
         run: |
           export FSSPEC_DATABRICKS_VOLUME_TEST_ROOT="$VOLUME_ROOT/$REF_NAME"
           export FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT="$WORKSPACE_ROOT/$REF_NAME"
-          bash .github/scripts/with-id-token-file.sh uv run --no-sync pytest --api=live
+          bash .github/scripts/with-id-token-file.sh uv run --no-sync pytest --api=live \
+            -v -o console_output_style=times --durations=20 \
+            --junitxml=junit.xml -o junit_family=legacy
+
+      # Also after failed tests, whose runtimes count too. Flagged by the cloud.
+      - name: Upload the live test results to Codecov
+        if: ${{ !cancelled() && steps.configured.outputs.ok == 'true' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: junit.xml
+          flags: live-${{ matrix.cloud }}

@@ -54,6 +54,7 @@ can hold the credentials and the variables above.
 ```bash
 uv run pytest                                   # all tests, on the dummy server only
 uv run pytest --api=live                        # the backend tests on the live workspace
+uv run pytest --api=live -v -o console_output_style=times --durations=20   # with each test's duration, as CI runs them
 uv run pytest --api=both                        # the backend tests on both
 uv run pytest --fs=volume,workspace             # only these backends: volume, workspace, dbfs
 uvx ruff check .                                # lint
@@ -92,7 +93,7 @@ Some tests make sense on one side only:
 - A test taking the `dummy` fixture runs on the dummy server only. It switches the server's behaviour, or counts the
   requests it served.
 - The `dummy_only` and `live_only` markers restrict the others.
-- A test is skipped when `--api` excludes its side.
+- A test of a side `--api` excludes is deselected: a live run lists the live tests only.
 
 Each backend test has a `backend` marker, e.g. a module's `pytestmark = pytest.mark.backend("volume")`. A test
 spanning backends names all of them, and runs only when `--fs` selects them all. Tests of no backend always run.
@@ -173,8 +174,11 @@ Where the references leave behaviour open, the dummy makes an assumption, marked
 `ci.yaml` has three jobs:
 
 - `lint`: ruff check, ruff format check, zizmor and actionlint;
-- `test`: pytest `--api=dummy` on Python 3.11 to 3.14, with no credentials, and coverage to Codecov from 3.14;
+- `test`: pytest `--api=dummy` on Python 3.11 to 3.14, with no credentials. Python 3.14's coverage and test results go
+  to Codecov, the results flagged `dummy`;
 - `live`: after `test`, pytest `--api=live` on Python 3.14, in the environments `aws`, `azure` and `gcp` in parallel.
+  Each prints each test's duration and the 20 slowest, and its results go to Codecov's test analytics, flagged
+  `live-aws`, `live-azure` or `live-gcp`.
 
 `live` runs on pushes, by hand, and on pull requests from branches of this repository. Pull requests from forks and
 Dependabot get no environment secrets, so they run `test` only. An environment without `DATABRICKS_HOST` is skipped
