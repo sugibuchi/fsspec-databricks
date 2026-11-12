@@ -39,7 +39,8 @@ Besides the [authentication parameters](AUTHENTICATION.md):
 | `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                       | `8`     |
 
 Unity Catalog Volumes have [defaults of their own](#options-for-volumes). Workspace files and legacy DBFS default to
-`16` and `8`. Workspace files are transferred whole, so `io_concurrency` does not limit them.
+`16` and `8`. Workspace files are transferred whole, so their `io_concurrency` limits only the methods taking many paths,
+such as `cat` and `put`.
 
 Recursive operations, such as `find`, `glob`, `du`, `rm` and `copy`, run concurrent requests within one backend.
 

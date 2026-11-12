@@ -178,7 +178,7 @@ Where the references leave behaviour open, the dummy makes an assumption, marked
 
 `live` runs on pushes, by hand, and on pull requests from branches of this repository. Pull requests from forks and
 Dependabot get no environment secrets, so they run `test` only. An environment without `DATABRICKS_HOST` is skipped
-with a notice. Each run's work directories are `<root>/<branch>` under the environment's roots.
+with a notice. Each run's work directories are `<root>/<ref name>` under the environment's roots, e.g. `<root>/main`.
 
 ### Supply chain
 
@@ -188,11 +188,15 @@ The live jobs hold the workspaces' credentials, so what they run is fixed:
 - Actions are pinned to commit SHAs, and setup-uv to a uv version.
 - Dependabot updates `uv.lock` and the Actions' SHAs weekly.
 - No workflow gives secrets to pull requests from forks.
-- Each workflow's token can only read the repository. Only the jobs that need them add `id-token: write` or
-  `contents: write`.
+- Each workflow's token can only read the repository. Only the jobs that need more add it: `id-token: write`,
+  `contents: write` or `security-events: write`.
 - The live jobs and the release build use no cache.
 
-ruff, zizmor and actionlint, run with `uvx`, are the exception: CI runs their latest versions, in a job without secrets.
+There are two exceptions:
+
+- ruff, zizmor and actionlint, run with `uvx`, are their latest versions, in a job without secrets.
+- Until fsspec-alt-strategies' next release, `test` and `live` check out the head of its `wip` branch, which no lock
+  pins. [The copy of fsspec-alt-strategies](#the-copy-of-fsspec-alt-strategies) says why.
 
 ### Environments
 
@@ -348,8 +352,8 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 - **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends created on first use.
 - **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies, and
   subclasses `BaseDatabricksFileSystem`, in `base.py`.
-- **The file objects** are the library's. Volume and DBFS files read ranges concurrently. Workspace files are sync
-  `WorkspaceFile`s, transferred whole.
+- **The file objects** of Volumes and DBFS are the library's adaptive files, which read ranges concurrently.
+  Workspace files are sync `WorkspaceFile`s, transferred whole.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
 
 ### Routing
@@ -373,9 +377,9 @@ The library's router does the rest:
   is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
 - A move between backends deletes each source file once it is copied, then the source folders left empty.
 
-No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
-`_cross_fs_cp_entry` and `_cross_fs_mv_entry`, which stream the data. A copy within one backend is its own only when
-both paths route to it.
+No two backends share a storage, and Databricks has no copy between them. So `spec.py` does not override the
+router's `_cross_fs_cp_entry` and `_cross_fs_mv_entry`, which stream the data. A copy is the backend's own only when
+both paths route to the same backend.
 
 No request checks whether legacy DBFS is enabled:
 
@@ -383,7 +387,7 @@ No request checks whether legacy DBFS is enabled:
   403 a `PermissionError`.
 - With the API, `_roots` lists the DBFS root, and falls back to `/Volumes` and `/Workspace` on that `PermissionError`.
 - With the local file system, `_roots` falls back when `legacy_dbfs_local_root` does not exist.
-- Only the property `legacy_dbfs_enabled` asks the workspace setting `disable_legacy_dbfs`, once per instance,
+- Only the property `DBFS.legacy_dbfs_enabled` asks the workspace setting `disable_legacy_dbfs`, once per instance,
   blocking. Nothing internal calls it.
 
 `close()` closes the backends. The router needs async backends, so the library's `SyncTreeWrapper` wraps the local
@@ -618,8 +622,8 @@ default. An existing notebook keeps its language, and a new one needs `language`
 
 ### File objects
 
-Every backend's files are the library's file objects. They raise `RuntimeError` when their sync methods are called
-from the event loop. Code on the loop uses `open_async()` and awaits the file's methods.
+Volume and DBFS files are the library's file objects. They raise `RuntimeError` when their sync methods are called
+from the event loop. Code on the loop uses `open_async()` and awaits the file's methods, `WorkspaceFile`s included.
 
 ### Transactions
 
@@ -677,7 +681,8 @@ copy's command line recognises a previous copy by it.
 Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`. Until the library's
 next release, `[tool.uv.sources]` takes it from a checkout of the library's `wip` branch beside this repository, at
 `../fsspec-alt-strategies`, as the copy needs what 0.3.0 lacks, e.g. `UNKNOWN`. CI's `test` and `live` jobs check
-it out there too.
+it out there too. A release built meanwhile would install 0.3.0 from PyPI, and fail on import. So this package's next
+release waits for the library's. `[tool.uv.sources]` and the checkouts then go.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.

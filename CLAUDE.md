@@ -123,8 +123,9 @@ Write docs so that people can review them. That covers this file, DEVELOPMENT.md
 
 ### Where docs go
 
-- README.md is the quick start: features, installation, paths, compatibility, status and limitations.
-- USAGE.md has the user-facing details: operations, each backend's behaviour, and the options.
+- README.md is the quick start: features, installation, paths, compatibility and status.
+- USAGE.md has the user-facing details: the options, logging, operations, each backend's behaviour, and the
+  limitations.
 - AUTHENTICATION.md covers the ways to configure authentication.
 - DEVELOPMENT.md has setup, tests, CI, releasing, the design choices and the architecture.
 - SECURITY.md says how to report vulnerabilities, and what is in scope.

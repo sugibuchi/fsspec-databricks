@@ -464,8 +464,8 @@ class VolumeFileSystem(AioHttpSessionSupport, BaseDatabricksFileSystem):
                 path, "Catalogs, schemas and volumes are not deleted as directories"
             )
 
-        # Checked first: deleting a missing directory succeeds on some clouds, e.g. AWS, where rmdir must raise
-        # FileNotFoundError.
+        # Checked first: rmdir must raise FileNotFoundError, but deleting a missing directory succeeds on some
+        # clouds, e.g. AWS.
         info = await self._info(path)
         if info["type"] != "directory":
             raise not_a_directory_error(path)
@@ -612,7 +612,7 @@ class _VolumeFileMixin(HttpFileMixin):
 class VolumeReadableFile(HttpReadableMixin, _VolumeFileMixin, AdaptiveReadableFile):
     """A Unity Catalog Volume file read by range requests, through presigned URLs or the Files API."""
 
-    # Random reads of small records took 8.5 s at 64 KiB, against 11.5 s at 256 KiB.
+    # Random reads of small records took 8.5 s at 64 KB, against 11.5 s at 256 KB.
     min_block_size: int = 64 * 1024
     """The smallest range request, which smaller reads fetch whole."""
 
@@ -752,11 +752,11 @@ class VolumeWritableFile(_VolumeFileMixin, AdaptiveWritableFile):
     min_multipart_size: int = 5 * _MiB
     """The size from which parts are uploaded while writing.
 
-    A file closed before any part was sent goes in one request if it is smaller, or would go as one part.
+    A file closed before any part was sent goes in one `PUT` if it is smaller, or if it would be a single part.
     """
 
     url_expiration_duration_min: int = 60  # 1 hour
-    """How many minutes the upload and abort URLs are valid."""
+    """How many minutes the presigned URLs of the parts are valid."""
 
     def __init__(
         self,

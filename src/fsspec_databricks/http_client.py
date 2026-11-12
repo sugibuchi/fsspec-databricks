@@ -115,7 +115,7 @@ def response_error(
         return file_not_found_error(path, message)
     if status in (401, 403):
         return access_error(path, message)
-    # DBFS answers an existing file with a 400.
+    # DBFS answers an existing file with a 400, which only its error code tells.
     if status == 409 or error_code == "RESOURCE_ALREADY_EXISTS":
         return file_exists_error(path, message)
     else:
@@ -190,7 +190,8 @@ class HttpFileMixin:
         )
 
     async def _retried(self, send: Callable[[], Awaitable[T]], doing: str) -> T:
-        """Send a request, and again after a transient error, as the SDK does: a 429 or 5xx answer, or a lost connection.
+        """Send a request, and again after a transient error, as the SDK does: a 429 or 5xx answer, a lost connection
+        or a timeout.
 
         Only for requests that are safe to send again.
         """

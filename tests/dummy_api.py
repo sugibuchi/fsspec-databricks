@@ -1,5 +1,6 @@
 """
-FastAPI application that simulates Databricks' Files API, Workspace API and legacy DBFS API, for tests.
+FastAPI application that simulates Databricks' Files API, its endpoints list, the Workspace API, the legacy DBFS API
+and the Unity Catalog API's reads, for tests.
 
 The APIs answer as their REST references say, with the SDK's error format: a JSON body of `error_code` and
 `message`, from which the SDK picks its exception class. The Volumes' files, the Workspace files and the DBFS root
