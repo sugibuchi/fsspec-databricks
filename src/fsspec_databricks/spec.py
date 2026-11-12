@@ -102,8 +102,6 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
             See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
         account_id
             See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
-        token
-            See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
         username
             See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
         password
@@ -112,6 +110,14 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
             (Service principal OAuth only) The client ID you were assigned when creating your service principal.
         client_secret
             (Service principal OAuth only) The client secret you generated when creating your service principal.
+        token
+            See `Databricks native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#databricks-native-authentication>`_.
+        profile
+            See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
+        config_file
+            See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
+        group_id
+            The ID of the account group to authenticate as. See the Databricks SDK `Config` class.
         azure_workspace_resource_id
             See `Azure native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#azure-native-authentication>`_.
         azure_client_secret
@@ -125,13 +131,7 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
         auth_type
             See `Additional configuration options <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#additional-configuration-options>`_.
         cluster_id
-            The ID of the cluster to connect. See `Compute configuration for Databricks Connect <https://docs.databricks.com/aws/en/dev-tools/databricks-connect/cluster-config>`_.
-        profile
-            See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
-        config_file
-            See `Overriding .databrickscfg <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html#overriding-databrickscfg>`_.
-        group_id
-            The ID of the account group to authenticate as. See the Databricks SDK `Config` class.
+            The ID of the cluster to connect to. See `Compute configuration for Databricks Connect <https://docs.databricks.com/aws/en/dev-tools/databricks-connect/cluster-config>`_.
         google_credentials
             See `Google Cloud native authentication <https://databricks-sdk-py.readthedocs.io/en/latest/authentication.html>`_.
         google_service_account
@@ -355,17 +355,20 @@ class DatabricksFileSystem(DatabricksClientSupport, AsyncRoutingFileSystem):
         t = fs_type(path)
         if self._uses_local_fs:
             return self._local_tree, to_local_path(path, self.legacy_dbfs_local_root)
-        if t == FileSystemType.Workspace:
+        elif t == FileSystemType.Workspace:
             return self._workspace_fs, path
         elif t == FileSystemType.Volume:
             return self._volume_fs, path
-        # On a workspace without legacy DBFS, the API refuses the paths: the backend raises its 403 as PermissionError.
-        return self._legacy_fs, path
+        else:
+            # On a workspace without legacy DBFS, the API refuses the paths: the backend raises its 403 as
+            # PermissionError.
+            return self._legacy_fs, path
 
     def _outer(self, fs: AsyncFileSystem, path: str) -> str:
         if self._uses_local_fs:
             return from_local_path(path, self.legacy_dbfs_local_root)
-        return path
+        else:
+            return path
 
     async def _roots(self, path: str) -> list[dict[str, Any]]:
         if self._uses_local_fs:

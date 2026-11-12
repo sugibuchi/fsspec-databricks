@@ -191,7 +191,8 @@ class _SyncFileSystemWrapper(SyncClientSupport, _FileSystemWrapper):
         concurrencies = (self.operation_concurrency, self.io_concurrency)  # type: ignore[attr-defined]
         if all(isinstance(c, int) for c in concurrencies):
             return sum(concurrencies)
-        return None
+        else:
+            return None
 
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
         return await self._run_in_thread(self.fs.ls, path, detail=detail, **kwargs)

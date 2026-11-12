@@ -338,7 +338,8 @@ class WorkspaceFileSystem(BaseDatabricksFileSystem):
         f = self._open_file(path, mode, notebook_format, language)
         if autocommit or "r" in mode:
             return f
-        return TransactionFile(_WorkspaceTransaction(f))
+        else:
+            return TransactionFile(_WorkspaceTransaction(f))
 
     def open(
         self,

@@ -75,13 +75,14 @@ class _TreeJobs(_Jobs):
         ]
         if not directories:
             return None
-        return _chunks(
-            self.fs,
-            directories,
-            maxdepth=self.maxdepth,
-            matched=self.matched,
-            stopping=self.op.cancelling,
-        )
+        else:
+            return _chunks(
+                self.fs,
+                directories,
+                maxdepth=self.maxdepth,
+                matched=self.matched,
+                stopping=self.op.cancelling,
+            )
 
     async def begin(
         self, roots: _Roots, source: AsyncGenerator[_Listing] | None

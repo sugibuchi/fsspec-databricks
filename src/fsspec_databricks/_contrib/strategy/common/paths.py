@@ -36,4 +36,5 @@ def _triples(
 
     if detail:
         return directory, dirs, files
-    return directory, list(dirs), list(files)
+    else:
+        return directory, list(dirs), list(files)

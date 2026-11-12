@@ -2,21 +2,21 @@
 
 ## Layout
 
-| Path                                       | Contents                                                                  |
-|--------------------------------------------|---------------------------------------------------------------------------|
-| `src/fsspec_databricks/__init__.py`        | The public API: `DatabricksFileSystem` and `use()`.                       |
-| `src/fsspec_databricks/spec.py`            | `DatabricksFileSystem`, the router sending each call to a backend.        |
-| `src/fsspec_databricks/base.py`            | The client handling, and the base classes of the backends.                |
-| `src/fsspec_databricks/http_client.py`     | The aiohttp session, requests and errors of the Volume and DBFS files.    |
-| `src/fsspec_databricks/volume.py`          | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.          |
+| Path                                       | Contents                                                                   |
+|--------------------------------------------|----------------------------------------------------------------------------|
+| `src/fsspec_databricks/__init__.py`        | The public API: `DatabricksFileSystem` and `use()`.                        |
+| `src/fsspec_databricks/spec.py`            | `DatabricksFileSystem`, the router sending each call to a backend.         |
+| `src/fsspec_databricks/base.py`            | The client handling, and the base classes of the backends.                 |
+| `src/fsspec_databricks/http_client.py`     | The aiohttp session, requests and errors of the Volume and DBFS files.     |
+| `src/fsspec_databricks/volume.py`          | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.           |
 | `src/fsspec_databricks/workspace.py`       | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object. |
-| `src/fsspec_databricks/dbfs.py`            | `DBFS`, the legacy DBFS, and its file objects.                            |
-| `src/fsspec_databricks/local.py`           | `DatabricksLocalFileSystem`, used inside a workspace.                     |
-| `src/fsspec_databricks/path.py`            | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.        |
-| `src/fsspec_databricks/error.py`           | `OSError`s, and the mapping of the SDK's exceptions to them.              |
-| `src/fsspec_databricks/utils.py`           | Timestamps, enums, and what a file mode allows.                           |
-| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the strategies and the file objects.     |
-| `tests/`                                   | The tests, a file per module, and the dummy API server.                   |
+| `src/fsspec_databricks/dbfs.py`            | `DBFS`, the legacy DBFS, and its file objects.                             |
+| `src/fsspec_databricks/local.py`           | `DatabricksLocalFileSystem`, used inside a workspace.                      |
+| `src/fsspec_databricks/path.py`            | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.         |
+| `src/fsspec_databricks/error.py`           | `OSError`s, and the mapping of the SDK's exceptions to them.               |
+| `src/fsspec_databricks/utils.py`           | Timestamps, enums, and what a file mode allows.                            |
+| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the strategies and the file objects.      |
+| `tests/`                                   | The tests, a file per module, and the dummy API server.                    |
 
 The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies. All Python commands go through
 [uv](https://docs.astral.sh/uv/).
@@ -164,11 +164,11 @@ Where the references leave behaviour open, the dummy makes an assumption, marked
 
 ## CI
 
-| Workflow       | Runs on                                   | Does                                               |
-|----------------|-------------------------------------------|----------------------------------------------------|
-| `ci.yaml`      | Pull requests, pushes to `main`, by hand  | Lint, offline tests, then live tests on each cloud |
-| `codeql.yaml`  | Pull requests, pushes to `main`, weekly, by hand | CodeQL scan of the Python code and the workflows |
-| `release.yaml` | Pushed `v*` tags                          | Build, GitHub release, and publishing to PyPI      |
+| Workflow       | Runs on                                          | Does                                               |
+|----------------|--------------------------------------------------|----------------------------------------------------|
+| `ci.yaml`      | Pull requests, pushes to `main`, by hand         | Lint, offline tests, then live tests on each cloud |
+| `codeql.yaml`  | Pull requests, pushes to `main`, weekly, by hand | CodeQL scan of the Python code and the workflows   |
+| `release.yaml` | Pushed `v*` tags                                 | Build, GitHub release, and publishing to PyPI      |
 
 `ci.yaml` has three jobs:
 
@@ -178,7 +178,7 @@ Where the references leave behaviour open, the dummy makes an assumption, marked
 
 `live` runs on pushes, by hand, and on pull requests from branches of this repository. Pull requests from forks and
 Dependabot get no environment secrets, so they run `test` only. An environment without `DATABRICKS_HOST` is skipped
-with a notice. Each run's work directories are `<root>/<branch>` under the environment's roots.
+with a notice. Each run's work directories are `<root>/<ref name>` under the environment's roots, e.g. `<root>/main`.
 
 ### Supply chain
 
@@ -188,8 +188,8 @@ The live jobs hold the workspaces' credentials, so what they run is fixed:
 - Actions are pinned to commit SHAs, and setup-uv to a uv version.
 - Dependabot updates `uv.lock` and the Actions' SHAs weekly.
 - No workflow gives secrets to pull requests from forks.
-- Each workflow's token can only read the repository. Only the jobs that need them add `id-token: write` or
-  `contents: write`.
+- Each workflow's token can only read the repository. Only the jobs that need more add it: `id-token: write`,
+  `contents: write` or `security-events: write`.
 - The live jobs and the release build use no cache.
 
 ruff, zizmor and actionlint, run with `uvx`, are the exception: CI runs their latest versions, in a job without secrets.
@@ -199,20 +199,20 @@ ruff, zizmor and actionlint, run with `uvx`, are the exception: CI runs their la
 Each of the GitHub environments `aws`, `azure` and `gcp` is a Databricks workspace. The tests authenticate as a service
 principal with read-write access to the work directories.
 
-| Environment | Workspace                             | Authentication               |
-|-------------|---------------------------------------|------------------------------|
-| `aws`       | Databricks Free Edition, on AWS       | Client secret                |
-| `azure`     | Azure Databricks                      | `github-oidc-azure`          |
-| `gcp`       | Databricks on Google Cloud            | `github-oidc`                |
+| Environment | Workspace                       | Authentication      |
+|-------------|---------------------------------|---------------------|
+| `aws`       | Databricks Free Edition, on AWS | Client secret       |
+| `azure`     | Azure Databricks                | `github-oidc-azure` |
+| `gcp`       | Databricks on Google Cloud      | `github-oidc`       |
 
 Every environment has these:
 
-| Name                                               | Value                                          |
-|----------------------------------------------------|------------------------------------------------|
-| `DATABRICKS_HOST` (secret)                         | The workspace's URL                            |
-| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)    | The POSIX path of the Volume work directory    |
-| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable) | The POSIX path of the Workspace work directory |
-| `FSSPEC_DATABRICKS_TEST_FS` (variable, optional)   | The backends tested, e.g. `volume,workspace`   |
+| Name                                                 | Value                                                                |
+|------------------------------------------------------|----------------------------------------------------------------------|
+| `DATABRICKS_HOST` (secret)                           | The workspace's URL                                                  |
+| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)      | The POSIX path of the Volume work directory                          |
+| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable)   | The POSIX path of the Workspace work directory                       |
+| `FSSPEC_DATABRICKS_TEST_FS` (variable, optional)     | The backends tested, e.g. `volume,workspace`                         |
 | `FSSPEC_DATABRICKS_TEST_SCOPES` (variable, optional) | The OAuth scopes of the secret, e.g. `files,workspace,unity-catalog` |
 
 The variable `DATABRICKS_AUTH_TYPE` chooses how the tests authenticate:
@@ -348,8 +348,8 @@ A `WorkspaceClient` given as `client` is not picklable. Other ways of authentica
 - **`DatabricksFileSystem`**, in `spec.py`, routes calls to backends created on first use.
 - **The backends** wrap one Databricks API each. Each is an async `TreeFileSystem` of fsspec-alt-strategies, and
   subclasses `BaseDatabricksFileSystem`, in `base.py`.
-- **The file objects** are the library's. Volume and DBFS files read ranges concurrently. Workspace files are sync
-  `WorkspaceFile`s, transferred whole.
+- **The file objects** of Volumes and DBFS are the library's adaptive files, which read ranges concurrently.
+  Workspace files are sync `WorkspaceFile`s, transferred whole.
 - **Paths**, in `path.py`, are parsed with regular expressions into each backend's parts.
 
 ### Routing
@@ -373,9 +373,9 @@ The library's router does the rest:
   is streamed through `open_async`, 8 MB at a time, `transfer_concurrency` files at a time.
 - A move between backends deletes each source file once it is copied, then the source folders left empty.
 
-No two backends share a storage, and Databricks has no copy between them. So `spec.py` keeps the router's
-`_cross_fs_cp_entry` and `_cross_fs_mv_entry`, which stream the data. A copy within one backend is its own only when
-both paths route to it.
+No two backends share a storage, and Databricks has no copy between them. So `spec.py` does not override the
+router's `_cross_fs_cp_entry` and `_cross_fs_mv_entry`, which stream the data. A copy is the backend's own only when
+both paths route to the same backend.
 
 No request checks whether legacy DBFS is enabled:
 
@@ -383,7 +383,7 @@ No request checks whether legacy DBFS is enabled:
   403 a `PermissionError`.
 - With the API, `_roots` lists the DBFS root, and falls back to `/Volumes` and `/Workspace` on that `PermissionError`.
 - With the local file system, `_roots` falls back when `legacy_dbfs_local_root` does not exist.
-- Only the property `legacy_dbfs_enabled` asks the workspace setting `disable_legacy_dbfs`, once per instance,
+- Only the property `DBFS.legacy_dbfs_enabled` asks the workspace setting `disable_legacy_dbfs`, once per instance,
   blocking. Nothing internal calls it.
 
 `close()` closes the backends. The router needs async backends, so the library's `SyncTreeWrapper` wraps the local
@@ -495,11 +495,11 @@ A failed request raises an `OSError`, chosen by its HTTP status or by the API's 
 On first open, the file system asks the workspace where file data goes, as SDK 0.163 asks: `GET /api/2.0/fs/endpoints`.
 The list names endpoints best first, and the file system keeps those it can speak:
 
-| Entry                         | Data goes                                                            |
-|-------------------------------|----------------------------------------------------------------------|
-| `IO_OFFLOAD`                  | Through presigned URLs, which the host's Files API 2.0 gives         |
-| `FILES_API` 2.0               | To the Files API 2.0 of the host. On another host, the storage proxy |
-| `FILES_API` 3.0               | To `/api/3.0/fs/files` of the host, a multipart upload by its ID     |
+| Entry           | Data goes                                                            |
+|-----------------|----------------------------------------------------------------------|
+| `IO_OFFLOAD`    | Through presigned URLs, which the host's Files API 2.0 gives         |
+| `FILES_API` 2.0 | To the Files API 2.0 of the host. On another host, the storage proxy |
+| `FILES_API` 3.0 | To `/api/3.0/fs/files` of the host, a multipart upload by its ID     |
 
 - An entry of another protocol, or with a malformed address, is skipped.
 - Plain HTTP is taken only for Files API 2.0 on another host, or on a workspace reached by plain HTTP. The SDK refuses
@@ -618,8 +618,8 @@ default. An existing notebook keeps its language, and a new one needs `language`
 
 ### File objects
 
-Every backend's files are the library's file objects. They raise `RuntimeError` when their sync methods are called
-from the event loop. Code on the loop uses `open_async()` and awaits the file's methods.
+Volume and DBFS files are the library's file objects. They raise `RuntimeError` when their sync methods are called
+from the event loop. Code on the loop uses `open_async()` and awaits the file's methods, `WorkspaceFile`s included.
 
 ### Transactions
 
@@ -665,15 +665,15 @@ installed.
 ### The copy of fsspec-alt-strategies
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl` from
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.3.0. Its modules keep their
-license headers and relative imports, and ruff skips them.
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.4.0. Its modules keep their
+license headers and relative imports, and ruff skips them. Its `LICENSE` stays with them.
 
 It keeps only what the backends use: `tree/`, `common/`, `files/`, `router.py`, and `wrapper/` with only its tree
 wrapper. The backends are all trees, so the router never imports `flat/`. `monitored()` is unused, so its `monitor.py`,
 and the `__init__.py` re-exporting it, are left out: the copy is a namespace package. `_version.py` stays, as the
 copy's command line recognises a previous copy by it.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`, from PyPI.
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.4,<0.5`, from PyPI.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.

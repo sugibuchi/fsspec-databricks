@@ -1,3 +1,5 @@
+"""Tests of `BaseDatabricksFileSystem`: its client, its threads, closing and pickling."""
+
 import asyncio
 import pickle
 import threading

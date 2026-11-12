@@ -231,7 +231,8 @@ class SyncFileAdapter:
         """The size given, or else the file's: None if neither tells it."""
         if self._size is not None:
             return self._size
-        return getattr(self.file, "size", None)
+        else:
+            return getattr(self.file, "size", None)
 
     @property
     def closed(self) -> bool:

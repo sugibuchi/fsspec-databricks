@@ -113,7 +113,10 @@ class _Prefix:
         """Whether the pattern can still match below a directory, at that path."""
         if self.bounded and len(relative) >= len(self.segments):
             return False
-        return all(s.match(n) for s, n in zip(self.segments, relative, strict=False))
+        else:
+            return all(
+                s.match(n) for s, n in zip(self.segments, relative, strict=False)
+            )
 
 
 class _Search:
@@ -163,7 +166,8 @@ class _Search:
             return 0
         if not _inside(name, self.root):
             return None
-        return name[self.start :].count("/") + 1
+        else:
+            return name[self.start :].count("/") + 1
 
     def matched(self, entry: dict[str, Any]) -> bool:
         is_dir = entry["type"] == "directory"
@@ -178,10 +182,11 @@ class _Search:
             or (self.depth is not None and level > self.depth)
         ):
             return False
-
-        return (
-            self.matches(name + "/" if is_dir and self.slash_dirs else name) is not None
-        )
+        else:
+            return (
+                self.matches(name + "/" if is_dir and self.slash_dirs else name)
+                is not None
+            )
 
     def descend(self, entry: dict[str, Any]) -> bool:
         name = entry["name"].rstrip("/")
@@ -191,7 +196,8 @@ class _Search:
         level = self._level(name)
         if level is None or (self.depth is not None and level >= self.depth):
             return False
-        return level == 0 or self.prefix.alive(name[self.start :].split("/"))
+        else:
+            return level == 0 or self.prefix.alive(name[self.start :].split("/"))
 
     def whole(self, entry: dict[str, Any]) -> bool:
         """Whether every directory below a directory's entry is one to descend into.
@@ -203,7 +209,10 @@ class _Search:
         level = self._level(name)
         if level is None or self.depth is not None:
             return False
-        return self.prefix.everything(name[self.start :].split("/") if level else [])
+        else:
+            return self.prefix.everything(
+                name[self.start :].split("/") if level else []
+            )
 
 
 def _depth(path: str, relative: str, maxdepth: int | None) -> int | None:
@@ -213,4 +222,5 @@ def _depth(path: str, relative: str, maxdepth: int | None) -> int | None:
         return depth
     if maxdepth is None:
         return None
-    return depth - path[path.find("**") :].count("/") - 1 + maxdepth
+    else:
+        return depth - path[path.find("**") :].count("/") - 1 + maxdepth

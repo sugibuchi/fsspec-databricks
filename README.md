@@ -70,11 +70,11 @@ for authentication.
 
 ### Paths
 
-| Path                                                   | File system                                 |
-|--------------------------------------------------------|---------------------------------------------|
-| `dbfs:/Volumes/<catalog>/<schema>/<volume>/path`       | Unity Catalog Volume                        |
-| `dbfs:/Workspace/path`                                 | Workspace files                             |
-| `dbfs:/path`, any other                                | Legacy DBFS                                 |
+| Path                                             | File system          |
+|--------------------------------------------------|----------------------|
+| `dbfs:/Volumes/<catalog>/<schema>/<volume>/path` | Unity Catalog Volume |
+| `dbfs:/Workspace/path`                           | Workspace files      |
+| `dbfs:/path`, any other                          | Legacy DBFS          |
 
 POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and `/path`. See
 [Databricks' documentation](https://docs.databricks.com/aws/en/files/) for these paths.
@@ -84,8 +84,8 @@ POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and 
 ## Compatibility
 
 * Python 3.11 to 3.14
-* `databricks-sdk`: 0.80.0 or later. Older versions ignore some parameters: `custom_headers` needs 0.86.0, and
-  `group_id` needs 0.134.0.
+* `databricks-sdk`: 0.80.0 or later. Some parameters need a later version, and earlier ones ignore them:
+  `custom_headers` needs 0.86.0, and `group_id` needs 0.134.0.
 * `fsspec`: 2024.6.0 or later
 * `aiohttp`: 3.12.0 or later
 * Tested live on Databricks Free Edition on AWS, Azure Databricks and Databricks on Google Cloud

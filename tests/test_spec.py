@@ -1,3 +1,6 @@
+"""Tests of `DatabricksFileSystem`: `use()`, its options, the routing to each backend or to the local file system,
+copies between backends, transactions, closing and pickling."""
+
 import inspect
 import pickle
 from random import randbytes

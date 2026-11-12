@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, Generic, NamedTuple, TypeVar
 
 from fsspec.utils import common_prefix
 
-from fsspec_alt_strategies.profile import StorageProfile
+from fsspec_alt_strategies.profile import UNKNOWN
 from fsspec_alt_strategies.states import CpState
 
 from .operation import Operation, _collect_with_errors
@@ -506,7 +506,7 @@ class _CopyJobs(_Jobs):
         # where it writes. Within one storage, it is the source's too. Unknown
         # until setup awaits it.
         self.dst_fs = dst_fs
-        self.profile = StorageProfile()
+        self.profile = UNKNOWN
         self.implicit_directories = False
         self.parents_required = True
 
@@ -527,7 +527,7 @@ class _CopyJobs(_Jobs):
         # Any async filesystem may be a router's destination: fsspec gives it
         # no profile, so its storage is unknown.
         get = getattr(self.dst_fs, "_get_storage_profile", None)
-        self.profile = await get() if get is not None else StorageProfile()
+        self.profile = await get(self.path2) if get is not None else UNKNOWN
         # Unknown, directories are made first. Implicit directories need none.
         self.implicit_directories = bool(self.profile.implicit_directories)
         self.parents_required = (
@@ -640,7 +640,8 @@ class _CopyJobs(_Jobs):
 
         if self.prefix:
             return self.base + path[len(self.prefix) :]
-        return f"{self.base}/{path}" if self.base else path
+        else:
+            return f"{self.base}/{path}" if self.base else path
 
     async def copy_file(
         self, cp_entry: _Transfer, entry: dict[str, Any], destination: str

@@ -21,7 +21,7 @@ import os
 from abc import abstractmethod
 from contextlib import aclosing
 from glob import has_magic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import DEFAULT_CALLBACK
@@ -60,9 +60,12 @@ _MiB = 1024 * 1024
 _Group = tuple[AsyncFileSystem, list[str], list[str]]
 """An inner filesystem, the inner paths given to it, and the router's paths of them."""
 
+_Backend = TypeVar("_Backend", bound=AsyncFileSystem)
+"""The class of a router's inner filesystems, e.g. one per account of a cloud."""
+
 
 class AsyncRoutingFileSystem(
-    AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemMeta
+    AsyncFileSystem, Monitored, Generic[_Backend], metaclass=_AbstractFileSystemMeta
 ):
     """An abstract async filesystem passing each call to the filesystem of the path's storage.
 
@@ -75,10 +78,13 @@ class AsyncRoutingFileSystem(
       path above every storage, e.g. a catalog holding volumes.
     - ``_outer(fs, path)`` gives the router's path of an inner one, so that
       the names answered, e.g. by ``ls`` and ``find``, are the router's.
-    - ``_roots(path)`` lists a directory above the storages, as ``ls`` with
-      ``detail=True`` does.
+    - ``_roots(path)``, if any path is above the storages, lists a directory
+      there, as ``ls`` with ``detail=True`` does.
 
-    ``_route`` is sync, as sync methods route too.
+    ``_route`` is sync, as sync methods route too. A subclass whose inner
+    filesystems are all of one class names it, e.g.
+    ``AsyncRoutingFileSystem[S3FileSystem]``, so that its hooks take that
+    class.
 
     The primitives, e.g. ``_info``, ``_cat_file`` and ``_open``, call the
     inner filesystem's own. The recursive methods, e.g. ``_find``, ``_rm`` and
@@ -109,8 +115,9 @@ class AsyncRoutingFileSystem(
     Inner filesystems are async, on the router's loop: a sync one raises
     TypeError, and is to be wrapped, e.g. in a `SyncTreeWrapper`. A subclass
     makes them when first needed, with `_backend`, so that ``close()`` closes
-    them. Pickling keeps the constructor's arguments, as fsspec's own does, so
-    a copy makes its inner filesystems again.
+    them, and `backends_loop` tells the loop they run on. Pickling keeps the
+    constructor's arguments, as fsspec's own does, so a copy makes its inner
+    filesystems again.
 
     One transaction is the router's: ``open`` passes ``autocommit`` on, and
     fsspec adds each file written to the router's transaction. Its commit, or
@@ -178,12 +185,13 @@ class AsyncRoutingFileSystem(
 
         self.transfer_concurrency = transfer_concurrency
         self.transfer_limit = asyncio.Semaphore(transfer_concurrency)
-        self._backends: dict[Hashable, AsyncFileSystem] = {}
+        self._backends: dict[Hashable, _Backend] = {}
+        self._backends_loop: asyncio.AbstractEventLoop | None = None
 
     # What a subclass implements.
 
     @abstractmethod
-    def _route(self, path: str) -> tuple[AsyncFileSystem, str] | None:
+    def _route(self, path: str) -> tuple[_Backend, str] | None:
         """The inner filesystem of a path, and its path there, or None above them all.
 
         ``path`` is the router's, without the protocol. A trailing "/" is kept,
@@ -197,18 +205,22 @@ class AsyncRoutingFileSystem(
         """
 
     @abstractmethod
-    def _outer(self, fs: AsyncFileSystem, path: str) -> str:
+    def _outer(self, fs: _Backend, path: str) -> str:
         """The router's path of ``path``, a path of the inner filesystem ``fs``."""
 
-    @abstractmethod
+    # What a subclass may override.
+
     async def _roots(self, path: str) -> list[dict[str, Any]]:
         """List a directory above the storages, as ``_ls`` with ``detail=True`` does.
 
         Each entry's name is the router's path. It raises FileNotFoundError
         for a directory that does not exist.
-        """
 
-    # What a subclass may override.
+        Here, there is none: ``_route`` never answers None, e.g. for URLs each
+        naming its storage, and any path raises FileNotFoundError. A subclass
+        with paths above its storages overrides it.
+        """
+        raise FileNotFoundError(path)
 
     async def _root_info(self, path: str) -> dict[str, Any]:
         """Describe a path above the storages, as ``_info`` does.
@@ -230,9 +242,9 @@ class AsyncRoutingFileSystem(
 
     async def _cross_fs_cp_entry(
         self,
-        src_fs: AsyncFileSystem,
+        src_fs: _Backend,
         src_entry: dict[str, Any],
-        dest_fs: AsyncFileSystem,
+        dest_fs: _Backend,
         dest_path: str,
     ) -> None:
         """Copy a file from one storage to another, the paths the inner filesystems'.
@@ -263,9 +275,9 @@ class AsyncRoutingFileSystem(
 
     async def _cross_fs_mv_entry(
         self,
-        src_fs: AsyncFileSystem,
+        src_fs: _Backend,
         src_entry: dict[str, Any],
-        dest_fs: AsyncFileSystem,
+        dest_fs: _Backend,
         dest_path: str,
     ) -> None:
         """Move a file from one storage to another, the paths the inner filesystems'.
@@ -277,28 +289,46 @@ class AsyncRoutingFileSystem(
         await self._cross_fs_cp_entry(src_fs, src_entry, dest_fs, dest_path)
         await src_fs._rm_file(src_entry["name"])
 
-    def _backend(
-        self, key: Hashable, make: Callable[[], AsyncFileSystem]
-    ) -> AsyncFileSystem:
+    def _backend(self, key: Hashable, make: Callable[[], _Backend]) -> _Backend:
         """The inner filesystem of ``key``, made by ``make`` the first time.
 
         A subclass's ``_route`` makes its inner filesystems with it, e.g. one
-        per volume, or per account and container. ``make`` gives them
-        ``asynchronous=True`` and the router's ``loop``, so that their
-        coroutines run where the router's do. ``close()`` closes them.
+        per volume, or per account and container. ``make`` gives them the
+        router's mode and loop, ``asynchronous=self.asynchronous`` and
+        ``loop=self.loop``. A sync router's calls, e.g. ``open`` and ``sign``,
+        call their sync methods, which run on that loop. Made with
+        ``asynchronous=True`` under a sync router, they would have no loop to
+        run on. ``close()`` closes them.
         """
         fs = self._backends.get(key)
         if fs is None:
             fs = self._backends[key] = make()
+            if self._backends_loop is None:
+                try:
+                    self._backends_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    self._backends_loop = self._loop
         return fs
 
+    @property
+    def backends_loop(self) -> asyncio.AbstractEventLoop | None:
+        """The loop the inner filesystems run on, once one is made, else None.
+
+        It is the loop running when the first was made, or else a sync router's
+        own. Their clients' sessions are bound to it. A subclass holding what
+        they share, e.g. a credential, closes it there, after ``close()``.
+        """
+        return self._backends_loop
+
     def close(self) -> None:
-        """Close the inner filesystems made by `_backend`, and forget them.
+        """Close the inner filesystems made by `_backend`, and forget them, and their loop.
 
         Each is closed by its own ``close()``, if it has one. A call after
-        makes them again.
+        makes them again. A subclass closing what they share takes
+        `backends_loop` first.
         """
         backends, self._backends = self._backends, {}
+        self._backends_loop = None
         for fs in backends.values():
             close = getattr(fs, "close", None)
             if callable(close):
@@ -326,8 +356,8 @@ class AsyncRoutingFileSystem(
 
         if plain.endswith("/") and inner and not inner.endswith("/"):
             return fs, f"{inner}/"
-
-        return target
+        else:
+            return target
 
     def _required(self, path: str) -> tuple[AsyncFileSystem, str]:
         """``_target`` of a path that must be in a storage, e.g. of a file."""
@@ -478,8 +508,8 @@ class AsyncRoutingFileSystem(
         if target is not None:
             fs, inner = target
             return self._entry(fs, await self._on(fs, inner, path, fs._info(inner)))
-
-        return await self._root_info(self._strip_protocol(path))
+        else:
+            return await self._root_info(self._strip_protocol(path))
 
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
         target = self._target(path)
@@ -560,9 +590,8 @@ class AsyncRoutingFileSystem(
         if self._intrans:
             pipe_file = AbstractFileSystem.pipe_file
             await self._in_transaction(path, pipe_file, path, value, **kwargs)
-            return
-
-        await self._forward(path, "_pipe_file", value, **kwargs)
+        else:
+            await self._forward(path, "_pipe_file", value, **kwargs)
 
     async def _get_file(self, rpath: str, lpath: str, **kwargs: Any) -> None:
         await self._forward(rpath, "_get_file", lpath, **kwargs)
@@ -570,10 +599,9 @@ class AsyncRoutingFileSystem(
     async def _put_file(self, lpath: str, rpath: str, **kwargs: Any) -> None:
         if self._intrans:
             await self._in_transaction(rpath, _put_file, lpath, rpath, **kwargs)
-            return
-
-        fs, inner = self._required(rpath)
-        await self._on(fs, inner, rpath, fs._put_file(lpath, inner, **kwargs))
+        else:
+            fs, inner = self._required(rpath)
+            await self._on(fs, inner, rpath, fs._put_file(lpath, inner, **kwargs))
 
     async def _in_transaction(
         self, path: str, write: Callable[..., None], *args: Any, **kwargs: Any
@@ -1035,7 +1063,7 @@ class AsyncRoutingFileSystem(
         get = getattr(fs1, "_get_storage_profile", None)
         if get is None:
             return None  # A plain fsspec filesystem: fsspec's own copy.
-        fs_type = (await get()).fs_type
+        fs_type = (await get(path1)).fs_type
         if fs_type is None:
             return None
 
@@ -1065,7 +1093,8 @@ class AsyncRoutingFileSystem(
                 same_storage=False,
                 maxdepth=maxdepth,
             )
-        return None
+        else:
+            return None
 
     async def _cross_fs_mv(
         self,
@@ -1084,7 +1113,7 @@ class AsyncRoutingFileSystem(
         get = getattr(fs1, "_get_storage_profile", None)
         if get is None:
             return None  # A plain fsspec filesystem: fsspec's own copy, then rm.
-        fs_type = (await get()).fs_type
+        fs_type = (await get(path1)).fs_type
         if fs_type is None:
             return None
 
@@ -1116,7 +1145,8 @@ class AsyncRoutingFileSystem(
                 same_storage=False,
                 maxdepth=maxdepth,
             )
-        return None
+        else:
+            return None
 
     def _across(
         self, fs1: AsyncFileSystem, fs2: AsyncFileSystem, *, move: bool = False

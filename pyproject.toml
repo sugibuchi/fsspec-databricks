@@ -6,9 +6,7 @@ build-backend = "hatchling.build"
 name = "fsspec-databricks"
 dynamic = ["version"]
 description = "An fsspec file system for Databricks: Unity Catalog Volumes, Workspace files and legacy DBFS"
-authors = [
-    { name = "Tsuyoshi SUGIBUCHI", email = "sugibuchi@gmail.com" }
-]
+authors = [{ name = "Tsuyoshi SUGIBUCHI" }]
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -37,15 +35,17 @@ classifiers = [
 
 dependencies = [
     "fsspec>=2024.6.0",
-    # The oldest versions the dummy-server tests pass on: HostType and ClientMiddlewareType arrived in them.
+    # The oldest versions of the SDK and aiohttp that the dummy-server tests pass on: HostType and
+    # ClientMiddlewareType arrived in them.
     "databricks-sdk>=0.80.0",
     "aiohttp>=3.12.0",
     # The interface of the strategies copied into _contrib/strategy, to its minor version: see DEVELOPMENT.md.
-    "fsspec-alt-strategies>=0.3,<0.4",
+    "fsspec-alt-strategies>=0.4,<0.5",
 ]
 
 [project.urls]
 Homepage = "https://github.com/sugibuchi/fsspec-databricks"
+
 
 [dependency-groups]
 dev = [
@@ -94,8 +94,6 @@ exclude = [
 exclude = [
     ".tox",
     "build",
-    "docs/source/conf.py",
-    "fsspec_databricks/_version",
     # Copied from fsspec-alt-strategies, and kept as it is there: see DEVELOPMENT.md.
     "src/fsspec_databricks/_contrib/strategy",
 ]

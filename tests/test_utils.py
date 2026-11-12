@@ -1,3 +1,5 @@
+"""Tests of `utils.py`: times, file modes and enum values."""
+
 from datetime import UTC, timedelta
 from enum import Enum
 

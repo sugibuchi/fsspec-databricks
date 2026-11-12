@@ -161,7 +161,8 @@ def _whole(part: _Listing, held: dict[str, list[dict[str, Any]]]) -> _Listing | 
     entries = held.pop(part.directory)
     if part.error is not None:
         return _Listing(part.directory, part.depth, [], part.error)
-    return _Listing(part.directory, part.depth, entries)
+    else:
+        return _Listing(part.directory, part.depth, entries)
 
 
 def _walked(
@@ -198,7 +199,8 @@ def _walked_subdirs(
         maxdepth is not None and listing.depth >= maxdepth
     ):
         return []
-    return list(dict.fromkeys(_subdirs(listing.entries, descend)))
+    else:
+        return list(dict.fromkeys(_subdirs(listing.entries, descend)))
 
 
 def _subdirs(
@@ -649,9 +651,10 @@ class _Trees:
     def _whole(self, directory: str) -> bool:
         if self.descend is None:
             return True
-        return self.whole is not None and self.whole(
-            {"name": directory, "type": "directory"}
-        )
+        else:
+            return self.whole is not None and self.whole(
+                {"name": directory, "type": "directory"}
+            )
 
     def listed(self, directory: str) -> bool:
         """Whether the directory's subdirectories are in a recursive listing."""

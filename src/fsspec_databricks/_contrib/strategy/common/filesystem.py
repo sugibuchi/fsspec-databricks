@@ -31,7 +31,7 @@ from fsspec.asyn import AsyncFileSystem, _run_coros_in_chunks
 from fsspec.callbacks import DEFAULT_CALLBACK
 
 from fsspec_alt_strategies.monitor import Monitored
-from fsspec_alt_strategies.profile import StorageProfile
+from fsspec_alt_strategies.profile import UNKNOWN, StorageProfile
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -62,16 +62,26 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
     of the number given.
 
     ``storage_profile`` tells the strategies what the storage does. It is one
-    for the whole filesystem, and never changes. One whose storage is unknown
-    says so, with ``StorageProfile()``. Where it is found by a request, e.g.
-    whether an account has a hierarchical namespace, a subclass overrides
-    ``_load_storage_profile`` instead. Either way, the strategies and the
-    subclass's primitives get it with ``await self._get_storage_profile()``.
+    for the whole filesystem, and always set: one whose storage is unknown says
+    so, with ``UNKNOWN``. Where a request finds it, e.g. whether an
+    account has a hierarchical namespace, a subclass sets what it knows and
+    overrides ``_load_storage_profile(path)`` too, which may ask the storage at
+    one of the paths the first operation needing it is given. The strategies
+    and the subclass's primitives get it with
+    ``await self._get_storage_profile(paths)``, which loads it once, sets it as
+    ``storage_profile``, and returns it.
     A storage whose profile differs by path, e.g. per bucket, is several
     filesystems under a router.
 
     Each family's class declares the abstract methods its subclasses implement,
     so that a reader finds them all in one place.
+    """
+
+    storage_profile: StorageProfile = UNKNOWN
+    """What the storage does, for the strategies: unknown, right on any storage, by default.
+
+    A subclass sets what it knows. One overriding ``_load_storage_profile``
+    too has it replaced by the profile `_get_storage_profile` loads.
     """
 
     transfer_size: int = 8 * _MiB
@@ -103,18 +113,8 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
 
         super().__init__(*args, **kwargs)
 
-        # A profile found by a request needs none set beside it.
-        load = type(self)._load_storage_profile
-        profile = getattr(self, "storage_profile", None)
-        if load is _BaseFileSystem._load_storage_profile and not isinstance(
-            profile, StorageProfile
-        ):
-            raise ValueError(
-                "storage_profile must be set, to a StorageProfile, unless"
-                f" _load_storage_profile is overridden: {profile!r}"
-            )
         # Named apart from a subclass's own members.
-        self._storage_profile_loaded: StorageProfile | None = None
+        self._storage_profile_loaded = False
         self._storage_profile_lock = asyncio.Lock()
 
         self.operation_concurrency = operation_concurrency
@@ -122,32 +122,64 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         self.operation_limit = operation_limit
         self.io_limit = io_limit
 
-    async def _load_storage_profile(self) -> StorageProfile:
-        """Find the profile: here, ``storage_profile``.
+    async def _load_storage_profile(self, path: str) -> StorageProfile:
+        """Find the profile, with a path the storage may be asked at: here, ``storage_profile``.
 
         A subclass overrides it where the profile is found by a request, e.g.
-        whether an account has a hierarchical namespace. It is awaited once,
-        by `_get_storage_profile`, which keeps what it returns. One that cannot
-        tell yet either raises, to be awaited again on the next call, or
-        returns ``StorageProfile()``, right on any storage and then kept.
-        """
-        return self.storage_profile  # type: ignore[attr-defined, no-any-return]
+        whether an account has a hierarchical namespace. A credential limited
+        to a container may ask that only within the container. ``path`` is one
+        of the paths the operation needing the profile is given, maybe a glob
+        pattern. It tells where to ask, never what the profile is: the profile
+        is one for the whole filesystem.
 
-    async def _get_storage_profile(self) -> StorageProfile:
-        """The profile, loaded once by `_load_storage_profile`, then kept.
-
-        The strategies await it once, when they start. The subclass's
-        primitives may await it too, e.g. a ``_rmdir`` depending on whether
-        directories are real, rather than keep a copy of what it knows.
-        A first call loads it while the others wait, then find it kept.
+        `_get_storage_profile` sets what it returns as ``storage_profile``,
+        then never calls it again. One that cannot tell at ``path`` raises: the
+        next path is tried, or the next operation's. Returning ``UNKNOWN``
+        instead sets that for good, which is right on any storage.
         """
-        # Once kept, no call waits for the lock.
-        if (profile := self._storage_profile_loaded) is not None:
-            return profile
+        return self.storage_profile
+
+    async def _get_storage_profile(self, path: str | Sequence[str]) -> StorageProfile:
+        """``storage_profile``, loaded first by `_load_storage_profile` with one of ``path``.
+
+        ``path`` is the path, or the paths, an operation is given, e.g. a
+        copy's destination. Once loaded, ``storage_profile`` is returned as it
+        is. Until then, each path is tried in turn, until
+        `_load_storage_profile` finds the profile, then set as
+        ``storage_profile``. If it fails at all of them, it raises: a single
+        error as it is, several in an ExceptionGroup. A first call loads it
+        while the others wait, then find it loaded.
+
+        The strategies await it when they start. The subclass's primitives may
+        await it too, with the paths they are given, e.g. a ``_rmdir``
+        depending on whether directories are real.
+        """
+        # Once loaded, no call waits for the lock.
+        if self._storage_profile_loaded:
+            return self.storage_profile
+
+        paths = [path] if isinstance(path, str) else list(path)
+        if not paths:
+            raise ValueError("No path to load the storage profile with")
         async with self._storage_profile_lock:
-            if self._storage_profile_loaded is None:
-                self._storage_profile_loaded = await self._load_storage_profile()
-            return self._storage_profile_loaded
+            if self._storage_profile_loaded:
+                return self.storage_profile
+
+            errors: list[Exception] = []
+            for p in paths:
+                try:
+                    profile = await self._load_storage_profile(p)
+                except Exception as e:
+                    errors.append(e)
+                else:
+                    self.storage_profile = profile
+                    self._storage_profile_loaded = True
+                    return profile
+
+        if len(errors) == 1:
+            raise errors[0]
+        else:
+            raise ExceptionGroup("The storage profile could not be loaded", errors)
 
     def _unwrapped(self) -> AsyncFileSystem:
         """The filesystem a monitor is told of: this one, or the one a wrapper wraps."""
@@ -229,7 +261,8 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
                 if end < 0:
                     end = f.size + end
                 return await f.read(max(0, end - position))
-            return await f.read()
+            else:
+                return await f.read()
 
     async def _pipe_file(
         self, path: str, value: bytes, mode: str = "overwrite", **kwargs: Any
@@ -300,7 +333,8 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
             return self.batch_size  # type: ignore[no-any-return]
         if isinstance(self.io_concurrency, int):
             return self.io_concurrency
-        return None
+        else:
+            return None
 
     async def _cat(
         self,
@@ -463,7 +497,8 @@ def _cut(
         return data
     if length is None:
         return bytes(data)
-    return bytes(data[offset : offset + max(0, length)])
+    else:
+        return bytes(data[offset : offset + max(0, length)])
 
 
 def _merge_ranges(
@@ -566,7 +601,8 @@ def _du_answer(size: int, entries: list[dict[str, Any]], total: bool) -> Any:
     """What fsspec's ``_du`` answers: the total size, or each path's."""
     if total:
         return size
-    return {e["name"]: e.get("size") or 0 for e in entries}
+    else:
+        return {e["name"]: e.get("size") or 0 for e in entries}
 
 
 def _copy_errors(errors: list[Exception], on_error: str | None) -> list[Exception]:
@@ -576,7 +612,8 @@ def _copy_errors(errors: list[Exception], on_error: str | None) -> list[Exceptio
     """
     if on_error == "raise":
         return errors
-    return [e for e in errors if not isinstance(e, FileNotFoundError)]
+    else:
+        return [e for e in errors if not isinstance(e, FileNotFoundError)]
 
 
 def _raise(errors: list[Exception], doing: str) -> None:

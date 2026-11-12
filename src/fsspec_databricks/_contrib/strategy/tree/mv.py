@@ -276,14 +276,16 @@ class _Move(_CopyOrMove):
         empty = listing.first and not listing.entries
         if listing.last and not empty and self.finished(listing.directory):
             return self.remove(listing.directory)
-        return None
+        else:
+            return None
 
     def run(self, job: _Job) -> Awaitable[Any]:
         if job.kind == "rmdir":
             return self.fs._rmdir(job.path)
         if job.kind == "rename":
             return self.fs._mv_tree(job.path, job.destination)
-        return super().run(job)
+        else:
+            return super().run(job)
 
     async def transfer_file(self, entry: dict[str, Any], destination: str) -> None:
         try:

@@ -7,8 +7,8 @@
 - `s3fs`, `gcsfs` and `adlfs`: the wrappers of those filesystems, using
   their own listings and copies where the generic ones would cost more.
 
-A wrapper is light, and not cached, as fsspec caches filesystems: make one on
-demand, e.g. to watch a call with a monitor, and drop it after. The developer
+A wrapper is light, and fsspec does not cache it as it caches filesystems:
+make one on demand, e.g. to watch a call with a monitor, and drop it after. The developer
 chooses the wrapper, or declares it in the known implementations: none is
 detected.
 

@@ -1,6 +1,6 @@
 # Lint the code and the workflows, and test, on every push to main and pull
-# request. The offline tests run on the dummy server, with no credentials, on
-# every supported Python version. The coverage is uploaded to Codecov from one
+# request, and by hand. The offline tests run on the dummy server, with no
+# credentials, on every supported Python version. The coverage is uploaded to Codecov from one
 # Python version: uploading needs the repository secret CODECOV_TOKEN.
 #
 # The live tests then run on a Databricks workspace per cloud, each in the

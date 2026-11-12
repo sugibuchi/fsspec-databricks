@@ -294,16 +294,18 @@ class DBFS(AioHttpSessionSupport, BaseDatabricksFileSystem):
         f = sync(self.loop, self._open_file, path, mode)
         if autocommit or "r" in mode:
             return f
-        # The API's stream makes a file visible as it grows, and replaces the file there when it starts. Holding the
-        # last part, as Volumes do, would still show the rest. So a transaction writes to a temporary path, moved into
-        # place on commit. The file there is new: it writes to it directly, adding no temporary path of its own.
-        transaction = TempPathTransaction(
-            path,
-            lambda p: sync(self.loop, self._open_file, p, "wb"),
-            functools.partial(self._commit_move, exclusive="x" in mode),
-            lambda p: sync(self.loop, self._delete, p, False),
-        )
-        return TransactionFile(transaction)
+        else:
+            # The API's stream makes a file visible as it grows, and replaces the file there when it starts. Holding
+            # the last part, as Volumes do, would still show the rest. So a transaction writes to a temporary path,
+            # moved into place on commit. The file there is new: it writes to it directly, adding no temporary path of
+            # its own.
+            transaction = TempPathTransaction(
+                path,
+                lambda p: sync(self.loop, self._open_file, p, "wb"),
+                functools.partial(self._commit_move, exclusive="x" in mode),
+                lambda p: sync(self.loop, self._delete, p, False),
+            )
+            return TransactionFile(transaction)
 
     def _commit_move(self, src: str, dst: str, exclusive: bool) -> None:
         """Move a transaction's temporary file into place.

@@ -216,7 +216,8 @@ class _CopyOrMove(_CopyJobs, _TreeJobs):
     def run(self, job: _Job) -> Awaitable[Any]:
         if job.kind == "mkdir":
             return self.dst_fs._makedirs(job.destination, exist_ok=True)
-        return self.transfer_file(job.source, job.destination)
+        else:
+            return self.transfer_file(job.source, job.destination)
 
     @abstractmethod
     async def transfer_file(self, entry: dict[str, Any], destination: str) -> None:

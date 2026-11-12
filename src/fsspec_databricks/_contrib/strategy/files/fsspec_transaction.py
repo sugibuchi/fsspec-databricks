@@ -208,7 +208,8 @@ class TransactionFile(io.RawIOBase):
             return False  # Force-flushed: it can only close.
         if (answer := getattr(self._file, query, None)) is not None:
             return answer()
-        return hasattr(self._file, method)
+        else:
+            return hasattr(self._file, method)
 
     def readable(self) -> bool:
         return self._can("readable", "read")
