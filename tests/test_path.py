@@ -1,3 +1,5 @@
+"""Tests of `path.py`: the `dbfs:/` URLs, the paths of each backend, and the local paths on Databricks compute."""
+
 import pytest
 
 from fsspec_databricks.path import (

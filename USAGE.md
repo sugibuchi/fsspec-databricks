@@ -29,14 +29,14 @@ fs = fsspec.filesystem("dbfs")
 
 Besides the [authentication parameters](AUTHENTICATION.md):
 
-| Parameter                   | Description                                                                         | Default |
-|-----------------------------|-------------------------------------------------------------------------------------|---------|
-| `config`                    | A Databricks SDK `Config` to authenticate with.                                     | `None`  |
-| `client`                    | A Databricks SDK `WorkspaceClient` to call the APIs with.                           | `None`  |
-| `use_local_fs_in_workspace` | Use the local file system when running in a Databricks workspace.                   | `True`  |
-| `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.   | Per backend |
-| `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.            | Per backend |
-| `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                       | `8`     |
+| Parameter                   | Description                                                                       | Default     |
+|-----------------------------|-----------------------------------------------------------------------------------|-------------|
+| `config`                    | A Databricks SDK `Config` to authenticate with.                                   | `None`      |
+| `client`                    | A Databricks SDK `WorkspaceClient` to call the APIs with.                         | `None`      |
+| `use_local_fs_in_workspace` | Use the local file system when running in a Databricks workspace.                 | `True`      |
+| `operation_concurrency`     | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`. | Per backend |
+| `io_concurrency`            | Maximum concurrent transfers of the files opened, shared by all of them.          | Per backend |
+| `transfer_concurrency`      | Maximum files copied or moved between two backends at a time.                     | `8`         |
 
 Unity Catalog Volumes have [defaults of their own](#options-for-volumes). Workspace files and legacy DBFS default to
 `16` and `8`. Workspace files are transferred whole, so their `io_concurrency` limits only the methods taking many paths,
@@ -157,11 +157,11 @@ with fs.transaction:
 Transactions work on `DatabricksFileSystem`, across backends, and on each backend's own file system. Each backend
 keeps a file invisible in its own way:
 
-| Backend         | Before commit                                    | On commit                    | On discard              |
-|-----------------|--------------------------------------------------|------------------------------|-------------------------|
-| Volumes         | The parts are uploaded, but the last is held     | The upload is completed      | The upload is aborted   |
-| Workspace files | The file is held in memory                       | The file is uploaded         | Nothing is uploaded     |
-| Legacy DBFS     | The file is written to a hidden temporary path   | The file is moved into place | The file is deleted     |
+| Backend         | Before commit                                  | On commit                    | On discard            |
+|-----------------|------------------------------------------------|------------------------------|-----------------------|
+| Volumes         | The parts are uploaded, but the last is held   | The upload is completed      | The upload is aborted |
+| Workspace files | The file is held in memory                     | The file is uploaded         | Nothing is uploaded   |
+| Legacy DBFS     | The file is written to a hidden temporary path | The file is moved into place | The file is deleted   |
 
 Limits:
 
@@ -260,10 +260,10 @@ move is a copy, then a delete. It replaces an existing file at the destination.
 
 Pass these to `DatabricksFileSystem` or to `VolumeFileSystem`:
 
-| Parameter               | Description                                                                          | Default |
-|-------------------------|--------------------------------------------------------------------------------------|---------|
-| `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`.    | `32`    |
-| `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.     | `16`    |
+| Parameter               | Description                                                                       | Default |
+|-------------------------|-----------------------------------------------------------------------------------|---------|
+| `operation_concurrency` | Maximum concurrent API requests of a recursive operation, such as `rm` or `copy`. | `32`    |
+| `io_concurrency`        | Maximum concurrent range reads and part uploads, shared by all the files opened.  | `16`    |
 
 `VolumeFileSystem` also takes `connection_pool_size`, the maximum number of HTTP connections. It defaults to `100`.
 
@@ -335,13 +335,13 @@ A new notebook needs `language`: `"PYTHON"`, `"SCALA"`, `"SQL"` or `"R"`. An exi
 
 ### Modes
 
-| Mode  | Supported | Notes                                     |
-|-------|-----------|-------------------------------------------|
-| `rb`  | Yes       |                                           |
-| `wb`  | Yes       |                                           |
-| `ab`  | Yes       |                                           |
-| `xb`  | Yes       | Fails if the file already exists          |
-| `r+b` | No        |                                           |
+| Mode  | Supported | Notes                            |
+|-------|-----------|----------------------------------|
+| `rb`  | Yes       |                                  |
+| `wb`  | Yes       |                                  |
+| `ab`  | Yes       |                                  |
+| `xb`  | Yes       | Fails if the file already exists |
+| `r+b` | No        |                                  |
 
 ---
 

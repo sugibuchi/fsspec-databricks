@@ -70,11 +70,11 @@ for authentication.
 
 ### Paths
 
-| Path                                                   | File system                                 |
-|--------------------------------------------------------|---------------------------------------------|
-| `dbfs:/Volumes/<catalog>/<schema>/<volume>/path`       | Unity Catalog Volume                        |
-| `dbfs:/Workspace/path`                                 | Workspace files                             |
-| `dbfs:/path`, any other                                | Legacy DBFS                                 |
+| Path                                             | File system          |
+|--------------------------------------------------|----------------------|
+| `dbfs:/Volumes/<catalog>/<schema>/<volume>/path` | Unity Catalog Volume |
+| `dbfs:/Workspace/path`                           | Workspace files      |
+| `dbfs:/path`, any other                          | Legacy DBFS          |
 
 POSIX paths without `dbfs:` work the same: `/Volumes/...`, `/Workspace/...` and `/path`. See
 [Databricks' documentation](https://docs.databricks.com/aws/en/files/) for these paths.

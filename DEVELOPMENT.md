@@ -2,21 +2,21 @@
 
 ## Layout
 
-| Path                                       | Contents                                                                  |
-|--------------------------------------------|---------------------------------------------------------------------------|
-| `src/fsspec_databricks/__init__.py`        | The public API: `DatabricksFileSystem` and `use()`.                       |
-| `src/fsspec_databricks/spec.py`            | `DatabricksFileSystem`, the router sending each call to a backend.        |
-| `src/fsspec_databricks/base.py`            | The client handling, and the base classes of the backends.                |
-| `src/fsspec_databricks/http_client.py`     | The aiohttp session, requests and errors of the Volume and DBFS files.    |
-| `src/fsspec_databricks/volume.py`          | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.          |
+| Path                                       | Contents                                                                   |
+|--------------------------------------------|----------------------------------------------------------------------------|
+| `src/fsspec_databricks/__init__.py`        | The public API: `DatabricksFileSystem` and `use()`.                        |
+| `src/fsspec_databricks/spec.py`            | `DatabricksFileSystem`, the router sending each call to a backend.         |
+| `src/fsspec_databricks/base.py`            | The client handling, and the base classes of the backends.                 |
+| `src/fsspec_databricks/http_client.py`     | The aiohttp session, requests and errors of the Volume and DBFS files.     |
+| `src/fsspec_databricks/volume.py`          | `VolumeFileSystem`, Unity Catalog Volumes, and its file objects.           |
 | `src/fsspec_databricks/workspace.py`       | `WorkspaceFileSystem`, Workspace files and notebooks, and its file object. |
-| `src/fsspec_databricks/dbfs.py`            | `DBFS`, the legacy DBFS, and its file objects.                            |
-| `src/fsspec_databricks/local.py`           | `DatabricksLocalFileSystem`, used inside a workspace.                     |
-| `src/fsspec_databricks/path.py`            | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.        |
-| `src/fsspec_databricks/error.py`           | `OSError`s, and the mapping of the SDK's exceptions to them.              |
-| `src/fsspec_databricks/utils.py`           | Timestamps, enums, and what a file mode allows.                           |
-| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the strategies and the file objects.     |
-| `tests/`                                   | The tests, a file per module, and the dummy API server.                   |
+| `src/fsspec_databricks/dbfs.py`            | `DBFS`, the legacy DBFS, and its file objects.                             |
+| `src/fsspec_databricks/local.py`           | `DatabricksLocalFileSystem`, used inside a workspace.                      |
+| `src/fsspec_databricks/path.py`            | Parsing `dbfs:/` URLs and POSIX paths, and choosing their backend.         |
+| `src/fsspec_databricks/error.py`           | `OSError`s, and the mapping of the SDK's exceptions to them.               |
+| `src/fsspec_databricks/utils.py`           | Timestamps, enums, and what a file mode allows.                            |
+| `src/fsspec_databricks/_contrib/strategy/` | A copy of fsspec-alt-strategies: the strategies and the file objects.      |
+| `tests/`                                   | The tests, a file per module, and the dummy API server.                    |
 
 The runtime dependencies are fsspec, databricks-sdk, aiohttp and fsspec-alt-strategies. All Python commands go through
 [uv](https://docs.astral.sh/uv/).
@@ -164,11 +164,11 @@ Where the references leave behaviour open, the dummy makes an assumption, marked
 
 ## CI
 
-| Workflow       | Runs on                                   | Does                                               |
-|----------------|-------------------------------------------|----------------------------------------------------|
-| `ci.yaml`      | Pull requests, pushes to `main`, by hand  | Lint, offline tests, then live tests on each cloud |
-| `codeql.yaml`  | Pull requests, pushes to `main`, weekly, by hand | CodeQL scan of the Python code and the workflows |
-| `release.yaml` | Pushed `v*` tags                          | Build, GitHub release, and publishing to PyPI      |
+| Workflow       | Runs on                                          | Does                                               |
+|----------------|--------------------------------------------------|----------------------------------------------------|
+| `ci.yaml`      | Pull requests, pushes to `main`, by hand         | Lint, offline tests, then live tests on each cloud |
+| `codeql.yaml`  | Pull requests, pushes to `main`, weekly, by hand | CodeQL scan of the Python code and the workflows   |
+| `release.yaml` | Pushed `v*` tags                                 | Build, GitHub release, and publishing to PyPI      |
 
 `ci.yaml` has three jobs:
 
@@ -203,20 +203,20 @@ There are two exceptions:
 Each of the GitHub environments `aws`, `azure` and `gcp` is a Databricks workspace. The tests authenticate as a service
 principal with read-write access to the work directories.
 
-| Environment | Workspace                             | Authentication               |
-|-------------|---------------------------------------|------------------------------|
-| `aws`       | Databricks Free Edition, on AWS       | Client secret                |
-| `azure`     | Azure Databricks                      | `github-oidc-azure`          |
-| `gcp`       | Databricks on Google Cloud            | `github-oidc`                |
+| Environment | Workspace                       | Authentication      |
+|-------------|---------------------------------|---------------------|
+| `aws`       | Databricks Free Edition, on AWS | Client secret       |
+| `azure`     | Azure Databricks                | `github-oidc-azure` |
+| `gcp`       | Databricks on Google Cloud      | `github-oidc`       |
 
 Every environment has these:
 
-| Name                                               | Value                                          |
-|----------------------------------------------------|------------------------------------------------|
-| `DATABRICKS_HOST` (secret)                         | The workspace's URL                            |
-| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)    | The POSIX path of the Volume work directory    |
-| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable) | The POSIX path of the Workspace work directory |
-| `FSSPEC_DATABRICKS_TEST_FS` (variable, optional)   | The backends tested, e.g. `volume,workspace`   |
+| Name                                                 | Value                                                                |
+|------------------------------------------------------|----------------------------------------------------------------------|
+| `DATABRICKS_HOST` (secret)                           | The workspace's URL                                                  |
+| `FSSPEC_DATABRICKS_VOLUME_TEST_ROOT` (variable)      | The POSIX path of the Volume work directory                          |
+| `FSSPEC_DATABRICKS_WORKSPACE_TEST_ROOT` (variable)   | The POSIX path of the Workspace work directory                       |
+| `FSSPEC_DATABRICKS_TEST_FS` (variable, optional)     | The backends tested, e.g. `volume,workspace`                         |
 | `FSSPEC_DATABRICKS_TEST_SCOPES` (variable, optional) | The OAuth scopes of the secret, e.g. `files,workspace,unity-catalog` |
 
 The variable `DATABRICKS_AUTH_TYPE` chooses how the tests authenticate:
@@ -499,11 +499,11 @@ A failed request raises an `OSError`, chosen by its HTTP status or by the API's 
 On first open, the file system asks the workspace where file data goes, as SDK 0.163 asks: `GET /api/2.0/fs/endpoints`.
 The list names endpoints best first, and the file system keeps those it can speak:
 
-| Entry                         | Data goes                                                            |
-|-------------------------------|----------------------------------------------------------------------|
-| `IO_OFFLOAD`                  | Through presigned URLs, which the host's Files API 2.0 gives         |
-| `FILES_API` 2.0               | To the Files API 2.0 of the host. On another host, the storage proxy |
-| `FILES_API` 3.0               | To `/api/3.0/fs/files` of the host, a multipart upload by its ID     |
+| Entry           | Data goes                                                            |
+|-----------------|----------------------------------------------------------------------|
+| `IO_OFFLOAD`    | Through presigned URLs, which the host's Files API 2.0 gives         |
+| `FILES_API` 2.0 | To the Files API 2.0 of the host. On another host, the storage proxy |
+| `FILES_API` 3.0 | To `/api/3.0/fs/files` of the host, a multipart upload by its ID     |
 
 - An entry of another protocol, or with a malformed address, is skipped.
 - Plain HTTP is taken only for Files API 2.0 on another host, or on a workspace reached by plain HTTP. The SDK refuses

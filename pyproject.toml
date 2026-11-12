@@ -98,8 +98,6 @@ exclude = [
 exclude = [
     ".tox",
     "build",
-    "docs/source/conf.py",
-    "fsspec_databricks/_version",
     # Copied from fsspec-alt-strategies, and kept as it is there: see DEVELOPMENT.md.
     "src/fsspec_databricks/_contrib/strategy",
 ]
