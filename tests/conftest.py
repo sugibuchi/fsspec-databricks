@@ -70,6 +70,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "backend(*names): the backends a test needs: volume, workspace, dbfs"
     )
+    config.addinivalue_line(
+        "markers", "not_chosen: of an API that --api excludes, deselected"
+    )
 
 
 def _selected_api(config) -> str:
@@ -114,19 +117,25 @@ def pytest_generate_tests(metafunc):
     ):
         only = "dummy"
     if only and only not in _apis[chosen]:
-        reason = f"{only} only, not --api={chosen}"
-        values = [pytest.param(only, marks=pytest.mark.skip(reason=reason))]
+        # Deselected by pytest_collection_modifyitems: a run lists only what it can run.
+        values = [pytest.param(only, marks=pytest.mark.not_chosen)]
     else:
         values = [only] if only else _apis[chosen]
     metafunc.parametrize("api", values, scope="session")
 
 
 def pytest_collection_modifyitems(config, items):
+    """Deselect the tests of a backend not chosen, or of an API that --api excludes.
+
+    They are reported as deselected, not skipped one by one: a verbose live run then
+    lists the live tests only.
+    """
     selected = _selected_backends(config)
     keep, drop = [], []
     for item in items:
         names = {n for m in item.iter_markers("backend") for n in m.args}
-        (drop if names - selected else keep).append(item)
+        excluded = names - selected or item.get_closest_marker("not_chosen")
+        (drop if excluded else keep).append(item)
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep
