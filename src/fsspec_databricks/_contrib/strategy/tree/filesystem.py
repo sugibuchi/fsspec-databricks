@@ -83,16 +83,16 @@ class TreeFileSystem(_BaseFileSystem):
     - ``_mv_tree``, a storage's rename of a directory, which a recursive
       ``mv`` uses where ``renames_directories=True``.
 
-    Two limits bound its requests, each an `asyncio.Semaphore` of its own:
+    Two limits bound its requests, each an `asyncio.Semaphore`:
 
     - ``operation_limit``, the strategies' requests, such as listings,
       deletions and copies;
     - ``io_limit``, the reads and writes of data, by its files.
 
     ``storage_profile``, a `StorageProfile`, tells the strategies what the
-    storage does. It is required, unless ``_load_storage_profile`` is
-    overridden to find it with a request. `UNKNOWN` says the storage
-    is unknown, and the strategies then take the way right on any storage.
+    storage does. It is `UNKNOWN` by default, and the strategies then take the
+    way right on any storage. A subclass sets what it knows, or overrides
+    ``_load_storage_profile`` to find it with a request.
 
     A recursive ``mv``, or one of a single file, moves each file with
     ``_mv_file_entry``: the storage's rename, or a copy then a delete where it

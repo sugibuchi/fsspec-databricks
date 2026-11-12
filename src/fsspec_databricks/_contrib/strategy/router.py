@@ -295,9 +295,10 @@ class AsyncRoutingFileSystem(
         A subclass's ``_route`` makes its inner filesystems with it, e.g. one
         per volume, or per account and container. ``make`` gives them the
         router's mode and loop, ``asynchronous=self.asynchronous`` and
-        ``loop=self.loop``: a sync router's calls, e.g. ``open`` and ``sign``,
-        call their sync methods, which run on that loop. Made async, they would
-        have none. ``close()`` closes them.
+        ``loop=self.loop``. A sync router's calls, e.g. ``open`` and ``sign``,
+        call their sync methods, which run on that loop. Made with
+        ``asynchronous=True`` under a sync router, they would have no loop to
+        run on. ``close()`` closes them.
         """
         fs = self._backends.get(key)
         if fs is None:
@@ -589,9 +590,8 @@ class AsyncRoutingFileSystem(
         if self._intrans:
             pipe_file = AbstractFileSystem.pipe_file
             await self._in_transaction(path, pipe_file, path, value, **kwargs)
-            return
-
-        await self._forward(path, "_pipe_file", value, **kwargs)
+        else:
+            await self._forward(path, "_pipe_file", value, **kwargs)
 
     async def _get_file(self, rpath: str, lpath: str, **kwargs: Any) -> None:
         await self._forward(rpath, "_get_file", lpath, **kwargs)
@@ -599,10 +599,9 @@ class AsyncRoutingFileSystem(
     async def _put_file(self, lpath: str, rpath: str, **kwargs: Any) -> None:
         if self._intrans:
             await self._in_transaction(rpath, _put_file, lpath, rpath, **kwargs)
-            return
-
-        fs, inner = self._required(rpath)
-        await self._on(fs, inner, rpath, fs._put_file(lpath, inner, **kwargs))
+        else:
+            fs, inner = self._required(rpath)
+            await self._on(fs, inner, rpath, fs._put_file(lpath, inner, **kwargs))
 
     async def _in_transaction(
         self, path: str, write: Callable[..., None], *args: Any, **kwargs: Any

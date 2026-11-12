@@ -192,11 +192,7 @@ The live jobs hold the workspaces' credentials, so what they run is fixed:
   `contents: write` or `security-events: write`.
 - The live jobs and the release build use no cache.
 
-There are two exceptions:
-
-- ruff, zizmor and actionlint, run with `uvx`, are their latest versions, in a job without secrets.
-- Until fsspec-alt-strategies' next release, `test` and `live` check out the head of its `wip` branch, which no lock
-  pins. [The copy of fsspec-alt-strategies](#the-copy-of-fsspec-alt-strategies) says why.
+ruff, zizmor and actionlint, run with `uvx`, are the exception: CI runs their latest versions, in a job without secrets.
 
 ### Environments
 
@@ -669,20 +665,15 @@ installed.
 ### The copy of fsspec-alt-strategies
 
 `src/fsspec_databricks/_contrib/strategy/` is a copy of the package `fsspec-alt-strategies-impl` from
-[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), from its `wip` branch after 0.3.0: its
-`_version.py` names the commit. Its modules keep their license headers and relative imports, and ruff skips them.
-Its `LICENSE` stays with them.
+[fsspec-alt-strategies](https://github.com/sugibuchi/fsspec-alt-strategies), version 0.4.0. Its modules keep their
+license headers and relative imports, and ruff skips them. Its `LICENSE` stays with them.
 
 It keeps only what the backends use: `tree/`, `common/`, `files/`, `router.py`, and `wrapper/` with only its tree
 wrapper. The backends are all trees, so the router never imports `flat/`. `monitored()` is unused, so its `monitor.py`,
 and the `__init__.py` re-exporting it, are left out: the copy is a namespace package. `_version.py` stays, as the
 copy's command line recognises a previous copy by it.
 
-Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.3,<0.4`. Until the library's
-next release, `[tool.uv.sources]` takes it from a checkout of the library's `wip` branch beside this repository, at
-`../fsspec-alt-strategies`, as the copy needs what 0.3.0 lacks, e.g. `UNKNOWN`. CI's `test` and `live` jobs check
-it out there too. A release built meanwhile would install 0.3.0 from PyPI, and fail on import. So this package's next
-release waits for the library's. `[tool.uv.sources]` and the checkouts then go.
+Their shared interface is not copied. It is the dependency `fsspec-alt-strategies>=0.4,<0.5`, from PyPI.
 
 The bounds stop at the copy's minor version. Before 1.0, a minor release of the interface may break the copy, and the
 copy never changes in an installed release.

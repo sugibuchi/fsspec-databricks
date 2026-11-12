@@ -126,16 +126,16 @@ class _BaseFileSystem(AsyncFileSystem, Monitored, metaclass=_AbstractFileSystemM
         """Find the profile, with a path the storage may be asked at: here, ``storage_profile``.
 
         A subclass overrides it where the profile is found by a request, e.g.
-        whether an account has a hierarchical namespace, which a credential
-        limited to a container may be asked only there. ``path`` is one of the
-        paths the operation needing the profile is given, maybe a glob pattern.
-        It tells where to ask, never what the profile is: the profile is one
-        for the whole filesystem.
+        whether an account has a hierarchical namespace. A credential limited
+        to a container may ask that only within the container. ``path`` is one
+        of the paths the operation needing the profile is given, maybe a glob
+        pattern. It tells where to ask, never what the profile is: the profile
+        is one for the whole filesystem.
 
         `_get_storage_profile` sets what it returns as ``storage_profile``,
         then never calls it again. One that cannot tell at ``path`` raises: the
-        next path is tried, or the next operation's. Returning
-        ``UNKNOWN`` instead keeps it, right on any storage.
+        next path is tried, or the next operation's. Returning ``UNKNOWN``
+        instead sets that for good, which is right on any storage.
         """
         return self.storage_profile
 
