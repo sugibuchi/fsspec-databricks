@@ -163,16 +163,8 @@ keeps a file invisible in its own way:
 | Workspace files | The file is held in memory                     | The file is uploaded         | Nothing is uploaded   |
 | Legacy DBFS     | The file is written to a hidden temporary path | The file is moved into place | The file is deleted   |
 
-Limits:
-
-- The files are committed one after another. A transaction is not atomic across files or backends.
-- Only files written with `open`, `pipe_file` or `put_file` join the transaction. Copies, moves and deletes take
-  effect at once.
-- Files opened with `open_async` take no part in the transaction.
-- On legacy DBFS, other clients may see the temporary file. Commit deletes the file it replaces, then moves the new one:
-  two requests.
-- Exclusive creation, mode `"x"`, is checked when opening. Legacy DBFS checks it again on commit.
-- If the process dies, Volume parts stay until the storage expires them, and DBFS temporary files stay.
+Exclusive creation, mode `"x"`, is checked when opening. Legacy DBFS checks it again on commit. See
+[Limitations](#transactions-1) for what a transaction does not cover.
 
 ### POSIX paths
 
@@ -243,8 +235,8 @@ endpoints that the workspace names, as the Databricks SDK uses them.
 
 Reads and writes retry after transient server errors. A file replaced while it is read fails with an `OSError`.
 
-A copy reads the file and writes it again, as the Files API cannot copy. It uses the options for reads and writes. A
-move is a copy, then a delete. It replaces an existing file at the destination.
+A copy uses the options for reads and writes, as it reads the file and writes it again. A move replaces an existing
+file at the destination.
 
 ### Modes
 
@@ -253,8 +245,6 @@ move is a copy, then a delete. It replaces an existing file at the destination.
 | `rb`  | Yes       |                                  |
 | `wb`  | Yes       |                                  |
 | `xb`  | Yes       | Fails if the file already exists |
-| `ab`  | No        |                                  |
-| `r+b` | No        |                                  |
 
 ### Options for Volumes
 
@@ -293,8 +283,6 @@ fs.ls("dbfs:/Workspace/Users/alice@example.com/")
 with fs.open("dbfs:/Workspace/Users/alice@example.com/data.csv", "rb") as f:
     data = f.read()
 ```
-
-Files are at most 10 MB, the Workspace API's limit.
 
 ### Notebooks
 
@@ -341,7 +329,6 @@ A new notebook needs `language`: `"PYTHON"`, `"SCALA"`, `"SQL"` or `"R"`. An exi
 | `wb`  | Yes       |                                  |
 | `ab`  | Yes       |                                  |
 | `xb`  | Yes       | Fails if the file already exists |
-| `r+b` | No        |                                  |
 
 ---
 
@@ -359,7 +346,7 @@ with fs.open("dbfs:/mnt/my-mount/data.csv", "rb") as f:
 - A move is the API's own, one request even for a folder.
 - `rmdir` refuses a folder that is not empty.
 - Reads fetch ranges of up to 1 MB concurrently, limited by `io_concurrency`.
-- Files are written in order: `ab` and `r+b` are not supported.
+- Files open in `rb`, `wb` and `xb`.
 - On a workspace without legacy DBFS, DBFS paths raise `PermissionError`, and `ls("/")` lists `/Volumes` and
   `/Workspace`.
 
@@ -373,3 +360,30 @@ Databricks has deprecated legacy DBFS. The README's [Status](README.md#status) s
 
 No file system of this package caches a listing: every call reaches Databricks, and `use_listings_cache` is always
 `False`. We have no plan to implement fsspec's `dircache` listing cache for now.
+
+### File modes
+
+- Volumes and legacy DBFS open files in `rb`, `wb` and `xb` only, as their files are written in order. `ab` and
+  `r+b` raise `io.UnsupportedOperation`.
+- Workspace files take no update mode: `r+b` raises `io.UnsupportedOperation`.
+- `open_async` opens binary files only, without compression, as fsspec's does.
+
+### Workspace files
+
+Files are at most 10 MB, the Workspace API's limit.
+
+### Copies and moves
+
+- A copy within Volumes goes through this process: the Files API cannot copy, so it reads the file and writes it again.
+- A move within Volumes is not atomic: a copy, then a delete.
+- Between two backends, a move is not atomic either: each file is copied, then deleted.
+
+### Transactions
+
+- The files are committed one after another. A transaction is not atomic across files or backends.
+- Only files written with `open`, `pipe_file` or `put_file` join the transaction. Copies, moves and deletes take
+  effect at once.
+- Files opened with `open_async` take no part in the transaction.
+- On legacy DBFS, other clients may see the temporary file. Commit deletes the file it replaces, then moves the new one:
+  two requests.
+- If the process dies, Volume parts stay until the storage expires them, and DBFS temporary files stay.
