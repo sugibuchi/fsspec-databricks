@@ -371,16 +371,5 @@ Databricks has deprecated legacy DBFS. The README's [Status](README.md#status) s
 
 ### No directory cache
 
-fsspec lets a file system keep the listings it reads, in a directory cache, and leaves invalidating it to the caller.
 No file system of this package caches a listing: every call reaches Databricks, and `use_listings_cache` is always
-`False`.
-
-Many clients now work on the same storage:
-
-- within one Python process, fsspec, PyArrow's own file systems, and the Rust `object_store` that Polars and delta-rs
-  use;
-- across processes, services such as Databricks, Amazon EMR and Microsoft Fabric, run by different users.
-
-Most of these clients keep no directory cache. A cache in fsspec assumes that fsspec alone changes the storage, and
-invalidating it by hand cannot keep it consistent with the others. So this package takes the safe side: it will not
-implement directory caching.
+`False`. We have no plan to implement fsspec's `dircache` listing cache for now.
