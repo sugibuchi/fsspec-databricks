@@ -934,14 +934,14 @@ wheels = [
 
 [[package]]
 name = "fsspec-alt-strategies"
-version = "0.4.0"
+version = "0.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fsspec" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4f/8f/5d147ff36ab6649ac109d05012dbc765f4507818bc4b798535fc83d5372b/fsspec_alt_strategies-0.4.0.tar.gz", hash = "sha256:b3538e79e3cd93823d50f04c62cbbad10606e8e24ffbc59accda8d29c1eae7dc", size = 17147, upload-time = "2026-11-12T00:14:54.754Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/d1/5739c54939299cf76667ef5453e4e046a5814010264fc75728ae4587b259/fsspec_alt_strategies-0.4.1.tar.gz", hash = "sha256:2dd1545572a564feef0daeb7e9310ec8e90047174724c8800122db40d259d8a2", size = 17149, upload-time = "2026-11-12T01:13:36.914Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ba/ea/55893b1b280516b5804b0b6cd8c625304a9cdd72ef8e7e0ce8802bbd4c5f/fsspec_alt_strategies-0.4.0-py3-none-any.whl", hash = "sha256:9aa45fc750840160a0e361ef9b6014652c900c9563929d26438c5917618615bd", size = 18637, upload-time = "2026-11-12T00:14:53.35Z" },
+    { url = "https://files.pythonhosted.org/packages/58/a0/ea7e0a7eabdae78bdbd1cb3fc38fc9c893fcf4913e06c34c0e9ac9958488/fsspec_alt_strategies-0.4.1-py3-none-any.whl", hash = "sha256:3d9844a376acfc0b06f1ec9c76ff597cf9273bdf60b317c8da23429fb42bdb74", size = 18635, upload-time = "2026-11-12T01:13:35.663Z" },
 ]
 
 [[package]]
